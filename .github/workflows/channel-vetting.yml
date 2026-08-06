@@ -16,9 +16,6 @@ on:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: channel-vetting
 
     steps:
       - name: Check out repo
@@ -41,8 +38,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            channel-vetting/quota_log.json
-            channel-vetting/search_cache.json
+            quota_log.json
+            search_cache.json
           key: channel-vetting-state-${{ github.run_id }}
           restore-keys: |
             channel-vetting-state-

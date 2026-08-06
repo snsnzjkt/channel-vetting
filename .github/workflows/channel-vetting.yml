@@ -1,0 +1,66 @@
+name: Channel Vetting Pipeline
+
+on:
+  schedule:
+    # 09:00 UTC = 1-2am Pacific, safely after the YouTube quota resets at
+    # midnight Pacific Time. Adjust cadence here (e.g. to a weekly
+    # "0 9 * * 1" for Mondays) if daily discovery is more than you need.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "Run in --test mode (1 keyword, 5 results)"
+        type: boolean
+        default: false
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: channel-vetting
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Persists quota_log.json / search_cache.json across runs so a
+      # same-day manual re-run (workflow_dispatch) doesn't lose track of
+      # quota already spent or re-search a keyword already cached today.
+      # Not load-bearing for a once-daily schedule — quota_tracker.py's
+      # own Pacific-Time day-keying is what actually enforces the reset.
+      - name: Restore quota + search cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            channel-vetting/quota_log.json
+            channel-vetting/search_cache.json
+          key: channel-vetting-state-${{ github.run_id }}
+          restore-keys: |
+            channel-vetting-state-
+
+      - name: Run pipeline (full)
+        if: github.event_name == 'schedule' || github.event.inputs.test_mode != 'true'
+        env:
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: python main.py
+
+      - name: Run pipeline (test mode)
+        if: github.event.inputs.test_mode == 'true'
+        env:
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+          AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: python main.py --test

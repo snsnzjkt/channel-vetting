@@ -1,0 +1,10 @@
+.env
+search_cache.json
+quota_log.json
+venv/
+.venv/
+__pycache__/
+*.pyc
+.claude
+CLAUDE.md
+.superpowers

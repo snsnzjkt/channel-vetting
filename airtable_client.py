@@ -70,6 +70,47 @@ def get_existing_channel_ids(table_name: str) -> set[str]:
     return existing_ids
 
 
+def get_records_missing_email(table_name: str) -> list[str]:
+    """
+    Paginate through `table_name` and collect the Channel ID of every
+    record that has a Channel ID but no Email value yet — candidates for
+    a backfill pass (re-enrich + re-run the email fallback chain) without
+    re-running discovery.
+    """
+    channel_ids: list[str] = []
+    offset = None
+    formula = "AND({Channel ID} != '', {Email} = '')"
+
+    while True:
+        params = {"fields[]": "Channel ID", "filterByFormula": formula, "pageSize": 100}
+        if offset:
+            params["offset"] = offset
+
+        try:
+            resp = requests.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+        except requests.RequestException as e:
+            logger.error("Airtable request failed while paginating records missing email (%s): %s", table_name, e)
+            break
+
+        if resp.status_code != 200:
+            logger.error("Airtable get_records_missing_email failed (%s): %s %s", table_name, resp.status_code, resp.text)
+            break
+
+        data = resp.json()
+        for record in data.get("records", []):
+            channel_id = record.get("fields", {}).get("Channel ID")
+            if channel_id:
+                channel_ids.append(channel_id)
+
+        offset = data.get("offset")
+        if not offset:
+            break
+        time.sleep(API_SLEEP_SECONDS)
+
+    logger.info("Found %d record(s) missing an email in table '%s'.", len(channel_ids), table_name)
+    return channel_ids
+
+
 def channel_exists(table_name: str, channel_id: str) -> str | None:
     """
     Look up a single channel by Channel ID via filterByFormula.
@@ -90,6 +131,24 @@ def channel_exists(table_name: str, channel_id: str) -> str | None:
 
     records = resp.json().get("records", [])
     return records[0]["id"] if records else None
+
+
+def delete_record(table_name: str, record_id: str) -> bool:
+    """
+    Permanently delete a single record from `table_name`. No undo on our
+    end — callers must be certain before calling this.
+    """
+    try:
+        resp = requests.delete(f"{_base_url(table_name)}/{record_id}", headers=_headers(), timeout=30)
+    except requests.RequestException as e:
+        logger.error("Airtable request failed while deleting %s from %s: %s", record_id, table_name, e)
+        return False
+
+    if resp.status_code != 200:
+        logger.error("Airtable delete_record failed for %s in %s: %s %s", record_id, table_name, resp.status_code, resp.text)
+        return False
+
+    return True
 
 
 def push_record(table_name: str, record: dict) -> bool:

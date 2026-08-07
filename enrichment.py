@@ -24,6 +24,21 @@ logger = logging.getLogger(__name__)
 
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 URL_PATTERN = re.compile(r"https?://([a-zA-Z0-9.\-]+)", re.IGNORECASE)
+HANDLE_PATTERN = re.compile(r"@([a-zA-Z0-9_.\-]+)")
+
+
+def normalize_handle(raw: str) -> str:
+    """
+    Extract and normalize a YouTube @handle from either a full URL (e.g.
+    "https://www.youtube.com/@Foo/videos") or a bare handle ("@Foo" or the
+    raw value channels.list returns in snippet.customUrl). Returns "" if
+    no @handle is present (e.g. a legacy /c/ or /user/ channel that never
+    set one — those can't be matched this way).
+    """
+    if not raw:
+        return ""
+    match = HANDLE_PATTERN.search(raw)
+    return match.group(1).lower() if match else ""
 
 # A one-off email mention in a single video's description is weak evidence
 # (could be a shoutout, a giveaway, someone else's contact, etc.). Seeing
@@ -31,17 +46,80 @@ URL_PATTERN = re.compile(r"https?://([a-zA-Z0-9.\-]+)", re.IGNORECASE)
 # stronger signal it's the creator's actual standing contact email.
 EMAIL_MIN_VIDEO_REPEATS = 3
 
-# Shared platforms/link-aggregators are never the creator's own business
-# domain — running a Hunter.io Domain Search against these would return
-# that platform's corporate emails, not the creator's own.
-DOMAIN_BLOCKLIST = {
+# How many recent videos to pull descriptions from when hunting for a
+# contact email. 50 is the API maximum for both playlistItems.list and a
+# single videos.list call, and — crucially — costs exactly the same 2
+# quota units as asking for 10 would. More description text is free, so
+# there is no reason to ask for less.
+EMAIL_SCAN_SAMPLE_SIZE = 50
+
+# ...but the performance metrics stay on the most recent 10 videos. The
+# Airtable column is literally named "Avg Views (last 10 videos)", and
+# widening this window would shift avg views, engagement rate and upload
+# cadence — and therefore Overall Score — for every newly processed
+# channel, making them incomparable with the records already in the base.
+# Widen the email scan, hold the scoring baseline still.
+PERFORMANCE_SAMPLE_SIZE = 10
+
+# Domains belonging to a third party that routinely shows up in creator
+# descriptions — shared platforms, link-aggregators, payment/tip/coupon
+# services, freelance marketplaces and no-code tools (sponsor plugs, tip
+# jars, "logo by ..."). An address or website at one of these is that
+# service's, never the creator's. Confirmed necessary in testing: a
+# Coupert affiliate link produced Coupert's own support email via
+# Hunter, and a "Cash App tip jar" mention produced an "@cash.app" match
+# via the repeated-email path.
+THIRD_PARTY_DOMAINS = {
     "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com",
     "x.com", "facebook.com", "fb.com", "linktr.ee", "linktree.com",
     "beacons.ai", "beacons.page", "discord.gg", "discord.com", "patreon.com",
     "twitch.tv", "amzn.to", "amazon.com", "bit.ly", "goo.gl", "linkedin.com",
-    "threads.net", "snapchat.com", "pinterest.com", "reddit.com", "gmail.com",
+    "threads.net", "snapchat.com", "pinterest.com", "reddit.com",
     "google.com", "apple.com", "spotify.com",
+    # Payment / tip-jar / coupon-referral services
+    "cash.app", "venmo.com", "paypal.com", "paypal.me", "buymeacoffee.com",
+    "ko-fi.com", "coupert.com", "honey.com",
+    # URL shorteners — the shortener's own domain, not the (unknown)
+    # destination, is what gets queried, so these can never be trusted.
+    "tinyurl.com", "t.co", "ow.ly", "rebrand.ly", "is.gd", "tiny.cc", "cutt.ly",
+    # Generic freelance-marketplace / form-builder / no-code tool platforms
+    # creators routinely credit or link to (a logo designer's Fiverr gig, a
+    # Tally.so submission form, a Canva design, etc.) — confirmed in
+    # testing: these produce that PLATFORM's own business email via Hunter,
+    # not the creator's, even when the creator is using the tool themselves.
+    "fiverr.com", "upwork.com", "freelancer.com", "99designs.com",
+    "tally.so", "typeform.com", "forms.gle", "docs.google.com",
+    "calendly.com", "canva.com", "elink.io",
 }
+
+# Free consumer mail providers. Unlike THIRD_PARTY_DOMAINS these are NOT
+# someone else's domain — a creator's real contact address is very often
+# a gmail one. They are worthless only as a Hunter Domain Search *target*
+# ("find me an address at gmail.com" matches millions of strangers).
+FREEMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "msn.com", "yahoo.com", "ymail.com", "aol.com", "icloud.com", "me.com",
+    "mac.com", "protonmail.com", "proton.me", "gmx.com", "gmx.de",
+    "mail.com", "zoho.com", "yandex.com", "yandex.ru", "fastmail.com",
+}
+
+# Two different questions, deliberately two different lists.
+#
+# What can never be the creator's own *website domain* to hand to
+# Hunter's Domain Search — third-party services plus freemail.
+DOMAIN_SEARCH_BLOCKLIST = THIRD_PARTY_DOMAINS | FREEMAIL_DOMAINS
+
+# What can never be the creator's own *email address* — third-party
+# services ONLY. Freemail is deliberately absent: folding these two
+# lists into one silently discarded every @gmail.com match, which is by
+# far the most common kind of creator contact address (53% of the
+# addresses this pipeline had collected at the time this was split).
+EMAIL_DOMAIN_BLOCKLIST = THIRD_PARTY_DOMAINS
+
+
+def _email_domain_blocked(email: str) -> bool:
+    domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+    return domain in EMAIL_DOMAIN_BLOCKLIST
 
 
 def extract_candidate_domain(text: str) -> str:
@@ -49,7 +127,8 @@ def extract_candidate_domain(text: str) -> str:
     Best-effort extraction of what looks like the creator's own website
     domain from free text (channel/video descriptions), for use as a
     Hunter.io Domain Search query. Skips known social/link-aggregator
-    platforms, which are never the creator's own business domain.
+    platforms and freemail providers (DOMAIN_SEARCH_BLOCKLIST), neither
+    of which is ever the creator's own searchable business domain.
     """
     if not text:
         return ""
@@ -57,7 +136,7 @@ def extract_candidate_domain(text: str) -> str:
         domain = match.group(1).lower()
         if domain.startswith("www."):
             domain = domain[4:]
-        if domain and domain not in DOMAIN_BLOCKLIST:
+        if domain and domain not in DOMAIN_SEARCH_BLOCKLIST:
             return domain
     return ""
 
@@ -77,8 +156,10 @@ def extract_business_email(description: str) -> str:
     """
     if not description:
         return ""
-    match = EMAIL_PATTERN.search(description)
-    return match.group(0) if match else ""
+    for candidate in EMAIL_PATTERN.findall(description):
+        if not _email_domain_blocked(candidate):
+            return candidate
+    return ""
 
 
 def find_repeated_email(video_descriptions: list[str]) -> str:
@@ -95,7 +176,9 @@ def find_repeated_email(video_descriptions: list[str]) -> str:
             continue
         # dedupe within a single video's description so one video that
         # happens to print the same address twice doesn't inflate its count
-        emails_in_video = set(EMAIL_PATTERN.findall(description))
+        emails_in_video = {
+            e for e in set(EMAIL_PATTERN.findall(description)) if not _email_domain_blocked(e)
+        }
         video_counter.update(emails_in_video)
 
     if not video_counter:
@@ -151,18 +234,33 @@ def get_channel_stats(channel_id: str) -> dict | None:
         "uploads_playlist_id": uploads_playlist_id,
         "description": snippet.get("description", ""),
         "business_email": extract_business_email(snippet.get("description", "")),
+        # "" for legacy /c/ or /user/ channels that never set an @handle —
+        # those can't be matched against the @handle-only external tables.
+        "handle": normalize_handle(snippet.get("customUrl", "")),
     }
 
 
-def get_recent_video_performance(channel_id: str, uploads_playlist_id: str, max_results: int = 10) -> dict | None:
+def get_recent_video_performance(
+    channel_id: str,
+    uploads_playlist_id: str,
+    max_results: int = EMAIL_SCAN_SAMPLE_SIZE,
+) -> dict | None:
     """
     Pull the last `max_results` videos from the channel's uploads playlist
-    and fetch their stats to compute avg views, avg engagement rate, and
-    upload dates.
+    and fetch their stats.
+
+    Two different window sizes come out of this one pair of calls:
+
+    - Email scanning reads all `max_results` descriptions (default 50).
+    - avg views / engagement rate / upload cadence are computed over only
+      the newest PERFORMANCE_SAMPLE_SIZE (10) videos, so those figures —
+      and the Overall Score built on them — stay comparable with records
+      already in Airtable under the "Avg Views (last 10 videos)" column.
 
     Quota cost: 1 unit for playlistItems.list + 1 unit for videos.list
     (a single videos.list call handles up to 50 IDs at once, so this is
-    always exactly 2 units regardless of max_results <= 50).
+    always exactly 2 units regardless of max_results <= 50 — which is why
+    scanning 50 descriptions instead of 10 is free).
 
     Returns None if the channel has no accessible uploads playlist (e.g.
     channel has zero public videos).
@@ -186,7 +284,10 @@ def get_recent_video_performance(channel_id: str, uploads_playlist_id: str, max_
 
     items = resp.json().get("items", [])
     video_ids = [i["contentDetails"]["videoId"] for i in items if i.get("contentDetails", {}).get("videoId")]
-    upload_dates = [i["contentDetails"].get("videoPublishedAt") for i in items]
+    # playlistItems returns newest-first, so the leading slice is "the last
+    # N videos" — the window upload cadence is measured over, matching the
+    # performance window below rather than the wider email-scan window.
+    upload_dates = [i["contentDetails"].get("videoPublishedAt") for i in items[:PERFORMANCE_SAMPLE_SIZE]]
     upload_dates = [d for d in upload_dates if d]
 
     if not video_ids:
@@ -215,29 +316,46 @@ def get_recent_video_performance(channel_id: str, uploads_playlist_id: str, max_
     if not video_items:
         return None
 
+    # Select the performance window by video ID rather than by slicing
+    # video_items, since videos.list gives no ordering guarantee — the
+    # authoritative "newest first" order is the playlistItems one.
+    performance_ids = set(video_ids[:PERFORMANCE_SAMPLE_SIZE])
+
     total_views = 0
     total_engagements = 0  # likes + comments
+    performance_count = 0
     content_language = ""
     video_descriptions = []
     for v in video_items:
-        stats = v.get("statistics", {})
-        total_views += int(stats.get("viewCount", 0))
-        total_engagements += int(stats.get("likeCount", 0)) + int(stats.get("commentCount", 0))
-
         snippet = v.get("snippet", {})
+        # Every fetched video feeds the email scan — that's the whole
+        # point of pulling EMAIL_SCAN_SAMPLE_SIZE of them.
         video_descriptions.append(snippet.get("description", ""))
         if not content_language:
             content_language = snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or ""
 
-    n = len(video_items)
-    avg_views = total_views / n
+        # ...but only the newest PERFORMANCE_SAMPLE_SIZE feed the metrics.
+        if v.get("id") not in performance_ids:
+            continue
+        stats = v.get("statistics", {})
+        total_views += int(stats.get("viewCount", 0))
+        total_engagements += int(stats.get("likeCount", 0)) + int(stats.get("commentCount", 0))
+        performance_count += 1
+
+    if not performance_count:
+        logger.warning("Channel %s returned no videos in the performance window — skipping.", channel_id)
+        return None
+
+    avg_views = total_views / performance_count
     avg_engagement_rate = (total_engagements / total_views * 100) if total_views > 0 else 0.0
 
     return {
         "avg_views": avg_views,
         "avg_engagement_rate": avg_engagement_rate,
         "upload_dates": upload_dates,
-        "sample_size": n,
+        # Size of the *performance* window (still 10), not the email scan.
+        "sample_size": performance_count,
+        "email_scan_size": len(video_descriptions),
         # Most creators never set this, so it's frequently "" (Unknown) —
         # best-effort only, not a guaranteed signal.
         "content_language": content_language,

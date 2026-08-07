@@ -12,7 +12,10 @@ channels into Airtable for human review.
 2. **Pre-filter** — candidates already present in your Airtable base are
    dropped before any enrichment quota is spent on them.
 3. **Enrichment** (`enrichment.py`) — pulls subscriber/view counts and the
-   last 10 videos' performance for each remaining candidate.
+   last 10 videos' performance for each remaining candidate. It also reads
+   the last 50 videos' descriptions looking for a contact email — a wider
+   window that costs no extra quota, since the underlying calls are billed
+   per-call rather than per-video.
 4. **Scoring** (`scoring.py`) — computes a fake-follower risk score and a
    weighted overall score.
 5. **Airtable push** (`airtable_client.py`) — creates or updates a row per
@@ -56,8 +59,9 @@ budget.
    > button specifically to block scraping, and this pipeline does not
    > attempt to bypass that). Instead, it does a best-effort regex scan
    > for a plain-text email, preferring one that recurs across at least
-   > `EMAIL_MIN_VIDEO_REPEATS` (default 3) of the channel's sampled video
-   > descriptions — a much more reliable "this is their real contact"
+   > `EMAIL_MIN_VIDEO_REPEATS` (default 3) of the channel's last
+   > `EMAIL_SCAN_SAMPLE_SIZE` (default 50) video descriptions — a much
+   > more reliable "this is their real contact"
    > signal than a single mention — and falling back to the channel's
    > About description if no repeated one is found. If both come up
    > empty and `HUNTER_API_KEY` is set (see step 4), a last-resort
@@ -127,6 +131,36 @@ venv\Scripts\activate        # Windows
 # source venv/bin/activate   # macOS/Linux
 pip install -r requirements.txt
 ```
+
+### 4b. Optional: add CloakBrowser for site testing
+
+If you want to test a site with a stealth Chromium wrapper, this repo
+now includes a small smoke-test script:
+
+```bash
+python cloakbrowser_test.py --url https://example.com
+```
+
+For protected sites, CloakBrowser also supports headed mode, humanized
+mouse/keyboard behavior, and proxies:
+
+```bash
+python cloakbrowser_test.py --url https://target-site.example --headed --humanize --proxy http://user:pass@host:port
+```
+
+If you have a CloakBrowser license key, set `CLOAKBROWSER_LICENSE_KEY`
+before running the script. On first run, the wrapper downloads its own
+Chromium binary automatically.
+
+To try the browser-backed email backfill path on already-tracked records,
+run:
+
+```bash
+python backfill_missing_emails.py --use-cloakbrowser
+```
+
+That keeps Hunter.io disabled and only adds a public-page browser check
+for text already visible in the channel's About page.
 
 ### 5. Configure environment variables
 

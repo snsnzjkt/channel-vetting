@@ -1,10 +1,12 @@
 """
-Hunter.io Domain Search integration: a last-resort email-finder fallback.
+Hunter.io integration: a last-resort email-finder fallback (Domain
+Search) plus an email verifier for checking deliverability of emails
+already on file.
 
-Only called when our own free extraction (a repeated email across a
-channel's videos, or a single mention in its About description) finds
-nothing — Hunter is a metered third-party service, so this is meant to
-fill genuine coverage gaps, not to be the primary source.
+Domain Search is only called when our own free extraction (a repeated
+email across a channel's videos, or a single mention in its About
+description) finds nothing — Hunter is a metered third-party service, so
+this is meant to fill genuine coverage gaps, not to be the primary source.
 """
 import logging
 

@@ -30,6 +30,15 @@ YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 # nothing. Leave unset to disable — the pipeline runs fine without it.
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY")
 
+# --- Modash (optional) ---
+# Creator-database email lookup, keyed on the YouTube channel ID rather
+# than a guessed company domain — which is why it reaches creators Hunter
+# structurally cannot (a creator whose contact is a plain gmail address
+# has no company domain for Hunter to search).
+# Metered: 1 credit per successful profile report. Leave unset to disable.
+MODASH_API_KEY = os.getenv("MODASH_API_KEY")
+MODASH_API_BASE_URL = "https://api.modash.io/v1"
+
 # --- Quota management ---
 # Free tier daily allotment is 10,000 units. We cap ourselves below that
 # to leave headroom for enrichment calls (channels/playlistItems/videos.list)

@@ -12,7 +12,13 @@ load_dotenv()
 # --- Airtable ---
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Channel Prospects")
+
+# One table per niche (see NICHES in main.py) — each niche's discovered
+# channels are pre-filtered, deduped, and pushed against its own table
+# independently, so a channel can legitimately appear in both if it's
+# relevant to both niches.
+AIRTABLE_TABLE_HOME_THEATER = os.getenv("AIRTABLE_TABLE_HOME_THEATER")
+AIRTABLE_TABLE_LIFESTYLE_SOFA = os.getenv("AIRTABLE_TABLE_LIFESTYLE_SOFA")
 
 # --- YouTube ---
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")

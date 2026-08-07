@@ -32,13 +32,19 @@ budget.
 4. Add scopes: `data.records:read` and `data.records:write`.
 5. Add access to the specific base you'll use for this project.
 6. Click **Create token** and copy the value — it's shown only once.
-7. In your base, make sure a table named **Channel Prospects** exists with
-   these fields: Channel Name, Channel URL, Channel ID, Subscriber Count,
-   Avg Views (last 10 videos), Engagement Rate, Upload Frequency (Single
-   line text — see note below), Content Language, Email (Single
-   line text), Fake Follower Risk Score, Overall Score, Status (single
-   select: New/Reviewing/Approved/Rejected/Contacted), Source, Notes, Date
-   Added.
+7. In your base, create **one table per niche** (currently: Home Theater
+   and Lifestyle Sofa — see `NICHES` in `main.py`). Easiest way: build one
+   table with the schema below, then right-click its tab → **Duplicate
+   table → Duplicate table structure only** for each additional niche, so
+   every table has an identical field set. Each table needs: Channel
+   Name, Channel URL, Channel ID, Subscriber Count, Avg Views (last 10
+   videos), Engagement Rate, Upload Frequency (Single line text — see
+   note below), Content Language, Email (Single line text), Fake Follower
+   Risk Score, Overall Score, Status (single select:
+   New/Reviewing/Approved/Rejected/Contacted), Source, Notes, Date Added.
+
+   Grab each table's ID (open the table → **Help → API documentation**,
+   or read it from the URL — the `tbl...` segment) for step 4.
 
    > `Upload Frequency` is written as a formatted string (e.g. `"2.5
    > videos/month"`), not a raw number — if you make it a Number field
@@ -93,17 +99,20 @@ copy .env.example .env        # Windows
 ```
 
 Fill in `.env` with your `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`,
-`AIRTABLE_TABLE_NAME` (defaults to `Channel Prospects`), and
-`YOUTUBE_API_KEY`.
+`AIRTABLE_TABLE_HOME_THEATER`, `AIRTABLE_TABLE_LIFESTYLE_SOFA` (the two
+table IDs from step 1.7), and `YOUTUBE_API_KEY`.
 
-### 5. Edit your keywords
+### 5. Edit your keywords / niches
 
-`main.py`'s `KEYWORDS` list currently holds real terms pulled from the
-Types of Content Posting (Primary) sections of the "Lifestyle Sofa" and
-"Home Theater" Influencer Profiling briefs (Cynthia Lim, 15 April 2024).
-Add/replace terms as new niche briefs come in — pull from a brief's actual
-content-type list, not its demographic/psychographic sections (those
-describe the audience, not searchable video topics).
+`main.py`'s `NICHES` dict holds one entry per niche — its search keywords
+(real terms pulled from the Types of Content Posting > Primary sections of
+the "Lifestyle Sofa" and "Home Theater" Influencer Profiling briefs,
+Cynthia Lim, 15 April 2024) and which Airtable table it pushes to.
+Add/replace keywords as new niche briefs come in — pull from a brief's
+actual content-type list, not its demographic/psychographic sections
+(those describe the audience, not searchable video topics). To add a
+whole new niche, add a new `NICHES` entry plus a matching env var and
+Airtable table.
 
 ### 6. Run the test flow first
 
@@ -111,10 +120,10 @@ describe the audience, not searchable video topics).
 python main.py --test
 ```
 
-This runs with 1 keyword and `max_results=5`, so it costs at most ~100
-units of search quota plus a handful of enrichment units — enough to
-confirm YouTube and Airtable are both wired up correctly without burning
-a meaningful chunk of your daily budget.
+This runs with 1 keyword, `max_results=5`, on the first niche only, so it
+costs at most ~100 units of search quota plus a handful of enrichment
+units — enough to confirm YouTube and Airtable are both wired up
+correctly without burning a meaningful chunk of your daily budget.
 
 ### 7. Run the full pipeline
 
@@ -130,7 +139,7 @@ python main.py
 | `discovery.py` | `search.list`-based channel discovery + per-day search cache |
 | `enrichment.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
 | `scoring.py` | Fake-follower risk heuristic + weighted overall score |
-| `airtable_client.py` | Dedupe check, create/update records |
+| `airtable_client.py` | Dedupe check, create/update records (per-table, one table per niche) |
 | `quota_tracker.py` | Daily quota spend log (resets at midnight Pacific Time) |
 | `main.py` | Orchestrates the full pipeline; `--test` flag for smoke testing |
 
@@ -142,11 +151,12 @@ can also be triggered manually from the Actions tab, with an option to run
 in `--test` mode.
 
 Setup:
-1. Push this repo to GitHub (see git commands below).
+1. Push this repo to GitHub.
 2. In the repo, go to **Settings > Secrets and variables > Actions > New
-   repository secret** and add four secrets: `AIRTABLE_TOKEN`,
-   `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_NAME`, `YOUTUBE_API_KEY` — same
-   values as your local `.env`.
+   repository secret** and add five secrets: `AIRTABLE_TOKEN`,
+   `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_HOME_THEATER`,
+   `AIRTABLE_TABLE_LIFESTYLE_SOFA`, `YOUTUBE_API_KEY` — same values as
+   your local `.env`.
 3. The workflow will run automatically on schedule; to run it immediately,
    go to **Actions > Channel Vetting Pipeline > Run workflow**.
 4. To change the schedule, edit the `cron` line in the workflow file

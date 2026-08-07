@@ -49,7 +49,8 @@ jobs:
         env:
           AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
-          AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
+          AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
+          AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python main.py
 
@@ -58,6 +59,7 @@ jobs:
         env:
           AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
           AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
-          AIRTABLE_TABLE_NAME: ${{ secrets.AIRTABLE_TABLE_NAME }}
+          AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
+          AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: python main.py --test

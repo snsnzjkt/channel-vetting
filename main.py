@@ -1,11 +1,12 @@
 """
-Orchestrates the full channel vetting pipeline:
+Orchestrates the full channel vetting pipeline, per niche:
 
-  run_discovery() -> pre-filter against existing Airtable channel IDs
-  -> for each remaining candidate: enrich -> score -> push to Airtable
+  run_discovery() -> pre-filter against that niche's existing Airtable
+  channel IDs -> for each remaining candidate: enrich -> score -> push
+  to that niche's Airtable table
 
 Run with --test to sanity-check the whole pipeline cheaply (1 keyword,
-5 results) before spending real quota on a full run.
+5 results, first niche only) before spending real quota on a full run.
 """
 import argparse
 import logging
@@ -19,40 +20,57 @@ from enrichment import get_channel_stats, get_recent_video_performance, calc_upl
 from scoring import calc_fake_follower_risk, calc_overall_score
 from airtable_client import get_existing_channel_ids, push_record
 from quota_tracker import get_today_spend
-from config import API_SLEEP_SECONDS, DEFAULT_STATUS, SOURCE_LABEL, DAILY_QUOTA_BUDGET
+from config import (
+    API_SLEEP_SECONDS,
+    DEFAULT_STATUS,
+    SOURCE_LABEL,
+    DAILY_QUOTA_BUDGET,
+    AIRTABLE_TABLE_HOME_THEATER,
+    AIRTABLE_TABLE_LIFESTYLE_SOFA,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# Search terms drawn directly from the "Types of Content Posting" (Primary)
-# sections of two influencer profiling briefs (Cynthia Lim, updated 15
-# April 2024) — i.e. the actual video topics target creators publish, not
-# demographic/psychographic traits (those aren't searchable YouTube
-# content). Re-tune as new briefs come in or results drift off-niche.
-KEYWORDS = [
-    # --- Lifestyle Sofa brief: Types of Content Posting > Primary ---
-    "interior design and styling",
-    "home decor tour",
-    "DIY home makeover",
-    "day in the life stay at home mom",
-    "home cleaning and organizing",
-    "furniture review unboxing",
-    "cozy living room decor",
-    "country living home",
-    "minimalist home living",
-    "house tour apartment tour",
-    "seasonal home decor",
-    # --- Home Theater brief: Types of Content Posting > Primary ---
-    "home theater products review",
-    "man cave tour",
-    "entertainment room makeover",
-    "car and truck review",
-    "power tools review",
-    "sports podcast commentary",
-    "movie review and reaction",
-    "home theater tech setup",
-    "homesteading vlog",
-]
+# One entry per niche: its search keywords (drawn directly from the
+# "Types of Content Posting" > Primary section of each influencer
+# profiling brief, Cynthia Lim, updated 15 April 2024 — i.e. actual video
+# topics target creators publish, not demographic/psychographic traits,
+# those aren't searchable YouTube content) and which Airtable table its
+# discovered channels get pushed to. Re-tune keywords as new briefs come
+# in or results drift off-niche.
+NICHES = {
+    "Home Theater": {
+        "keywords": [
+            "home theater products review",
+            "man cave tour",
+            "entertainment room makeover",
+            "car and truck review",
+            "power tools review",
+            "sports podcast commentary",
+            "movie review and reaction",
+            "home theater tech setup",
+            "homesteading vlog",
+        ],
+        "table_name": AIRTABLE_TABLE_HOME_THEATER,
+    },
+    "Lifestyle Sofa": {
+        "keywords": [
+            "interior design and styling",
+            "home decor tour",
+            "DIY home makeover",
+            "day in the life stay at home mom",
+            "home cleaning and organizing",
+            "furniture review unboxing",
+            "cozy living room decor",
+            "country living home",
+            "minimalist home living",
+            "house tour apartment tour",
+            "seasonal home decor",
+        ],
+        "table_name": AIRTABLE_TABLE_LIFESTYLE_SOFA,
+    },
+}
 
 # Niche match currently defaults to a neutral midpoint (50/100) since
 # automated topical matching isn't implemented yet — human reviewers can
@@ -121,12 +139,21 @@ def process_candidate(candidate: dict) -> dict | None:
     return record
 
 
-def run(keywords: list[str], max_results_per_keyword: int, days_back: int) -> None:
+def run_niche(niche_name: str, table_name: str, keywords: list[str], max_results_per_keyword: int, days_back: int) -> tuple[int, int]:
+    """Run discovery -> pre-filter -> enrich -> score -> push for one niche's table. Returns (discovered, processed)."""
+    if not table_name:
+        logger.error(
+            "No Airtable table configured for niche '%s' — set the matching env var. Skipping this niche.",
+            niche_name,
+        )
+        return 0, 0
+
+    logger.info("=== Niche: %s (table: %s) ===", niche_name, table_name)
     logger.info("Starting discovery for %d keyword(s)...", len(keywords))
     discovered = run_discovery(keywords, max_results_per_keyword=max_results_per_keyword, days_back=days_back)
     logger.info("Discovered %d unique candidate channel(s).", len(discovered))
 
-    existing_ids = get_existing_channel_ids()
+    existing_ids = get_existing_channel_ids(table_name)
 
     # A DataFrame makes the pre-filter step easy to extend later (e.g.
     # sorting/inspecting candidates by matched keyword count before
@@ -140,8 +167,8 @@ def run(keywords: list[str], max_results_per_keyword: int, days_back: int) -> No
         new_candidates = candidates_df[~candidates_df["already_tracked"]].to_dict("records")
 
     logger.info(
-        "%d candidate(s) already tracked in Airtable, %d remaining to process.",
-        len(discovered) - len(new_candidates), len(new_candidates),
+        "%d candidate(s) already tracked in '%s', %d remaining to process.",
+        len(discovered) - len(new_candidates), table_name, len(new_candidates),
     )
 
     processed = 0
@@ -150,20 +177,38 @@ def run(keywords: list[str], max_results_per_keyword: int, days_back: int) -> No
         if record is None:
             continue
 
-        pushed = push_record(record)
+        pushed = push_record(table_name, record)
         processed += 1
         status_note = "OK" if pushed else "AIRTABLE PUSH FAILED"
         print(
-            f"[{status_note}] {record['Channel Name']} "
+            f"[{niche_name}] [{status_note}] {record['Channel Name']} "
             f"| score={record['Overall Score']} "
             f"| fake_risk={record['Fake Follower Risk Score']}"
         )
         time.sleep(API_SLEEP_SECONDS)
 
+    return len(discovered), processed
+
+
+def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
+    total_discovered = 0
+    total_processed = 0
+
+    for niche_name, niche_config in niches.items():
+        discovered, processed = run_niche(
+            niche_name,
+            niche_config["table_name"],
+            niche_config["keywords"],
+            max_results_per_keyword,
+            days_back,
+        )
+        total_discovered += discovered
+        total_processed += processed
+
     quota_used = get_today_spend()
     print("\n--- Run summary ---")
-    print(f"Total discovered:  {len(discovered)}")
-    print(f"Total processed:   {processed}")
+    print(f"Total discovered:  {total_discovered}")
+    print(f"Total processed:   {total_processed}")
     print(f"Quota used today:  {quota_used} / {DAILY_QUOTA_BUDGET}")
 
 
@@ -172,15 +217,18 @@ def main() -> None:
     parser.add_argument(
         "--test",
         action="store_true",
-        help="Run a cheap end-to-end smoke test: 1 keyword, max_results=5.",
+        help="Run a cheap end-to-end smoke test: 1 keyword, max_results=5, first niche only.",
     )
     args = parser.parse_args()
 
     if args.test:
-        logger.info("Running in --test mode: 1 keyword, max_results=5.")
-        run(keywords=KEYWORDS[:1], max_results_per_keyword=5, days_back=90)
+        logger.info("Running in --test mode: 1 keyword, max_results=5, first niche only.")
+        first_niche_name = next(iter(NICHES))
+        first_niche = NICHES[first_niche_name]
+        test_niches = {first_niche_name: {**first_niche, "keywords": first_niche["keywords"][:1]}}
+        run(niches=test_niches, max_results_per_keyword=5, days_back=90)
     else:
-        run(keywords=KEYWORDS, max_results_per_keyword=50, days_back=90)
+        run(niches=NICHES, max_results_per_keyword=50, days_back=90)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,12 @@ AIRTABLE_TABLE_LIFESTYLE_SOFA = os.getenv("AIRTABLE_TABLE_LIFESTYLE_SOFA")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 
+# --- Hunter.io (optional) ---
+# Last-resort email-finder fallback, only queried when our own free
+# extraction (repeated video email / About description email) finds
+# nothing. Leave unset to disable — the pipeline runs fine without it.
+HUNTER_API_KEY = os.getenv("HUNTER_API_KEY")
+
 # --- Quota management ---
 # Free tier daily allotment is 10,000 units. We cap ourselves below that
 # to leave headroom for enrichment calls (channels/playlistItems/videos.list)

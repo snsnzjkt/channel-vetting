@@ -59,8 +59,14 @@ budget.
    > `EMAIL_MIN_VIDEO_REPEATS` (default 3) of the channel's sampled video
    > descriptions — a much more reliable "this is their real contact"
    > signal than a single mention — and falling back to the channel's
-   > About description if no repeated one is found. Often still blank;
-   > treat as a bonus signal, not a guarantee.
+   > About description if no repeated one is found. If both come up
+   > empty and `HUNTER_API_KEY` is set (see step 4), a last-resort
+   > lookup runs against Hunter.io's Domain Search using any of the
+   > creator's own website links found in their descriptions (social
+   > platforms like Instagram/TikTok are filtered out, since those
+   > would return that platform's own emails, not the creator's).
+   > Optional — leave `HUNTER_API_KEY` unset to skip this step entirely.
+   > Often still blank; treat as a bonus signal, not a guarantee.
 
    > **Optional readable counts**: `Subscriber Count` and `Avg Views` stay
    > as Number fields (so you can still sort/filter numerically) but you
@@ -101,7 +107,18 @@ costs 100 units; `channels.list`, `playlistItems.list`, and `videos.list`
 each cost ~1 unit. This is why discovery (search) quota is capped
 separately and more conservatively than enrichment quota.
 
-### 3. Install dependencies
+### 3. (Optional) Create a Hunter.io API key
+
+Only needed if you want the last-resort email-finder fallback described
+above. Skip this entirely to leave `HUNTER_API_KEY` blank — the pipeline
+runs fine without it, it just won't attempt Domain Search lookups.
+
+1. Sign up at https://hunter.io and go to **API > API Keys**.
+2. Copy your API key.
+3. Check their current free-tier / pricing page for your expected search
+   volume before relying on it heavily.
+
+### 4. Install dependencies
 
 ```bash
 cd channel-vetting
@@ -111,7 +128,7 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
+### 5. Configure environment variables
 
 ```bash
 copy .env.example .env        # Windows
@@ -120,9 +137,10 @@ copy .env.example .env        # Windows
 
 Fill in `.env` with your `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`,
 `AIRTABLE_TABLE_HOME_THEATER`, `AIRTABLE_TABLE_LIFESTYLE_SOFA` (the two
-table IDs from step 1.7), and `YOUTUBE_API_KEY`.
+table IDs from step 1.7), `YOUTUBE_API_KEY`, and optionally
+`HUNTER_API_KEY` (step 3).
 
-### 5. Edit your keywords / niches
+### 6. Edit your keywords / niches
 
 `main.py`'s `NICHES` dict holds one entry per niche — its search keywords
 (real terms pulled from the Types of Content Posting > Primary sections of
@@ -134,7 +152,7 @@ actual content-type list, not its demographic/psychographic sections
 whole new niche, add a new `NICHES` entry plus a matching env var and
 Airtable table.
 
-### 6. Run the test flow first
+### 7. Run the test flow first
 
 ```bash
 python main.py --test
@@ -145,7 +163,7 @@ costs at most ~100 units of search quota plus a handful of enrichment
 units — enough to confirm YouTube and Airtable are both wired up
 correctly without burning a meaningful chunk of your daily budget.
 
-### 7. Run the full pipeline
+### 8. Run the full pipeline
 
 ```bash
 python main.py
@@ -158,6 +176,7 @@ python main.py
 | `config.py` | Loads `.env`, defines constants (quota ceiling, weights inputs, etc.) |
 | `discovery.py` | `search.list`-based channel discovery + per-day search cache |
 | `enrichment.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
+| `hunter_client.py` | Optional last-resort email-finder fallback (Hunter.io Domain Search) |
 | `scoring.py` | Fake-follower risk heuristic + weighted overall score |
 | `airtable_client.py` | Dedupe check, create/update records (per-table, one table per niche) |
 | `quota_tracker.py` | Daily quota spend log (resets at midnight Pacific Time) |
@@ -176,7 +195,9 @@ Setup:
    repository secret** and add five secrets: `AIRTABLE_TOKEN`,
    `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_HOME_THEATER`,
    `AIRTABLE_TABLE_LIFESTYLE_SOFA`, `YOUTUBE_API_KEY` — same values as
-   your local `.env`.
+   your local `.env`. Add `HUNTER_API_KEY` too if you're using that
+   fallback — it's already referenced in the workflow file, so adding the
+   secret is the only step needed; leaving it unset is also fine.
 3. The workflow will run automatically on schedule; to run it immediately,
    go to **Actions > Channel Vetting Pipeline > Run workflow**.
 4. To change the schedule, edit the `cron` line in the workflow file

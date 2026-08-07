@@ -52,6 +52,8 @@ jobs:
           AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
           AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          # Optional — safe to leave unset; hunter_client.py no-ops without it.
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
         run: python main.py
 
       - name: Run pipeline (test mode)
@@ -62,4 +64,6 @@ jobs:
           AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
           AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          # Optional — safe to leave unset; hunter_client.py no-ops without it.
+          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
         run: python main.py --test

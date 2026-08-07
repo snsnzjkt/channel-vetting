@@ -23,12 +23,43 @@ from quota_tracker import record_spend
 logger = logging.getLogger(__name__)
 
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+URL_PATTERN = re.compile(r"https?://([a-zA-Z0-9.\-]+)", re.IGNORECASE)
 
 # A one-off email mention in a single video's description is weak evidence
 # (could be a shoutout, a giveaway, someone else's contact, etc.). Seeing
 # the same address repeated across several videos' descriptions is a much
 # stronger signal it's the creator's actual standing contact email.
 EMAIL_MIN_VIDEO_REPEATS = 3
+
+# Shared platforms/link-aggregators are never the creator's own business
+# domain — running a Hunter.io Domain Search against these would return
+# that platform's corporate emails, not the creator's own.
+DOMAIN_BLOCKLIST = {
+    "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com",
+    "x.com", "facebook.com", "fb.com", "linktr.ee", "linktree.com",
+    "beacons.ai", "beacons.page", "discord.gg", "discord.com", "patreon.com",
+    "twitch.tv", "amzn.to", "amazon.com", "bit.ly", "goo.gl", "linkedin.com",
+    "threads.net", "snapchat.com", "pinterest.com", "reddit.com", "gmail.com",
+    "google.com", "apple.com", "spotify.com",
+}
+
+
+def extract_candidate_domain(text: str) -> str:
+    """
+    Best-effort extraction of what looks like the creator's own website
+    domain from free text (channel/video descriptions), for use as a
+    Hunter.io Domain Search query. Skips known social/link-aggregator
+    platforms, which are never the creator's own business domain.
+    """
+    if not text:
+        return ""
+    for match in URL_PATTERN.finditer(text):
+        domain = match.group(1).lower()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        if domain and domain not in DOMAIN_BLOCKLIST:
+            return domain
+    return ""
 
 
 def extract_business_email(description: str) -> str:
@@ -118,6 +149,7 @@ def get_channel_stats(channel_id: str) -> dict | None:
         "video_count": int(stats.get("videoCount", 0)),
         "view_count": int(stats.get("viewCount", 0)),
         "uploads_playlist_id": uploads_playlist_id,
+        "description": snippet.get("description", ""),
         "business_email": extract_business_email(snippet.get("description", "")),
     }
 
@@ -212,6 +244,7 @@ def get_recent_video_performance(channel_id: str, uploads_playlist_id: str, max_
         # An email seen in EMAIL_MIN_VIDEO_REPEATS+ of the sampled videos'
         # descriptions — a stronger signal than a single mention anywhere.
         "repeated_email": find_repeated_email(video_descriptions),
+        "video_descriptions": video_descriptions,
     }
 
 

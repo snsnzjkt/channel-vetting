@@ -16,7 +16,13 @@ from datetime import date
 import pandas as pd
 
 from discovery import run_discovery
-from enrichment import get_channel_stats, get_recent_video_performance, calc_upload_frequency
+from enrichment import (
+    get_channel_stats,
+    get_recent_video_performance,
+    calc_upload_frequency,
+    extract_candidate_domain,
+)
+from hunter_client import find_domain_email
 from scoring import calc_fake_follower_risk, calc_overall_score
 from airtable_client import get_existing_channel_ids, push_record
 from quota_tracker import get_today_spend
@@ -107,6 +113,18 @@ def process_candidate(candidate: dict) -> dict | None:
         DEFAULT_NICHE_MATCH,
     )
 
+    # Email fallback chain: repeated-video email (strongest) -> About
+    # description mention -> Hunter.io Domain Search (last resort, only
+    # spends a Hunter credit when the two free methods found nothing and
+    # HUNTER_API_KEY is configured).
+    email = performance.get("repeated_email") or stats.get("business_email", "")
+    if not email:
+        combined_text = stats.get("description", "") + " " + " ".join(performance.get("video_descriptions", []))
+        domain = extract_candidate_domain(combined_text)
+        if domain:
+            email = find_domain_email(domain)
+            time.sleep(API_SLEEP_SECONDS)
+
     record = {
         "Channel Name": stats["channel_title"],
         "Channel URL": f"https://www.youtube.com/channel/{channel_id}",
@@ -125,10 +143,7 @@ def process_candidate(candidate: dict) -> dict | None:
         # deliberately not used here, since it isn't the same thing as the
         # content's spoken language.
         "Content Language": performance.get("content_language") or "Unknown",
-        # Prefer an email repeated across multiple recent videos (a much
-        # stronger "this is their real contact" signal) over a one-off
-        # mention in the channel's About description.
-        "Email": performance.get("repeated_email") or stats.get("business_email", ""),
+        "Email": email,
         "Fake Follower Risk Score": fake_risk,
         "Overall Score": overall_score,
         "Status": DEFAULT_STATUS,

@@ -61,6 +61,26 @@ budget.
    > signal than a single mention — and falling back to the channel's
    > About description if no repeated one is found. Often still blank;
    > treat as a bonus signal, not a guarantee.
+
+   > **Optional readable counts**: `Subscriber Count` and `Avg Views` stay
+   > as Number fields (so you can still sort/filter numerically) but you
+   > can add two Formula fields per table for a human-readable version —
+   > `Subscribers (Display)` and `Avg Views (Display)`, formatted like
+   > `"121K Subscribers"` / `"3.5M Subscribers"`. Formulas:
+   > ```
+   > IF(
+   >     {Subscriber Count} >= 1000000,
+   >     ROUND({Subscriber Count} / 1000000, 1) & "M Subscribers",
+   >     IF(
+   >         {Subscriber Count} >= 1000,
+   >         ROUND({Subscriber Count} / 1000, 0) & "K Subscribers",
+   >         {Subscriber Count} & " Subscribers"
+   >     )
+   > )
+   > ```
+   > Same pattern for `Avg Views (last 10 videos)`, suffixed `" Avg Views"`.
+   > Pipeline code needs no changes for this — it's purely an Airtable-side
+   > computed field.
 8. Grab your Base ID from the base's API docs page
    (https://airtable.com/api, select your base — the ID starts with `app`).
 

@@ -24,21 +24,6 @@ AIRTABLE_TABLE_LIFESTYLE_SOFA = os.getenv("AIRTABLE_TABLE_LIFESTYLE_SOFA")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 YOUTUBE_API_BASE_URL = "https://www.googleapis.com/youtube/v3"
 
-# --- Hunter.io (optional) ---
-# Last-resort email-finder fallback, only queried when our own free
-# extraction (repeated video email / About description email) finds
-# nothing. Leave unset to disable — the pipeline runs fine without it.
-HUNTER_API_KEY = os.getenv("HUNTER_API_KEY")
-
-# --- Modash (optional) ---
-# Creator-database email lookup, keyed on the YouTube channel ID rather
-# than a guessed company domain — which is why it reaches creators Hunter
-# structurally cannot (a creator whose contact is a plain gmail address
-# has no company domain for Hunter to search).
-# Metered: 1 credit per successful profile report. Leave unset to disable.
-MODASH_API_KEY = os.getenv("MODASH_API_KEY")
-MODASH_API_BASE_URL = "https://api.modash.io/v1"
-
 # --- Quota management ---
 # Free tier daily allotment is 10,000 units. We cap ourselves below that
 # to leave headroom for enrichment calls (channels/playlistItems/videos.list)
@@ -65,3 +50,46 @@ API_SLEEP_SECONDS = float(os.getenv("API_SLEEP_SECONDS", 0.5))
 # Airtable "Status" single-select default for newly discovered channels.
 DEFAULT_STATUS = "New"
 SOURCE_LABEL = "YouTube Discovery Pipeline"
+
+# --- Daily prospect caps ---
+# "Prospect" = a record successfully pushed to Airtable. Counted per niche
+# per day from Airtable's own "Date Added" field, so a second run on the
+# same day tops up to the cap rather than doubling it.
+#
+# Each niche table produces at most 40 new rows per day, total. The two
+# budgets are separate so a weak discovery day cannot fill the table with
+# below-criteria channels and crowd out real prospects.
+DAILY_QUALIFIED_CAP = int(os.getenv("DAILY_QUALIFIED_CAP", 30))
+DAILY_FLAGGED_CAP = int(os.getenv("DAILY_FLAGGED_CAP", 10))
+
+# Discovery banks this multiple of the remaining headroom in fresh
+# candidates, covering the ones lost to enrichment failure and dedupe.
+CANDIDATE_OVERSHOOT = float(os.getenv("CANDIDATE_OVERSHOOT", 1.5))
+
+# How far back search.list looks for videos, in days.
+#
+# Deliberately a SHORT rolling window rather than a fixed 90 days. Search
+# results are ranked by relevance and that ranking is stable, so a wide
+# fixed window returns the same channels every day; once they are all
+# tracked, the pipeline produces nothing while still spending ~100 units
+# per keyword re-reading a consumed pool. A recent window is self-renewing
+# because creators keep uploading.
+#
+# Use --days-back 90 for a one-off sweep of the backlog (e.g. the first
+# run against an empty table).
+DISCOVERY_DAYS_BACK = int(os.getenv("DISCOVERY_DAYS_BACK", 7))
+
+# The zone that defines a "prospect day". Deliberately NOT the Pacific
+# zone quota_tracker uses: quota tracks Google's reset schedule, this
+# tracks review capacity on the reviewing team's working day.
+#
+# Pinned rather than host-local because three clocks are in play — the
+# GitHub Actions runner (UTC), the dev machine (UTC+8), and head office
+# (Toronto). Unpinned, a CI run and a local run would disagree about the
+# date and each claim a separate daily cap.
+PROSPECT_DAY_TZ = os.getenv("PROSPECT_DAY_TZ", "America/Toronto")
+
+# --- Browser-based email fallback ---
+# CloakBrowser is unverified on the GitHub Actions ubuntu-latest runner —
+# keep this off in CI until that's confirmed working there.
+USE_CLOAKBROWSER = os.getenv("USE_CLOAKBROWSER", "false").lower() == "true"

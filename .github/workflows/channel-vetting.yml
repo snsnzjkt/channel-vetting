@@ -12,6 +12,10 @@ on:
         description: "Run in --test mode (1 keyword, 5 results)"
         type: boolean
         default: false
+      use_cloakbrowser:
+        description: "Enable CloakBrowser About-page email lookups (unproven on runner IPs)"
+        type: boolean
+        default: false
 
 jobs:
   run-pipeline:
@@ -29,20 +33,48 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Persists quota_log.json / search_cache.json across runs so a
-      # same-day manual re-run (workflow_dispatch) doesn't lose track of
-      # quota already spent or re-search a keyword already cached today.
-      # Not load-bearing for a once-daily schedule — quota_tracker.py's
-      # own Pacific-Time day-keying is what actually enforces the reset.
-      - name: Restore quota + search cache
+      # Persists quota_log.json / search_cache.json / external_handles_cache.json
+      # across runs so a same-day manual re-run (workflow_dispatch) doesn't
+      # lose track of quota already spent or re-search a keyword already
+      # cached today. Not load-bearing for a once-daily schedule for the
+      # first two — quota_tracker.py's own Pacific-Time day-keying is what
+      # actually enforces the reset. external_handles_cache.json IS
+      # load-bearing for run time even on a once-daily schedule: without it
+      # every scheduled run re-paginates ~18k Airtable rows across the 4
+      # external tables (external_dedupe.py) before any discovery starts.
+      - name: Restore quota + search + external-handles cache
         uses: actions/cache@v4
         with:
           path: |
             quota_log.json
             search_cache.json
+            external_handles_cache.json
           key: channel-vetting-state-${{ github.run_id }}
           restore-keys: |
             channel-vetting-state-
+
+      # Only runs when a manual dispatch opts into CloakBrowser. CloakBrowser
+      # downloads a patched Chromium but not the shared libraries it links
+      # against, so headless launches fail on a bare ubuntu-latest runner
+      # without these.
+      - name: Install Chromium system dependencies
+        if: github.event.inputs.use_cloakbrowser == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+            libxrandr2 libgbm1 libasound2t64 libpango-1.0-0 libcairo2
+
+      # Separate from the quota/search cache above: this one is large,
+      # rarely changes, and keying it with the quota state would force a
+      # re-download of Chromium every time quota_log.json changes.
+      - name: Cache CloakBrowser Chromium
+        if: github.event.inputs.use_cloakbrowser == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cloakbrowser
+          key: cloakbrowser-${{ runner.os }}-v1
 
       - name: Run pipeline (full)
         if: github.event_name == 'schedule' || github.event.inputs.test_mode != 'true'
@@ -52,8 +84,15 @@ jobs:
           AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
           AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          # Optional — safe to leave unset; hunter_client.py no-ops without it.
-          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+          # Off for scheduled runs. CloakBrowser defeats fingerprinting,
+          # not datacenter IP reputation, and GitHub runners sit in Azure
+          # ranges YouTube challenges hard. Enable via workflow_dispatch
+          # to test; only make it the default once a manual run proves it.
+          USE_CLOAKBROWSER: ${{ github.event.inputs.use_cloakbrowser == 'true' }}
+          # Optional. CloakBrowser runs unlicensed without it.
+          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}
+          # Pinned so the runner (UTC) agrees with head office on the day.
+          PROSPECT_DAY_TZ: America/Toronto
         run: python main.py
 
       - name: Run pipeline (test mode)
@@ -64,6 +103,13 @@ jobs:
           AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
           AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          # Optional — safe to leave unset; hunter_client.py no-ops without it.
-          HUNTER_API_KEY: ${{ secrets.HUNTER_API_KEY }}
+          # Off for scheduled runs. CloakBrowser defeats fingerprinting,
+          # not datacenter IP reputation, and GitHub runners sit in Azure
+          # ranges YouTube challenges hard. Enable via workflow_dispatch
+          # to test; only make it the default once a manual run proves it.
+          USE_CLOAKBROWSER: ${{ github.event.inputs.use_cloakbrowser == 'true' }}
+          # Optional. CloakBrowser runs unlicensed without it.
+          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}
+          # Pinned so the runner (UTC) agrees with head office on the day.
+          PROSPECT_DAY_TZ: America/Toronto
         run: python main.py --test

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "cloakbrowser": {
+      "command": "npx",
+      "args": ["-y", "cloakbrowser-mcp@1.10.0"],
+      "env": {
+        "CLOAKBROWSER_LICENSE_KEY": "${CLOAKBROWSER_LICENSE_KEY:-}"
+      }
+    }
+  }
+}

@@ -9,3 +9,9 @@ __pycache__/
 .claude
 CLAUDE.md
 .superpowers
+\superpowers
+
+# cloakbrowser-mcp is run via `npx` (see .mcp.json); these should never
+# appear, but keep them out if a local npm install is ever done instead.
+node_modules/
+package-lock.json

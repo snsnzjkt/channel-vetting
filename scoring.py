@@ -6,6 +6,11 @@ be tuned without touching the scoring logic itself.
 """
 import math
 
+# --- Qualification outcomes (values of the Airtable "Qualification" field) ---
+QUALIFIED = "Qualified"
+BELOW_VIEW_MINIMUM = "Below View Minimum"
+NEW_CHANNEL = "New Channel"
+
 # --- Fake follower risk thresholds ---
 VIEW_TO_SUB_RATIO_HIGH_RISK = 0.02   # avg_views / subscriber_count below this is suspicious
 ENGAGEMENT_RATE_HIGH_RISK = 0.5      # engagement rate (%) below this is suspicious
@@ -124,3 +129,38 @@ def calc_overall_score(
         + WEIGHT_NICHE_MATCH * niche_match
     )
     return round(min(100.0, max(0.0, weighted)), 1)
+
+
+def qualify(
+    avg_views: float,
+    channel_age_months: float | None,
+    min_avg_views: float,
+    min_channel_age_months: float | None,
+) -> str:
+    """
+    Check a channel against its niche's hard requirements from the
+    influencer briefs, returning the value for the Airtable
+    "Qualification" field.
+
+    Thresholds are passed in rather than read from a constant because
+    they differ per niche (Home Theater wants 10k+ average views,
+    Lifestyle Sofa 2k+); they live on the NICHES entries in main.py.
+
+    Failing channels are flagged, never discarded — a human decides.
+
+    Precedence: when both criteria fail, BELOW_VIEW_MINIMUM is reported.
+    A single-select holds one value, and views are the criterion that
+    prompted this gate.
+
+    channel_age_months of None means "unknown" and never disqualifies —
+    absent data is not evidence against a channel.
+    """
+    if avg_views < min_avg_views:
+        return BELOW_VIEW_MINIMUM
+    if (
+        min_channel_age_months is not None
+        and channel_age_months is not None
+        and channel_age_months < min_channel_age_months
+    ):
+        return NEW_CHANNEL
+    return QUALIFIED

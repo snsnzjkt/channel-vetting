@@ -79,10 +79,18 @@ def discover_channels_by_keyword(keyword: str, max_results: int = 50, days_back:
     channels: dict[str, dict] = {}
     page_token = None
     results_collected = 0
+    # Tracks whether this keyword's search finished cleanly (ran out of
+    # pages/results on its own) vs. was cut short by a transient failure
+    # (quota ceiling or a non-200 response). Only a clean completion gets
+    # cached — caching a truncated/empty result from a transient error
+    # would poison this keyword's cache for the rest of the UTC day (see
+    # _cache_key()), silently killing its discovery with no error signal.
+    complete = True
 
     while results_collected < max_results:
         if not can_afford_search():
             logger.warning("Quota ceiling reached — stopping discovery for keyword '%s'.", keyword)
+            complete = False
             break
 
         params = {
@@ -103,6 +111,7 @@ def discover_channels_by_keyword(keyword: str, max_results: int = 50, days_back:
 
         if resp.status_code != 200:
             logger.error("search.list failed for '%s': %s %s", keyword, resp.status_code, resp.text)
+            complete = False
             break
 
         data = resp.json()
@@ -128,20 +137,50 @@ def discover_channels_by_keyword(keyword: str, max_results: int = 50, days_back:
         time.sleep(API_SLEEP_SECONDS)
 
     result = list(channels.values())
-    cache[key] = result
-    _save_cache(cache)
+    if complete:
+        cache[key] = result
+        _save_cache(cache)
+    else:
+        logger.warning(
+            "Not caching keyword '%s' — its search was cut short, so a healthy retry "
+            "later today must re-query rather than reuse this partial result.",
+            keyword,
+        )
     return result
 
 
-def run_discovery(keywords: list[str], max_results_per_keyword: int = 50, days_back: int = 90) -> list[dict]:
+def run_discovery(
+    keywords: list[str],
+    max_results_per_keyword: int = 50,
+    days_back: int = 90,
+    exclude_ids: set[str] | None = None,
+    target_fresh: int | None = None,
+) -> list[dict]:
     """
-    Run discover_channels_by_keyword() across all keywords, dedupe channels
-    across searches, and merge matched_keywords for channels that hit
-    multiple searches.
+    Run discover_channels_by_keyword() across `keywords`, dedupe channels
+    across searches, and merge matched_keywords for channels hit by more
+    than one.
+
+    When `target_fresh` is set, stops searching further keywords once
+    that many *fresh* candidates (those not in `exclude_ids`) have been
+    banked. Each search.list call costs 100 units, so this is the main
+    lever on daily quota spend — the caller only needs enough candidates
+    to fill the day's remaining cap.
+
+    Stopping early means later keywords in the list get searched less
+    often, skewing the candidate mix toward whatever is listed first.
+    Accepted deliberately; rotate the keyword order if that becomes a
+    problem.
+
+    `exclude_ids` is supplied by the caller so this module stays ignorant
+    of Airtable.
     """
+    exclude_ids = exclude_ids or set()
     merged: dict[str, dict] = {}
 
-    for keyword in keywords:
+    # enumerate, not keywords.index(): a duplicated keyword would make
+    # index() report the position of the first copy.
+    for position, keyword in enumerate(keywords, start=1):
         logger.info("Discovering channels for keyword: '%s'", keyword)
         found = discover_channels_by_keyword(keyword, max_results=max_results_per_keyword, days_back=days_back)
 
@@ -154,7 +193,17 @@ def run_discovery(keywords: list[str], max_results_per_keyword: int = 50, days_b
             else:
                 merged[cid] = channel
 
+        if target_fresh is not None:
+            fresh = len(set(merged) - exclude_ids)
+            if fresh >= target_fresh:
+                logger.info(
+                    "Banked %d fresh candidate(s) (target %d) after %d keyword(s) — "
+                    "skipping the remaining %d to save quota.",
+                    fresh, target_fresh, position, len(keywords) - position,
+                )
+                break
+
         time.sleep(API_SLEEP_SECONDS)
 
-    logger.info("Discovery complete: %d unique channels across %d keywords.", len(merged), len(keywords))
+    logger.info("Discovery complete: %d unique channels.", len(merged))
     return list(merged.values())

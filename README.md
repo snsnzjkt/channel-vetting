@@ -5,21 +5,46 @@ channels into Airtable for human review.
 
 ## How it works
 
+The pipeline runs once per niche (see `NICHES` in `main.py`), each niche
+writing to its own Airtable table, and is bounded by two daily budgets so a
+weak day can't flood a table with below-criteria channels:
+
+0. **Daily cap check** — each niche's table is capped at `DAILY_QUALIFIED_CAP`
+   (default 30) qualified rows and `DAILY_FLAGGED_CAP` (default 10) flagged
+   rows per day (40 rows max), counted from Airtable's own "Date Added"
+   field rather than a local file — so a second run the same day tops up
+   the day's count instead of doubling it. A niche already at both caps is
+   skipped before any quota is spent.
 1. **Discovery** (`discovery.py`) — searches YouTube for videos matching your
    niche keywords (`search.list`, type=video) and extracts the unique
    channels behind the results. Results are cached per keyword per day so
-   re-running the same keyword twice in one day costs no extra quota.
+   re-running the same keyword twice in one day costs no extra quota. The
+   search window defaults to the last `DISCOVERY_DAYS_BACK` (7) days —
+   deliberately short and self-renewing, rather than a wide fixed window
+   that would return the same already-tracked channels every day. Stops
+   searching further keywords once enough fresh (not-yet-tracked)
+   candidates are banked to fill the day's remaining headroom.
 2. **Pre-filter** — candidates already present in your Airtable base are
    dropped before any enrichment quota is spent on them.
-3. **Enrichment** (`enrichment.py`) — pulls subscriber/view counts and the
+3. **DO NOT CONTACT screening** (`do_not_contact.py`) — every candidate is
+   checked against a suppression list (by handle, email, and name) at three
+   points in the pipeline. The list is fetched fresh at the start of every
+   run (never cached) and the whole run **aborts** if it can't be fetched
+   with confidence — proceeding with a partial or empty blocklist risks
+   contacting someone who asked not to be.
+4. **Enrichment** (`enrichment.py`) — pulls subscriber/view counts and the
    last 10 videos' performance for each remaining candidate. It also reads
    the last 50 videos' descriptions looking for a contact email — a wider
    window that costs no extra quota, since the underlying calls are billed
    per-call rather than per-video.
-4. **Scoring** (`scoring.py`) — computes a fake-follower risk score and a
+5. **Qualification** (`scoring.py`) — checks each candidate's avg views and
+   channel age against that niche's thresholds. Channels that fail are
+   **flagged for review, not discarded** — a human makes the final call.
+6. **Scoring** (`scoring.py`) — computes a fake-follower risk score and a
    weighted overall score.
-5. **Airtable push** (`airtable_client.py`) — creates or updates a row per
-   channel in the "Channel Prospects" table (never duplicates).
+7. **Airtable push** (`airtable_client.py`) — creates or updates a row per
+   channel in that niche's table (never duplicates), until both the
+   qualified and flagged daily budgets are full or candidates run out.
 
 Quota spend is tracked in `quota_log.json` and capped by `QUOTA_CEILING`
 (default 8000/10000 daily units) so a run never blows your daily YouTube API
@@ -42,12 +67,32 @@ budget.
    every table has an identical field set. Each table needs: Channel
    Name, Channel URL, Channel ID, Subscriber Count, Avg Views (last 10
    videos), Engagement Rate, Upload Frequency (Single line text — see
-   note below), Content Language, Email (Single line text), Fake Follower
-   Risk Score, Overall Score, Status (single select:
-   New/Reviewing/Approved/Rejected/Contacted), Source, Notes, Date Added.
+   note below), Content Language, Email (**Email** field type — not
+   Single line text), Fake Follower Risk Score, Overall Score,
+   Qualification (single select: Qualified /
+   Below View Minimum / New Channel — see note below), Status (single
+   select: New/Reviewing/Approved/Rejected/Contacted), Source, Notes,
+   Date Added.
 
    Grab each table's ID (open the table → **Help → API documentation**,
    or read it from the URL — the `tbl...` segment) for step 4.
+
+   > `Qualification` records why a candidate did or didn't clear its
+   > niche's hard requirements (avg views, and for some niches a minimum
+   > channel age — see `NICHES` in `main.py`). Channels that fail are
+   > still written to the table (`Status = New`) rather than dropped, so
+   > a human reviewer can decide; when a candidate fails on both views
+   > and age, `Below View Minimum` is the value recorded.
+
+   > This pipeline also requires a **DO NOT CONTACT** suppression table to
+   > already exist in the same base — it's referenced by a hardcoded
+   > table ID and field IDs (`DO_NOT_CONTACT_TABLE_ID`, `FIELD_NAME`,
+   > `FIELD_URL`, `FIELD_EMAIL`) at the top of `do_not_contact.py`, rather
+   > than an env var, since it's shared infrastructure rather than a
+   > per-niche table. Pointing this at a different base means updating
+   > those constants to match. Every candidate is checked against it by
+   > handle, email, and name; if it can't be read, the whole run aborts
+   > rather than risk contacting someone who opted out.
 
    > `Upload Frequency` is written as a formatted string (e.g. `"2.5
    > videos/month"`), not a raw number — if you make it a Number field
@@ -64,12 +109,10 @@ budget.
    > more reliable "this is their real contact"
    > signal than a single mention — and falling back to the channel's
    > About description if no repeated one is found. If both come up
-   > empty and `HUNTER_API_KEY` is set (see step 4), a last-resort
-   > lookup runs against Hunter.io's Domain Search using any of the
-   > creator's own website links found in their descriptions (social
-   > platforms like Instagram/TikTok are filtered out, since those
-   > would return that platform's own emails, not the creator's).
-   > Optional — leave `HUNTER_API_KEY` unset to skip this step entirely.
+   > empty and `USE_CLOAKBROWSER=true`, a last-resort lookup renders the
+   > channel's public About page in CloakBrowser and scans its visible
+   > text for the same pattern (see "CloakBrowser" below). There is no
+   > paid email-finder fallback (Hunter.io and Modash have been removed).
    > Often still blank; treat as a bonus signal, not a guarantee.
 
    > **Optional readable counts**: `Subscriber Count` and `Avg Views` stay
@@ -111,18 +154,7 @@ costs 100 units; `channels.list`, `playlistItems.list`, and `videos.list`
 each cost ~1 unit. This is why discovery (search) quota is capped
 separately and more conservatively than enrichment quota.
 
-### 3. (Optional) Create a Hunter.io API key
-
-Only needed if you want the last-resort email-finder fallback described
-above. Skip this entirely to leave `HUNTER_API_KEY` blank — the pipeline
-runs fine without it, it just won't attempt Domain Search lookups.
-
-1. Sign up at https://hunter.io and go to **API > API Keys**.
-2. Copy your API key.
-3. Check their current free-tier / pricing page for your expected search
-   volume before relying on it heavily.
-
-### 4. Install dependencies
+### 3. Install dependencies
 
 ```bash
 cd channel-vetting
@@ -132,7 +164,7 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-### 4b. Optional: add CloakBrowser for site testing
+### 3b. Optional: add CloakBrowser for site testing
 
 If you want to test a site with a stealth Chromium wrapper, this repo
 now includes a small smoke-test script:
@@ -159,10 +191,36 @@ run:
 python backfill_missing_emails.py --use-cloakbrowser
 ```
 
-That keeps Hunter.io disabled and only adds a public-page browser check
-for text already visible in the channel's About page.
+That adds a public-page browser check (for text already visible in the
+channel's About page) on top of the free text-based steps — there is no
+paid fallback to disable.
 
-### 5. Configure environment variables
+### 3c. Optional: `cloakbrowser-mcp` for interactive agent use
+
+This repo's `.mcp.json` registers `cloakbrowser-mcp` (an npm package,
+pinned to `1.10.0`) as an MCP server named `cloakbrowser`. It lets Claude
+Code (or any other MCP client opened in this directory) drive a real
+CloakBrowser session interactively — useful for poking at a channel's
+actual page to prototype extraction logic or debug selectors before that
+logic lands in `enrichment.py`.
+
+This is **entirely separate from the pipeline**: `main.py` and
+`enrichment.py` use the Python `cloakbrowser` package directly via
+`launch()` and never touch `.mcp.json` or the MCP server. The MCP server
+requires an LLM client to drive it, which the scheduled
+`python main.py` run has no reason to grow. It is **not** used by, and
+not required for, the GitHub Actions workflow — the pipeline runs fine
+with `.mcp.json` absent entirely.
+
+No secret is stored in `.mcp.json` — it references
+`CLOAKBROWSER_LICENSE_KEY` from your shell/session environment via
+`${CLOAKBROWSER_LICENSE_KEY:-}` and runs unlicensed if that variable
+isn't set. Requires Node.js (tested with Node 24.12.0 / npm 11.6.2) since
+`cloakbrowser-mcp` is fetched via `npx` on first use. After adding or
+editing `.mcp.json`, restart your MCP client and check `/mcp` (Claude
+Code) to confirm `cloakbrowser` is listed.
+
+### 4. Configure environment variables
 
 ```bash
 copy .env.example .env        # Windows
@@ -171,22 +229,38 @@ copy .env.example .env        # Windows
 
 Fill in `.env` with your `AIRTABLE_TOKEN`, `AIRTABLE_BASE_ID`,
 `AIRTABLE_TABLE_HOME_THEATER`, `AIRTABLE_TABLE_LIFESTYLE_SOFA` (the two
-table IDs from step 1.7), `YOUTUBE_API_KEY`, and optionally
-`HUNTER_API_KEY` (step 3).
+table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
+`.env.example` is optional and defaults sensibly:
 
-### 6. Edit your keywords / niches
+| Variable | Default | Purpose |
+|---|---|---|
+| `QUOTA_CEILING` | 8000 | YouTube quota ceiling per day (of the 10,000 free-tier budget) |
+| `API_SLEEP_SECONDS` | 0.5 | Delay between individual API calls |
+| `DAILY_QUALIFIED_CAP` | 30 | Max qualified rows pushed per niche table per day |
+| `DAILY_FLAGGED_CAP` | 10 | Max flagged (below-criteria) rows pushed per niche table per day |
+| `CANDIDATE_OVERSHOOT` | 1.5 | Multiple of remaining daily headroom that discovery banks in fresh candidates, to cover losses to enrichment failures and dedupe |
+| `DISCOVERY_DAYS_BACK` | 7 | How many days back `search.list` looks for videos (short and self-renewing by design — see below; `--days-back` overrides per run) |
+| `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
+| `USE_CLOAKBROWSER` | `false` | Enables the CloakBrowser About-page email fallback (see "CloakBrowser" below) |
+| `CLOAKBROWSER_LICENSE_KEY` | unset | Optional CloakBrowser Pro license key; runs unlicensed if unset |
 
-`main.py`'s `NICHES` dict holds one entry per niche — its search keywords
+### 5. Edit your keywords / niches
+
+`main.py`'s `NICHES` dict holds one entry per niche: its search keywords
 (real terms pulled from the Types of Content Posting > Primary sections of
 the "Lifestyle Sofa" and "Home Theater" Influencer Profiling briefs,
-Cynthia Lim, 15 April 2024) and which Airtable table it pushes to.
+Cynthia Lim, 15 April 2024), which Airtable table it pushes to, and its
+qualification thresholds — `min_avg_views` and `min_channel_age_months`
+(`None` if the niche has no age requirement, as with Lifestyle Sofa).
 Add/replace keywords as new niche briefs come in — pull from a brief's
 actual content-type list, not its demographic/psychographic sections
 (those describe the audience, not searchable video topics). To add a
-whole new niche, add a new `NICHES` entry plus a matching env var and
-Airtable table.
+whole new niche, add a new `NICHES` entry with all four keys, plus a
+matching env var and Airtable table — a niche entry missing either
+threshold key is skipped (with a logged error) rather than crashing the
+run.
 
-### 7. Run the test flow first
+### 6. Run the test flow first
 
 ```bash
 python main.py --test
@@ -195,26 +269,41 @@ python main.py --test
 This runs with 1 keyword, `max_results=5`, on the first niche only, so it
 costs at most ~100 units of search quota plus a handful of enrichment
 units — enough to confirm YouTube and Airtable are both wired up
-correctly without burning a meaningful chunk of your daily budget.
+correctly without burning a meaningful chunk of your daily budget. Add
+`--daily-cap N` to also cap both the qualified and flagged daily budgets
+at `N` for that run — useful for testing the capping behavior cheaply
+against your production Airtable base.
 
-### 8. Run the full pipeline
+### 7. Run the full pipeline
 
 ```bash
 python main.py
 ```
 
+> **First run against an empty (or recently emptied) table:** the default
+> discovery window (`DISCOVERY_DAYS_BACK`, 7 days) is deliberately short —
+> see "Discovery window" in `CLAUDE.md` — so a plain `python main.py` on a
+> table with no existing rows will skip anything published more than a
+> week ago and likely come back mostly empty. For that first sweep, run
+> `python main.py --days-back 90` instead to pull in the backlog; switch
+> back to the plain 7-day default for every run after that.
+
 ## Files
 
 | File | Purpose |
 |---|---|
-| `config.py` | Loads `.env`, defines constants (quota ceiling, weights inputs, etc.) |
+| `config.py` | Loads `.env`, defines constants (quota ceiling, daily caps, weights inputs, etc.) |
 | `discovery.py` | `search.list`-based channel discovery + per-day search cache |
 | `enrichment.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
-| `hunter_client.py` | Optional last-resort email-finder fallback (Hunter.io Domain Search) |
-| `scoring.py` | Fake-follower risk heuristic + weighted overall score |
-| `airtable_client.py` | Dedupe check, create/update records (per-table, one table per niche) |
+| `scoring.py` | Fake-follower risk heuristic + weighted overall score + `qualify()` |
+| `do_not_contact.py` | DO NOT CONTACT suppression list — fetched fresh every run, fails closed |
+| `browser_email.py` | CloakBrowser About-page email fallback (last step of the email chain) |
+| `prospect_day.py` | Single source of truth for "what day is it" for the daily caps (`PROSPECT_DAY_TZ`) |
+| `airtable_client.py` | Dedupe check, create/update records, `count_added_today()` (per-table, one table per niche) |
 | `quota_tracker.py` | Daily quota spend log (resets at midnight Pacific Time) |
-| `main.py` | Orchestrates the full pipeline; `--test` flag for smoke testing |
+| `audit_blocklist.py` | One-off: check rows already in the niche tables against DO NOT CONTACT |
+| `main.py` | Orchestrates the full pipeline; `--test` and `--daily-cap` flags |
+| `tests/` | pytest suite (see "Running the tests" below) |
 
 ## Running on a schedule (GitHub Actions)
 
@@ -229,19 +318,47 @@ Setup:
    repository secret** and add five secrets: `AIRTABLE_TOKEN`,
    `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_HOME_THEATER`,
    `AIRTABLE_TABLE_LIFESTYLE_SOFA`, `YOUTUBE_API_KEY` — same values as
-   your local `.env`. Add `HUNTER_API_KEY` too if you're using that
-   fallback — it's already referenced in the workflow file, so adding the
-   secret is the only step needed; leaving it unset is also fine.
-3. The workflow will run automatically on schedule; to run it immediately,
-   go to **Actions > Channel Vetting Pipeline > Run workflow**.
-4. To change the schedule, edit the `cron` line in the workflow file
+   your local `.env`. Optionally add `CLOAKBROWSER_LICENSE_KEY` too if you
+   have one; the workflow already references it, so adding the secret is
+   the only step needed, and it's fine to leave unset.
+3. The workflow pins `PROSPECT_DAY_TZ` to `America/Toronto` in its env, and
+   runs with `USE_CLOAKBROWSER` **off** by default even though the runner
+   env var exists — GitHub-hosted runners sit on Azure datacenter IPs that
+   YouTube challenges hard, and CloakBrowser patches browser fingerprints,
+   not IP reputation. To test whether it works from a runner anyway,
+   trigger the workflow manually (**Actions > Channel Vetting Pipeline >
+   Run workflow**) with its `use_cloakbrowser` input checked; only make it
+   the schedule's default once a manual run has proven it out.
+4. The workflow will run automatically on schedule; to run it immediately
+   without CloakBrowser, use the same **Run workflow** button.
+5. To change the schedule, edit the `cron` line in the workflow file
    (cron is UTC; see https://crontab.guru to build a new expression).
+
+## Running the tests
+
+```bash
+python -m pytest
+```
+
+Runs the full suite in `tests/` (76 tests at time of writing) covering
+discovery windowing/early-stop, qualification precedence, the DO NOT
+CONTACT fail-closed paths, `count_added_today()`/daily-cap behavior,
+`prospect_day.py`, the browser-email fallback, and a regression check
+that the removed paid email-finder integrations (Hunter.io, Modash) stay
+removed. No network calls or real credentials are needed — everything is
+mocked.
 
 ## Tuning
 
 - Adjust scoring weights and thresholds at the top of `scoring.py`.
 - Adjust `QUOTA_CEILING` in `.env` if you want more/less headroom for
   enrichment calls after discovery.
+- Adjust `DAILY_QUALIFIED_CAP` / `DAILY_FLAGGED_CAP` in `.env` if 30/10 per
+  niche per day doesn't match your review team's actual capacity.
+- Per-niche qualification thresholds (`min_avg_views`,
+  `min_channel_age_months`) live on each `NICHES` entry in `main.py`, not
+  in `.env` — they come straight from each niche's influencer profiling
+  brief.
 - `DEFAULT_NICHE_MATCH` in `main.py` is a neutral placeholder (50/100)
   since automated topical/niche matching isn't implemented — reviewers can
   factor niche fit in manually via the Airtable "Notes"/"Status" fields.

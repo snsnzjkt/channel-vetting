@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 
@@ -23,7 +23,6 @@ from quota_tracker import record_spend
 logger = logging.getLogger(__name__)
 
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
-URL_PATTERN = re.compile(r"https?://([a-zA-Z0-9.\-]+)", re.IGNORECASE)
 HANDLE_PATTERN = re.compile(r"@([a-zA-Z0-9_.\-]+)")
 
 
@@ -66,9 +65,8 @@ PERFORMANCE_SAMPLE_SIZE = 10
 # services, freelance marketplaces and no-code tools (sponsor plugs, tip
 # jars, "logo by ..."). An address or website at one of these is that
 # service's, never the creator's. Confirmed necessary in testing: a
-# Coupert affiliate link produced Coupert's own support email via
-# Hunter, and a "Cash App tip jar" mention produced an "@cash.app" match
-# via the repeated-email path.
+# "Cash App tip jar" mention produced an "@cash.app" match via the
+# repeated-email path.
 THIRD_PARTY_DOMAINS = {
     "youtube.com", "youtu.be", "instagram.com", "tiktok.com", "twitter.com",
     "x.com", "facebook.com", "fb.com", "linktr.ee", "linktree.com",
@@ -84,9 +82,9 @@ THIRD_PARTY_DOMAINS = {
     "tinyurl.com", "t.co", "ow.ly", "rebrand.ly", "is.gd", "tiny.cc", "cutt.ly",
     # Generic freelance-marketplace / form-builder / no-code tool platforms
     # creators routinely credit or link to (a logo designer's Fiverr gig, a
-    # Tally.so submission form, a Canva design, etc.) — confirmed in
-    # testing: these produce that PLATFORM's own business email via Hunter,
-    # not the creator's, even when the creator is using the tool themselves.
+    # Tally.so submission form, a Canva design, etc.) — an address at one
+    # of these is that PLATFORM's own business email, not the creator's,
+    # even when the creator is using the tool themselves.
     "fiverr.com", "upwork.com", "freelancer.com", "99designs.com",
     "tally.so", "typeform.com", "forms.gle", "docs.google.com",
     "calendly.com", "canva.com", "elink.io",
@@ -94,20 +92,14 @@ THIRD_PARTY_DOMAINS = {
 
 # Free consumer mail providers. Unlike THIRD_PARTY_DOMAINS these are NOT
 # someone else's domain — a creator's real contact address is very often
-# a gmail one. They are worthless only as a Hunter Domain Search *target*
-# ("find me an address at gmail.com" matches millions of strangers).
+# a gmail one. Kept separate from EMAIL_DOMAIN_BLOCKLIST for that reason
+# (see below) — still used for reporting in backfill_missing_emails.py.
 FREEMAIL_DOMAINS = {
     "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
     "msn.com", "yahoo.com", "ymail.com", "aol.com", "icloud.com", "me.com",
     "mac.com", "protonmail.com", "proton.me", "gmx.com", "gmx.de",
     "mail.com", "zoho.com", "yandex.com", "yandex.ru", "fastmail.com",
 }
-
-# Two different questions, deliberately two different lists.
-#
-# What can never be the creator's own *website domain* to hand to
-# Hunter's Domain Search — third-party services plus freemail.
-DOMAIN_SEARCH_BLOCKLIST = THIRD_PARTY_DOMAINS | FREEMAIL_DOMAINS
 
 # What can never be the creator's own *email address* — third-party
 # services ONLY. Freemail is deliberately absent: folding these two
@@ -117,28 +109,8 @@ DOMAIN_SEARCH_BLOCKLIST = THIRD_PARTY_DOMAINS | FREEMAIL_DOMAINS
 EMAIL_DOMAIN_BLOCKLIST = THIRD_PARTY_DOMAINS
 
 
-def _email_domain_blocked(email: str) -> bool:
-    domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
-    return domain in EMAIL_DOMAIN_BLOCKLIST
-
-
-def extract_candidate_domain(text: str) -> str:
-    """
-    Best-effort extraction of what looks like the creator's own website
-    domain from free text (channel/video descriptions), for use as a
-    Hunter.io Domain Search query. Skips known social/link-aggregator
-    platforms and freemail providers (DOMAIN_SEARCH_BLOCKLIST), neither
-    of which is ever the creator's own searchable business domain.
-    """
-    if not text:
-        return ""
-    for match in URL_PATTERN.finditer(text):
-        domain = match.group(1).lower()
-        if domain.startswith("www."):
-            domain = domain[4:]
-        if domain and domain not in DOMAIN_SEARCH_BLOCKLIST:
-            return domain
-    return ""
+def is_blocklisted_email_domain(domain: str) -> bool:
+    return domain.lower() in EMAIL_DOMAIN_BLOCKLIST
 
 
 def extract_business_email(description: str) -> str:
@@ -157,7 +129,8 @@ def extract_business_email(description: str) -> str:
     if not description:
         return ""
     for candidate in EMAIL_PATTERN.findall(description):
-        if not _email_domain_blocked(candidate):
+        domain = candidate.rsplit("@", 1)[-1].lower()
+        if not is_blocklisted_email_domain(domain):
             return candidate
     return ""
 
@@ -177,7 +150,8 @@ def find_repeated_email(video_descriptions: list[str]) -> str:
         # dedupe within a single video's description so one video that
         # happens to print the same address twice doesn't inflate its count
         emails_in_video = {
-            e for e in set(EMAIL_PATTERN.findall(description)) if not _email_domain_blocked(e)
+            e for e in set(EMAIL_PATTERN.findall(description))
+            if not is_blocklisted_email_domain(e.rsplit("@", 1)[-1].lower())
         }
         video_counter.update(emails_in_video)
 
@@ -186,6 +160,32 @@ def find_repeated_email(video_descriptions: list[str]) -> str:
 
     email, count = video_counter.most_common(1)[0]
     return email if count >= EMAIL_MIN_VIDEO_REPEATS else ""
+
+
+# Average days per month, for turning a channel's age into the "months"
+# unit the briefs are written in. Approximate on purpose — nothing here
+# depends on calendar-exact month boundaries.
+DAYS_PER_MONTH = 30.44
+
+
+def channel_age_months(published_at: str | None) -> float | None:
+    """
+    Age of a channel in months, from the ISO 8601 timestamp channels.list
+    returns in snippet.publishedAt.
+
+    Returns None when the value is missing or unparseable — callers must
+    treat None as "unknown" and NOT as "new", since absent data is not
+    evidence against a channel.
+    """
+    if not published_at:
+        return None
+    try:
+        created = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        logger.info("Unparseable publishedAt %r — treating channel age as unknown.", published_at)
+        return None
+    delta_days = (datetime.now(timezone.utc) - created).days
+    return delta_days / DAYS_PER_MONTH
 
 
 def get_channel_stats(channel_id: str) -> dict | None:
@@ -228,6 +228,8 @@ def get_channel_stats(channel_id: str) -> dict | None:
         "channel_id": channel_id,
         "channel_title": snippet.get("title"),
         "country": snippet.get("country", "Unknown"),
+        # From the snippet already being fetched — no extra quota.
+        "published_at": snippet.get("publishedAt", ""),
         "subscriber_count": int(stats.get("subscriberCount", 0)),
         "video_count": int(stats.get("videoCount", 0)),
         "view_count": int(stats.get("viewCount", 0)),

@@ -10,6 +10,7 @@ __pycache__/
 CLAUDE.md
 .superpowers
 \superpowers
+docs
 
 # cloakbrowser-mcp is run via `npx` (see .mcp.json); these should never
 # appear, but keep them out if a local npm install is ever done instead.

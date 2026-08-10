@@ -13,9 +13,14 @@ on:
         type: boolean
         default: false
       use_playwright_stealth:
-        description: "Enable About-page email lookups in Playwright (unproven on runner IPs)"
+        description: "Enable the Playwright link-list email lookup (uncheck for a faster run)"
         type: boolean
-        default: false
+        default: true
+      days_back:
+        description: "How far back to search, in days. Use 90 for a one-off backlog sweep against emptied tables; leave blank for the usual 7."
+        type: string
+        required: false
+        default: ""
 
 jobs:
   run-pipeline:
@@ -29,11 +34,21 @@ jobs:
       AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
       AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
       YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-      # Off for scheduled runs. Stealth patches browser fingerprints, not
+      # ON for scheduled runs, and overridable on a manual dispatch.
+      #
+      # `github.event.inputs` is NULL on a schedule event — a workflow_dispatch
+      # input's `default:` does not apply to any other trigger. The previous
+      # expression here compared that null against 'true', so scheduled runs
+      # got `false` no matter what the input default said. Checking the event
+      # name first is what actually makes the schedule pick it up.
+      #
+      # Caveat this does not fix: stealth patches browser fingerprints, not
       # datacenter IP reputation, and GitHub runners sit in Azure ranges
-      # YouTube challenges hard. Enable via workflow_dispatch to test;
-      # only make it the default once a manual run proves it works.
-      USE_PLAYWRIGHT_STEALTH: ${{ github.event.inputs.use_playwright_stealth == 'true' }}
+      # YouTube challenges hard. Turning it on makes the browser step RUN;
+      # whether YouTube serves it real pages is a separate question the run
+      # log now answers (main.py warns when the step was requested but the
+      # browser could not start).
+      USE_PLAYWRIGHT_STEALTH: ${{ github.event_name != 'workflow_dispatch' || inputs.use_playwright_stealth }}
       # Pinned so the runner (UTC) agrees with head office on the day.
       PROSPECT_DAY_TZ: America/Toronto
 
@@ -72,16 +87,33 @@ jobs:
       # pip installs the playwright package but not the browser binary it
       # drives, so this is what makes browser_email.py functional at all.
       # --with-deps pulls the shared libraries a headless Chromium links
-      # against on a bare ubuntu-latest runner. Only on manual dispatch:
-      # a scheduled run leaves the browser step off and doesn't need it.
+      # against on a bare ubuntu-latest runner.
+      #
+      # Gated on the resolved env var, NOT on github.event.inputs — that is
+      # null on a schedule, so gating on it would skip this step on exactly
+      # the runs that now have the browser step turned on. Missing Chromium
+      # fails SOFT (BrowserEmailScraper.launch() returns an inert scraper),
+      # so the symptom would have been zero browser-sourced emails and no
+      # error at all.
       - name: Install Chromium for Playwright
-        if: github.event.inputs.use_playwright_stealth == 'true'
+        if: env.USE_PLAYWRIGHT_STEALTH == 'true'
         run: python -m playwright install --with-deps chromium
 
+      # DAYS_BACK is empty on a schedule and on any dispatch that left the
+      # box blank, in which case no --days-back flag is passed at all and
+      # main.py falls back to DISCOVERY_DAYS_BACK (7). Deliberately not
+      # given a non-empty default: a wide window is a one-off backlog
+      # sweep, and making it the standing behaviour would have every daily
+      # run re-reading the same already-consumed pool for 100 units a
+      # keyword (see "Discovery window" in CLAUDE.md).
       - name: Run pipeline (full)
         if: github.event_name == 'schedule' || github.event.inputs.test_mode != 'true'
-        run: python main.py
+        env:
+          DAYS_BACK: ${{ inputs.days_back }}
+        run: python main.py ${DAYS_BACK:+--days-back $DAYS_BACK}
 
       - name: Run pipeline (test mode)
         if: github.event.inputs.test_mode == 'true'
-        run: python main.py --test
+        env:
+          DAYS_BACK: ${{ inputs.days_back }}
+        run: python main.py --test ${DAYS_BACK:+--days-back $DAYS_BACK}

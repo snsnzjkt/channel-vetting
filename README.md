@@ -37,12 +37,22 @@ weak day can't flood a table with below-criteria channels:
    the last 50 videos' descriptions looking for a contact email — a wider
    window that costs no extra quota, since the underlying calls are billed
    per-call rather than per-video.
-5. **Qualification** (`scoring.py`) — checks each candidate's avg views and
-   channel age against that niche's thresholds. Channels that fail are
+5. **Hard requirements** (`main.pre_push_drop_reason`, `search_zones.py`) —
+   a candidate is **discarded**, with no row written, unless it clears all
+   of: 10,000+ average views (both niches), 30+ public videos, and a
+   location inside the allowed search zones — **US, Canada, UK, Europe,
+   Australia; Ireland excluded**. Dead channels and Shorts-only channels
+   are dropped here too. Location comes from the channel's own `country`
+   setting (85% of channels in the live tables set it), falling back to the
+   region subtag of its content language (`en-GB` → GB) for the rest. A
+   channel that declares neither is *kept*, not dropped — absent data
+   isn't evidence against it.
+6. **Qualification** (`scoring.py`) — the one soft criterion left: whether
+   the channel meets that niche's minimum age. A channel that doesn't is
    **flagged for review, not discarded** — a human makes the final call.
-6. **Scoring** (`scoring.py`) — computes a fake-follower risk score and a
+7. **Scoring** (`scoring.py`) — computes a fake-follower risk score and a
    weighted overall score.
-7. **Airtable push** (`airtable_client.py`) — creates or updates a row per
+8. **Airtable push** (`airtable_client.py`) — creates or updates a row per
    channel in that niche's table (never duplicates), until both the
    qualified and flagged daily budgets are full or candidates run out.
 
@@ -69,20 +79,24 @@ budget.
    videos), Engagement Rate, Upload Frequency (Single line text — see
    note below), Content Language, Email (**Email** field type — not
    Single line text), Fake Follower Risk Score, Overall Score,
-   Qualification (single select: Qualified /
-   Below View Minimum / New Channel — see note below), Status (single
+   Qualification (single select: Qualified / New Channel — see note
+   below), Status (single
    select: New/Reviewing/Approved/Rejected/Contacted), Source, Notes,
    Date Added.
 
    Grab each table's ID (open the table → **Help → API documentation**,
    or read it from the URL — the `tbl...` segment) for step 4.
 
-   > `Qualification` records why a candidate did or didn't clear its
-   > niche's hard requirements (avg views, and for some niches a minimum
-   > channel age — see `NICHES` in `main.py`). Channels that fail are
-   > still written to the table (`Status = New`) rather than dropped, so
-   > a human reviewer can decide; when a candidate fails on both views
-   > and age, `Below View Minimum` is the value recorded.
+   > `Qualification` now records one thing: whether the channel is old
+   > enough for its niche. `New Channel` means it isn't, and the row is
+   > written anyway (`Status = New`) so a human reviewer can decide.
+   >
+   > A third option, `Below View Minimum`, existed before the 2026-08
+   > criteria change. The view floor is now a hard requirement — channels
+   > under it are dropped rather than written — so the pipeline never
+   > produces that value again. **Keep the option on an existing table**:
+   > it holds the rows written under the old rules, and deleting it would
+   > blank their Qualification cell. A brand-new table doesn't need it.
 
    > This pipeline also requires a **DO NOT CONTACT** suppression table to
    > already exist in the same base — it's referenced by a hardcoded
@@ -246,7 +260,7 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `DISCOVERY_DAYS_BACK` | 7 | How many days back `search.list` looks for videos (short and self-renewing by design — see below; `--days-back` overrides per run) |
 | `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
 | `EMAIL_DEEP_SCAN_PAGES` | 2 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
-| `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see "Browser path" below). `USE_CLOAKBROWSER` is still accepted as an alias |
+| `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see "Browser path" below). The search-zone filter does not depend on it. `USE_CLOAKBROWSER` is still accepted as an alias |
 
 ### 5. Edit your keywords / niches
 
@@ -256,6 +270,14 @@ the "Lifestyle Sofa" and "Home Theater" Influencer Profiling briefs,
 Cynthia Lim, 15 April 2024), which Airtable table it pushes to, and its
 qualification thresholds — `min_avg_views` and `min_channel_age_months`
 (`None` if the niche has no age requirement, as with Lifestyle Sofa).
+
+Note that `min_avg_views` is **10,000 for both niches** as of the 2026-08
+criteria change. Lifestyle Sofa's brief says 2,000; that was deliberately
+overridden to put the two niches on the same bar. The other two shared
+requirements — 30+ public videos and the allowed search zones — aren't
+per-niche knobs: they live in `MIN_VIDEO_COUNT` (`main.py`) and
+`search_zones.py`.
+
 Add/replace keywords as new niche briefs come in — pull from a brief's
 actual content-type list, not its demographic/psychographic sections
 (those describe the audience, not searchable video topics). To add a
@@ -299,7 +321,8 @@ python main.py
 | `config.py` | Loads `.env`, defines constants (quota ceiling, daily caps, weights inputs, etc.) |
 | `discovery.py` | `search.list`-based channel discovery + per-day search cache |
 | `enrichment.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
-| `scoring.py` | Fake-follower risk heuristic + weighted overall score + `qualify()` |
+| `scoring.py` | Fake-follower risk heuristic + weighted overall score + `qualify()` (channel age) |
+| `search_zones.py` | Allowed-country tables (US/CA/UK/EU/AU, minus Ireland) + `zone_verdict()` |
 | `do_not_contact.py` | DO NOT CONTACT suppression list — fetched fresh every run, fails closed |
 | `browser_email.py` | Playwright link-list email fallback (last step of the email chain) |
 | `prospect_day.py` | Single source of truth for "what day is it" for the daily caps (`PROSPECT_DAY_TZ`) |
@@ -346,12 +369,14 @@ Setup:
 python -m pytest
 ```
 
-Runs the full suite in `tests/` (126 tests at time of writing) covering
-discovery windowing/early-stop, qualification precedence, the DO NOT
+Runs the full suite in `tests/` (257 tests at time of writing) covering
+discovery windowing/early-stop, the pre-push gate (view floor, video-count
+floor, dead and Shorts-only channels), the search-zone tables and their
+three-state verdict, qualification, the DO NOT
 CONTACT fail-closed paths, `count_added_today()`/daily-cap behavior,
 `prospect_day.py`, the candidate pre-filter, every step of the email
 chain (including the older-uploads scan's quota arithmetic and which
-step gets credited for a hit), the browser-email fallback, and a
+step gets credited for a hit), the browser About-panel reader, and a
 regression check that the removed paid email-finder integrations
 (Hunter.io, Modash) stay removed. No network calls or real credentials
 are needed — everything is mocked.
@@ -362,11 +387,19 @@ are needed — everything is mocked.
 - Adjust `QUOTA_CEILING` in `.env` if you want more/less headroom for
   enrichment calls after discovery.
 - Adjust `DAILY_QUALIFIED_CAP` / `DAILY_FLAGGED_CAP` in `.env` if 30/10 per
-  niche per day doesn't match your review team's actual capacity.
-- Per-niche qualification thresholds (`min_avg_views`,
-  `min_channel_age_months`) live on each `NICHES` entry in `main.py`, not
-  in `.env` — they come straight from each niche's influencer profiling
-  brief.
-- `DEFAULT_NICHE_MATCH` in `main.py` is a neutral placeholder (50/100)
-  since automated topical/niche matching isn't implemented — reviewers can
-  factor niche fit in manually via the Airtable "Notes"/"Status" fields.
+  niche per day doesn't match your review team's actual capacity. Note
+  that with only the channel-age criterion left able to flag a row,
+  Lifestyle Sofa (no age requirement) never produces a flagged row, so its
+  flagged budget goes unused.
+- Per-niche thresholds (`min_avg_views`, `min_channel_age_months`) live on
+  each `NICHES` entry in `main.py`, not in `.env`.
+- The two shared hard requirements are elsewhere: `MIN_VIDEO_COUNT` (30) at
+  the top of `main.py`, and the allowed countries in `search_zones.py`
+  (`ALLOWED_COUNTRY_CODES`, plus the name tables the About-panel lookup
+  uses). Widening "Europe" to include Russia, Belarus or Turkey is a
+  one-line edit there — they're excluded by default and flagged in a
+  comment.
+- `DEFAULT_NICHE_MATCH` in `main.py` is a fixed placeholder fed into every
+  Overall Score, since automated topical/niche matching isn't implemented —
+  reviewers can factor niche fit in manually via the Airtable
+  "Notes"/"Status" fields.

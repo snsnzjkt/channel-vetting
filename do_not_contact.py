@@ -1,6 +1,7 @@
 """
 Enforces the "DO NOT CONTACT" suppression list (Airtable table
-tblHO0kJw0cBqV8Mw, ~498 rows).
+tblHO0kJw0cBqV8Mw, ~1,330 rows as of 2026-08 and growing — it was ~498
+when this module was written, so don't treat the size as fixed).
 
 Modeled on external_dedupe.py, which solves the same shape of problem —
 an Airtable table keyed by @handle URL rather than Channel ID — but with

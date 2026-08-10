@@ -2,6 +2,17 @@
 Step 4 of the email chain: follows a YouTube channel's public external
 LINK LIST looking for a contact address on the creator's own site.
 
+Do NOT add a country lookup here. `aboutChannelViewModel.country` exists
+and does return a name ("United States"), but it is the SAME channel
+setting `channels.list` returns in `snippet.country` — the About panel
+just renders it. Measured over the 5 channels in the live tables whose
+API country was empty, all 5 had no `country` key in the About payload
+either, so the lookup recovered 0 and cost a page load per candidate. The
+control in that measurement (Theater At Home, API country `US`) did return
+"United States", which is how we know the key name was right and the
+result is real. `search_zones.py` falls back to the content-language
+region subtag instead, which is free.
+
 Why the link list and not the About text: `channels.list` already returns
 the channel's full, untruncated About description, and
 `enrichment.get_channel_stats()` already runs `extract_business_email()`
@@ -66,6 +77,7 @@ SOCIAL_ABOUT_HOSTS = {"facebook.com"}
 # deliberately NOT returned: chain step 2 already scanned it via
 # channels.list, and re-finding it here would misreport a step-2 hit as a
 # step-4 one (see main.EMAIL_SOURCE_* and backfill_missing_emails.py).
+# Nor is `country` — see the module docstring for why that measured out.
 ABOUT_LINKS_JS = """() => {
   let vm = null;
   const walk = (node, depth) => {
@@ -280,12 +292,8 @@ class BrowserEmailScraper:
         if not self._enabled:
             return ""
 
-        page_source = self._context or self._browser
-        page = None
-        try:
-            page = page_source.new_page()
-        except Exception as exc:
-            logger.info("Playwright could not open a page for %s: %s", channel_id, exc)
+        page, opened = self._open_page(channel_id)
+        if page is None:
             return ""
 
         try:
@@ -315,11 +323,24 @@ class BrowserEmailScraper:
             logger.info("Playwright email lookup failed for %s: %s", channel_id, exc)
             return ""
         finally:
-            if page is not None:
-                try:
-                    page.close()
-                except Exception:
-                    pass
+            if opened:
+                self._close_page(page)
+
+    def _open_page(self, channel_id: str):
+        """(page, opened) — (None, False) when a page can't be opened."""
+        page_source = self._context or self._browser
+        try:
+            return page_source.new_page(), True
+        except Exception as exc:
+            logger.info("Playwright could not open a page for %s: %s", channel_id, exc)
+            return None, False
+
+    @staticmethod
+    def _close_page(page) -> None:
+        try:
+            page.close()
+        except Exception:
+            pass
 
     def _read_about_links(self, page, channel_id: str):
         """The channel's aboutChannelViewModel links, or None."""

@@ -27,6 +27,7 @@ from enrichment import (
     scan_older_videos_for_email,
 )
 from scoring import calc_fake_follower_risk, calc_overall_score, QUALIFIED, qualify
+from search_zones import country_code, region_from_language_tag, zone_verdict
 from airtable_client import (
     get_existing_channel_ids,
     push_record,
@@ -78,6 +79,11 @@ NICHES = {
         "table_name": AIRTABLE_TABLE_HOME_THEATER,
         # From the Home Theater brief (Cynthia Lim, 15 April 2024):
         # "Has a Min 10k+ views on YouTube" and "Not a new channel".
+        # The 10,000 figure is now the floor BOTH niches run on, so this
+        # entry is unchanged by the 2026-08 criteria change — it is the one
+        # the other niche moved to. The threshold stays per-niche rather
+        # than becoming a shared constant so a niche can be given its own
+        # bar again without unpicking the gate.
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
     },
@@ -96,11 +102,17 @@ NICHES = {
             "seasonal home decor",
         ],
         "table_name": AIRTABLE_TABLE_LIFESTYLE_SOFA,
-        # From the Lifestyle Sofa brief: "Has min of 2k+ view on YouTube
-        # videos". The brief sets no channel-age requirement. Its
-        # Instagram thresholds (100k+ followers, 20k+ reel views) are out
-        # of scope — this pipeline only observes YouTube.
-        "min_avg_views": 2_000,
+        # RAISED from the brief's 2,000 to 10,000 in the 2026-08 criteria
+        # change, which put both niches on the same view floor. The brief
+        # (Cynthia Lim, 15 April 2024) says "Has min of 2k+ view on YouTube
+        # videos" — this deliberately overrides it, so don't "restore" the
+        # 2,000 from the brief without checking that the instruction to
+        # unify the two niches has actually been reversed.
+        #
+        # The brief sets no channel-age requirement, and that part still
+        # stands. Its Instagram thresholds (100k+ followers, 20k+ reel
+        # views) are out of scope — this pipeline only observes YouTube.
+        "min_avg_views": 10_000,
         "min_channel_age_months": None,
     },
 }
@@ -109,7 +121,7 @@ NICHES = {
 # automated topical matching isn't implemented yet — human reviewers can
 # override the "Overall Score" judgment during Airtable review. Wire in a
 # real niche classifier here if/when one becomes available.
-DEFAULT_NICHE_MATCH = 50.0
+DEFAULT_NICHE_MATCH = 70.0
 
 
 # One label per step of the chain below. backfill_missing_emails.py
@@ -124,8 +136,15 @@ EMAIL_SOURCE_BROWSER = "linked site or its /contact page (Playwright)"
 # --- Pre-push gate -------------------------------------------------------
 # The ONE place this pipeline discards a candidate outright instead of
 # flagging it for review. Everything else follows the flag-never-discard
-# rule; these two cases are exceptions because a human reviewing them is
-# pure cost.
+# rule; these cases are exceptions because a human reviewing them is pure
+# cost.
+#
+# The 2026-08 criteria change moved the view floor in here. It used to
+# produce a "Below View Minimum" row for a reviewer to dismiss; it is now
+# a hard requirement, so an under-view channel is discarded and that
+# Qualification value no longer exists (see scoring.py). Two more hard
+# requirements landed with it: a minimum video count, and the search-zone
+# check below.
 #
 # Dead channels: both measures have to be dead, not either. In the live
 # Home Theater table five rows were burning flagged budget at 0-281 subs
@@ -134,30 +153,91 @@ EMAIL_SOURCE_BROWSER = "linked site or its /contact page (Playwright)"
 # magnitude to spare. Requiring BOTH keeps a small-but-growing channel
 # (few subs, real views) and a fading big one (many subs, few views) in the
 # table where a reviewer can see them.
+#
+# That gate is now mostly redundant against a 10,000-view floor, and is
+# kept anyway: it is the floor that holds if a niche's own min_avg_views is
+# ever lowered, and it is the only one of the two that reads subscribers.
 JUNK_MIN_SUBSCRIBERS = 100
 JUNK_MIN_AVG_VIEWS = 100
 
+# A published track record, applied to BOTH niches. Read from
+# channels.list statistics.videoCount, i.e. the channel's whole public
+# catalogue, not the 10-video performance window or the 50-video email
+# scan. Deliberately a FLOOR with no upper bound: "30-40 videos" describes
+# the smallest catalogue worth approaching, and a channel with 400 uploads
+# clears that bar rather than failing it.
+MIN_VIDEO_COUNT = 30
+
 DROP_DEAD_CHANNEL = "dead_channel"
 DROP_SHORTS_ONLY = "shorts_only"
+DROP_BELOW_VIEW_MINIMUM = "below_view_minimum"
+DROP_TOO_FEW_VIDEOS = "too_few_videos"
+DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
 
 
 def pre_push_drop_reason(
     subscriber_count: int | None,
     avg_views: float | None,
     shorts_only: bool = False,
+    min_avg_views: float = 0,
+    video_count: int | None = None,
 ) -> str | None:
     """
     Why this candidate should never reach Airtable, or None to continue.
 
-    Applies regardless of what qualify() would have returned — a
-    Below View Minimum row for a dead channel is exactly the row this gate
-    exists to stop writing.
+    Applies regardless of what qualify() would have returned — a row for a
+    dead channel is exactly the row this gate exists to stop writing.
+
+    Deliberately does NOT cover the search zone. That check needs a country
+    this function can't get for free (see resolve_country) and runs as its
+    own step in process_candidate; everything here is answerable from data
+    already fetched.
+
+    Unknown data never disqualifies, the same rule qualify() follows: a
+    `video_count` of None means channels.list didn't report one, and an
+    unreported catalogue size is not evidence of a small catalogue. A
+    reported 0 is a real answer and is failed like any other number below
+    the floor.
     """
     if shorts_only:
         return DROP_SHORTS_ONLY
+    if video_count is not None and video_count < MIN_VIDEO_COUNT:
+        return DROP_TOO_FEW_VIDEOS
+    if (avg_views or 0) < min_avg_views:
+        return DROP_BELOW_VIEW_MINIMUM
     if (subscriber_count or 0) < JUNK_MIN_SUBSCRIBERS and (avg_views or 0) < JUNK_MIN_AVG_VIEWS:
         return DROP_DEAD_CHANNEL
     return None
+
+
+def resolve_country(stats: dict, performance: dict) -> str:
+    """
+    Where the channel says it is, or "" when it says nothing.
+
+      1. `channels.list` -> snippet.country, an ISO 3166-1 alpha-2 code.
+         85% of the channels in the live tables set it (29 of 34).
+      2. The REGION SUBTAG of the content language ("en-GB" -> GB), for
+         the rest. Free — `get_recent_video_performance()` already read
+         `defaultAudioLanguage` for the "Content Language" column.
+
+    Both steps are free, so this can run for every surviving candidate.
+
+    Step 2 is a weak signal used only where step 1 is silent, never to
+    override it: measured on the live tables the language tag disagrees
+    with the declared country for 4 of the 29 channels that have one
+    (`en-US` content from India, Austria and Serbia; `fr-FR` from the US).
+    A bare language with no region subtag yields nothing at all — see
+    search_zones.region_from_language_tag.
+
+    There is deliberately no browser step here. See browser_email.py: the
+    About panel's country is the same field as snippet.country, so it
+    recovered 0 of the 5 live channels that lack one.
+    """
+    country = (stats.get("country") or "").strip()
+    if country_code(country):
+        return country
+
+    return region_from_language_tag(performance.get("content_language"))
 
 
 def resolve_email_with_source(stats: dict, performance: dict, scraper=None) -> tuple[str, str]:
@@ -314,14 +394,32 @@ def process_candidate(
         stats.get("subscriber_count"),
         performance.get("avg_views"),
         performance.get("shorts_only", False),
+        min_avg_views=niche_config["min_avg_views"],
+        video_count=stats.get("video_count"),
     )
     if drop_reason:
         logger.info(
-            "Dropping %s before push — %s (%s subs, %s avg views).",
+            "Dropping %s before push — %s (%s subs, %s avg views, %s videos).",
             stats.get("channel_title"), drop_reason,
             stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
+            stats.get("video_count"),
         )
         return None, drop_reason
+
+    # Search zone. Free — both of resolve_country's sources come out of
+    # data already fetched, so this costs no extra call and no page load.
+    #
+    # A None verdict means the channel declares no country we can read, and
+    # is deliberately KEPT — absent data is not evidence against a channel,
+    # the same rule qualify() applies to an unknown channel age. Only a
+    # positively-outside country is discarded.
+    country = resolve_country(stats, performance)
+    if zone_verdict(country) is False:
+        logger.info(
+            "Dropping %s before push — %s (country: %s).",
+            stats.get("channel_title"), DROP_OUTSIDE_SEARCH_ZONE, country,
+        )
+        return None, DROP_OUTSIDE_SEARCH_ZONE
 
     upload_freq = calc_upload_frequency(performance["upload_dates"])
     fake_risk = calc_fake_follower_risk(
@@ -336,13 +434,12 @@ def process_candidate(
         DEFAULT_NICHE_MATCH,
     )
 
+    # Age is the only qualification question left — the view floor, the
+    # video-count floor and the search zone are all hard gates above, so a
+    # candidate that reaches here has already passed them.
     qualification = qualify(
-        performance["avg_views"],
         channel_age_months(stats.get("published_at", "")),
-        niche_config["min_avg_views"],
         niche_config["min_channel_age_months"],
-        subscriber_count=stats.get("subscriber_count"),
-        engagement_rate=performance.get("avg_engagement_rate"),
     )
 
     email = resolve_email(stats, performance, scraper)
@@ -561,6 +658,24 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
     any_cap_check_completed = False
 
     scraper = BrowserEmailScraper.launch() if USE_PLAYWRIGHT_STEALTH else null_scraper()
+    # launch() fails SOFT — a missing Chromium binary, a missing shared
+    # library, or an unimportable playwright all return an inert scraper
+    # rather than raising, so the run continues with email chain step 4
+    # silently doing nothing. That is the right behaviour (one email source
+    # is not worth killing a run over) but it is invisible: the symptom is
+    # simply fewer emails, on a metric nobody watches per-run. Say it out
+    # loud instead, since "USE_PLAYWRIGHT_STEALTH is set" and "the browser
+    # actually started" are different facts and only the second one matters.
+    if USE_PLAYWRIGHT_STEALTH and not scraper.enabled:
+        logger.warning(
+            "USE_PLAYWRIGHT_STEALTH is on but the browser could not start — email "
+            "chain step 4 (linked site / contact page) is doing nothing this run. "
+            "On CI this usually means the 'Install Chromium for Playwright' step "
+            "was skipped; locally, run: python -m playwright install chromium"
+        )
+    elif USE_PLAYWRIGHT_STEALTH:
+        logger.info("Browser email step is live (Playwright + stealth).")
+
     try:
         for niche_name, niche_config in niches.items():
             missing_keys = [key for key in REQUIRED_NICHE_KEYS if key not in niche_config]

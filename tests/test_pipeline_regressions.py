@@ -19,7 +19,6 @@ import pytest
 
 from airtable_client import AirtableReadError
 from do_not_contact import BlocklistUnavailable
-from scoring import BELOW_VIEW_MINIMUM
 
 
 class _NullBlocklist:
@@ -49,6 +48,11 @@ def _stub_stats(**overrides):
         "subscriber_count": 10_000,
         "uploads_playlist_id": "PL1",
         "business_email": "",
+        # Both added by the 2026-08 criteria change and both hard gates —
+        # a stub missing them would be discarded before reaching the
+        # behaviour these tests are actually about.
+        "video_count": 100,
+        "country": "US",
     }
     stats.update(overrides)
     return stats
@@ -265,31 +269,204 @@ def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
     assert received.get("scraper") is sentinel_scraper
 
 
-# --- Bonus: qualify()'s threshold arguments must not be swapped at the call site --
+# --- Bonus: the two niche thresholds must not be crossed at the call site --
 
-def test_process_candidate_does_not_swap_qualify_thresholds(monkeypatch):
+def _run_process_candidate(monkeypatch, niche_config, *, avg_views, age, **stat_overrides):
+    import main
+
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(**stat_overrides))
+    monkeypatch.setattr(
+        main, "get_recent_video_performance",
+        lambda cid, pl: _stub_performance(avg_views=avg_views),
+    )
+    monkeypatch.setattr(main, "channel_age_months", lambda published_at: age)
+    monkeypatch.setattr(main, "resolve_email", lambda stats, performance, scraper: "")
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+
+    candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
+    return main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
+
+
+def test_process_candidate_does_not_feed_the_view_floor_to_qualify(monkeypatch):
     """
-    min_avg_views=10000, min_channel_age_months=6; avg_views=5000 (below
-    the view floor), channel_age_months=100 (well above the age floor).
-    Correctly wired, this must fail on VIEWS (BELOW_VIEW_MINIMUM). If the
-    two threshold arguments to qualify() were swapped at the call site,
-    5000 would compare against a threshold of 6 (passes) and 100 would
-    compare against a threshold of 10000 (fails) -> NEW_CHANNEL instead.
+    min_avg_views=10000, min_channel_age_months=6; avg_views=50000 (clears
+    the view gate), channel_age_months=100 (well above the age floor).
+    Correctly wired this is QUALIFIED. If min_avg_views were passed to
+    qualify() where the age threshold belongs, 100 months would compare
+    against a threshold of 10000 and every channel alive would come back
+    NEW_CHANNEL.
+    """
+    from scoring import QUALIFIED
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 6}
+    _record, qualification = _run_process_candidate(
+        monkeypatch, niche_config, avg_views=50_000, age=100,
+    )
+
+    assert qualification == QUALIFIED
+
+
+def test_process_candidate_still_flags_a_young_channel(monkeypatch):
+    """The age gate is the one criterion that still produces a row."""
+    from scoring import NEW_CHANNEL
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 12}
+    record, qualification = _run_process_candidate(
+        monkeypatch, niche_config, avg_views=50_000, age=3,
+    )
+
+    assert qualification == NEW_CHANNEL
+    assert record is not None  # flagged for review, not discarded
+
+
+# --- 2026-08: the three new hard gates discard instead of flagging --------
+
+def test_process_candidate_drops_a_channel_below_the_view_floor(monkeypatch):
+    """
+    This used to be written as a "Below View Minimum" row. It must now
+    produce NO record at all — that change is the whole point of retiring
+    the value, so a returned record here means the flag path came back.
     """
     import main
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance(avg_views=5000))
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    record, reason = _run_process_candidate(
+        monkeypatch, niche_config, avg_views=5_000, age=100,
+    )
+
+    assert record is None
+    assert reason == main.DROP_BELOW_VIEW_MINIMUM
+
+
+def test_process_candidate_drops_a_channel_with_too_few_videos(monkeypatch):
+    import main
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    record, reason = _run_process_candidate(
+        monkeypatch, niche_config, avg_views=50_000, age=100, video_count=12,
+    )
+
+    assert record is None
+    assert reason == main.DROP_TOO_FEW_VIDEOS
+
+
+def test_process_candidate_drops_a_channel_outside_the_search_zones(monkeypatch):
+    import main
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    record, reason = _run_process_candidate(
+        monkeypatch, niche_config, avg_views=50_000, age=100, country="IN",
+    )
+
+    assert record is None
+    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+
+
+def test_process_candidate_keeps_a_channel_with_no_declared_country(monkeypatch):
+    """
+    Most channels never set snippet.country. Discarding them would throw
+    away the bulk of the pipeline's output, so an unknown country is kept
+    and a human decides — the same rule as an unknown channel age.
+    """
+    from scoring import QUALIFIED
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    record, qualification = _run_process_candidate(
+        monkeypatch, niche_config, avg_views=50_000, age=100, country="Unknown",
+    )
+
+    assert record is not None
+    assert qualification == QUALIFIED
+
+
+def test_the_language_region_subtag_resolves_a_country_the_api_left_blank(monkeypatch):
+    """
+    Step 2 of resolve_country, and the real case it exists for: Tamilan
+    Market, live in the Lifestyle Sofa table, sets no snippet.country but
+    tags its videos `en-IN`. Without this step it stays "unknown" and gets
+    written.
+    """
+    import main
+
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(country="Unknown"))
+    monkeypatch.setattr(
+        main, "get_recent_video_performance",
+        lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-IN"),
+    )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
     monkeypatch.setattr(main, "resolve_email", lambda stats, performance, scraper: "")
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 6}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
 
-    _record, qualification = main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
+    record, reason = main.process_candidate(
+        candidate, {}, _NullBlocklist(), niche_config, None,
+    )
 
-    assert qualification == BELOW_VIEW_MINIMUM
+    assert record is None
+    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+
+
+def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
+    """
+    Misscreative, live in the Home Theater table: `en-US` content, but
+    snippet.country is IN. Four of the 29 live channels that declare a
+    country contradict their language tag this way, which is why the tag
+    is a fallback and never an override.
+    """
+    import main
+
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(country="IN"))
+    monkeypatch.setattr(
+        main, "get_recent_video_performance",
+        lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-US"),
+    )
+    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(main, "resolve_email", lambda stats, performance, scraper: "")
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+
+    candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+
+    record, reason = main.process_candidate(
+        candidate, {}, _NullBlocklist(), niche_config, None,
+    )
+
+    assert record is None
+    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+
+
+def test_a_bare_language_leaves_the_country_unknown(monkeypatch):
+    """
+    `en` says nothing about where the creator is, so the channel is kept.
+    Mapping bare languages to countries would have gained nothing on the
+    live tables and cost real prospects — see search_zones.py.
+    """
+    from scoring import QUALIFIED
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    record, qualification = _run_process_candidate(
+        monkeypatch, niche_config, avg_views=50_000, age=100, country="Unknown",
+    )
+
+    assert record is not None
+    assert qualification == QUALIFIED
+
+
+def test_resolve_country_does_not_take_a_scraper():
+    """
+    The About panel's country is the same field as snippet.country and
+    recovered 0 of the 5 live channels without one. A scraper argument
+    reappearing here means that page load came back.
+    """
+    import inspect
+
+    import main
+
+    assert list(inspect.signature(main.resolve_country).parameters) == [
+        "stats", "performance",
+    ]
 
 
 # --- M2: a failed push must not land in pushed_ids ------------------------

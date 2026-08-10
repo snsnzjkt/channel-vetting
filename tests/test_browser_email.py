@@ -491,6 +491,21 @@ def test_null_scraper_is_inert():
     assert null_scraper().find_email("UC123") == ""
 
 
+def test_the_scraper_does_not_do_country_lookups():
+    """
+    `aboutChannelViewModel.country` is real, but it is the SAME channel
+    setting `channels.list` returns in snippet.country — the panel just
+    renders it. All 5 live channels with an empty API country had no
+    `country` key in the About payload either, so a lookup here recovers 0
+    and costs a page load per candidate. `search_zones.py` uses the
+    content-language region subtag instead. Pinned so it doesn't come back
+    on the assumption that a browser must see more than the API.
+    """
+    from browser_email import BrowserEmailScraper
+
+    assert not hasattr(BrowserEmailScraper, "find_country")
+
+
 # --- chain integration ---------------------------------------------------
 
 

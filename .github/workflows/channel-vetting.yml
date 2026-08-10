@@ -12,14 +12,30 @@ on:
         description: "Run in --test mode (1 keyword, 5 results)"
         type: boolean
         default: false
-      use_cloakbrowser:
-        description: "Enable CloakBrowser About-page email lookups (unproven on runner IPs)"
+      use_playwright_stealth:
+        description: "Enable About-page email lookups in Playwright (unproven on runner IPs)"
         type: boolean
         default: false
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+
+    # Identical for both run steps below, so it lives here rather than
+    # being repeated (and kept in sync) twice.
+    env:
+      AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+      AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+      AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
+      AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      # Off for scheduled runs. Stealth patches browser fingerprints, not
+      # datacenter IP reputation, and GitHub runners sit in Azure ranges
+      # YouTube challenges hard. Enable via workflow_dispatch to test;
+      # only make it the default once a manual run proves it works.
+      USE_PLAYWRIGHT_STEALTH: ${{ github.event.inputs.use_playwright_stealth == 'true' }}
+      # Pinned so the runner (UTC) agrees with head office on the day.
+      PROSPECT_DAY_TZ: America/Toronto
 
     steps:
       - name: Check out repo
@@ -53,63 +69,19 @@ jobs:
           restore-keys: |
             channel-vetting-state-
 
-      # Only runs when a manual dispatch opts into CloakBrowser. CloakBrowser
-      # downloads a patched Chromium but not the shared libraries it links
-      # against, so headless launches fail on a bare ubuntu-latest runner
-      # without these.
-      - name: Install Chromium system dependencies
-        if: github.event.inputs.use_cloakbrowser == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-            libxrandr2 libgbm1 libasound2t64 libpango-1.0-0 libcairo2
-
-      # Separate from the quota/search cache above: this one is large,
-      # rarely changes, and keying it with the quota state would force a
-      # re-download of Chromium every time quota_log.json changes.
-      - name: Cache CloakBrowser Chromium
-        if: github.event.inputs.use_cloakbrowser == 'true'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cloakbrowser
-          key: cloakbrowser-${{ runner.os }}-v1
+      # pip installs the playwright package but not the browser binary it
+      # drives, so this is what makes browser_email.py functional at all.
+      # --with-deps pulls the shared libraries a headless Chromium links
+      # against on a bare ubuntu-latest runner. Only on manual dispatch:
+      # a scheduled run leaves the browser step off and doesn't need it.
+      - name: Install Chromium for Playwright
+        if: github.event.inputs.use_playwright_stealth == 'true'
+        run: python -m playwright install --with-deps chromium
 
       - name: Run pipeline (full)
         if: github.event_name == 'schedule' || github.event.inputs.test_mode != 'true'
-        env:
-          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
-          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
-          AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
-          AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          # Off for scheduled runs. CloakBrowser defeats fingerprinting,
-          # not datacenter IP reputation, and GitHub runners sit in Azure
-          # ranges YouTube challenges hard. Enable via workflow_dispatch
-          # to test; only make it the default once a manual run proves it.
-          USE_CLOAKBROWSER: ${{ github.event.inputs.use_cloakbrowser == 'true' }}
-          # Optional. CloakBrowser runs unlicensed without it.
-          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}
-          # Pinned so the runner (UTC) agrees with head office on the day.
-          PROSPECT_DAY_TZ: America/Toronto
         run: python main.py
 
       - name: Run pipeline (test mode)
         if: github.event.inputs.test_mode == 'true'
-        env:
-          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
-          AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
-          AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
-          AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
-          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
-          # Off for scheduled runs. CloakBrowser defeats fingerprinting,
-          # not datacenter IP reputation, and GitHub runners sit in Azure
-          # ranges YouTube challenges hard. Enable via workflow_dispatch
-          # to test; only make it the default once a manual run proves it.
-          USE_CLOAKBROWSER: ${{ github.event.inputs.use_cloakbrowser == 'true' }}
-          # Optional. CloakBrowser runs unlicensed without it.
-          CLOAKBROWSER_LICENSE_KEY: ${{ secrets.CLOAKBROWSER_LICENSE_KEY }}
-          # Pinned so the runner (UTC) agrees with head office on the day.
-          PROSPECT_DAY_TZ: America/Toronto
         run: python main.py --test

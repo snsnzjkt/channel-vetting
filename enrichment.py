@@ -17,6 +17,7 @@ from config import (
     QUOTA_COST_PLAYLIST_ITEMS_LIST,
     QUOTA_COST_VIDEOS_LIST,
     API_SLEEP_SECONDS,
+    EMAIL_DEEP_SCAN_PAGES,
 )
 from quota_tracker import record_spend
 
@@ -109,8 +110,64 @@ FREEMAIL_DOMAINS = {
 EMAIL_DOMAIN_BLOCKLIST = THIRD_PARTY_DOMAINS
 
 
+# The API exposes no "is this a Short" flag, so duration is the proxy.
+# 60s is the classic Shorts cap. YouTube raised it to 3 minutes in late
+# 2024, so a 60s cutoff under-detects newer Shorts channels — chosen
+# deliberately: a channel misread as Shorts-only is DISCARDED before it
+# ever reaches Airtable (main.pre_push_drop_reason), so a false positive
+# costs a real prospect with no row left to review, while a false negative
+# only costs one flagged row a human can dismiss.
+SHORTS_MAX_SECONDS = 60
+
+ISO8601_DURATION_PATTERN = re.compile(
+    r"^P(?:(?P<days>\d+)D)?T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?$"
+)
+
+
 def is_blocklisted_email_domain(domain: str) -> bool:
     return domain.lower() in EMAIL_DOMAIN_BLOCKLIST
+
+
+def parse_iso8601_duration(value: str | None) -> int | None:
+    """
+    Seconds for an ISO 8601 duration like videos.list returns ("PT12M35S"),
+    or None when it's missing or unparseable.
+
+    None means "unknown", never "zero" — see is_shorts_only().
+    """
+    if not value:
+        return None
+    match = ISO8601_DURATION_PATTERN.match(value.strip())
+    if not match:
+        return None
+    parts = {k: int(v) for k, v in match.groupdict(default="0").items()}
+    total = (
+        parts["days"] * 86400
+        + parts["hours"] * 3600
+        + parts["minutes"] * 60
+        + parts["seconds"]
+    )
+    # "P0D" and friends parse structurally but carry no duration; a
+    # zero-second video is not evidence of anything.
+    return total or None
+
+
+def is_shorts_only(durations) -> bool:
+    """
+    True only when every sampled video is a Short, i.e. no evidence of any
+    long-form upload.
+
+    Returns False whenever ANY duration is unknown, and False for an empty
+    sample. This asymmetry is deliberate: the caller discards a
+    Shorts-only channel outright, so the burden of proof sits on excluding,
+    not on including.
+    """
+    if not durations:
+        return False
+    parsed = [parse_iso8601_duration(d) for d in durations]
+    if any(seconds is None for seconds in parsed):
+        return False
+    return all(seconds <= SHORTS_MAX_SECONDS for seconds in parsed)
 
 
 def extract_business_email(description: str) -> str:
@@ -284,7 +341,8 @@ def get_recent_video_performance(
         logger.warning("playlistItems.list failed for %s: %s %s", channel_id, resp.status_code, resp.text)
         return None
 
-    items = resp.json().get("items", [])
+    payload = resp.json()
+    items = payload.get("items", [])
     video_ids = [i["contentDetails"]["videoId"] for i in items if i.get("contentDetails", {}).get("videoId")]
     # playlistItems returns newest-first, so the leading slice is "the last
     # N videos" — the window upload cadence is measured over, matching the
@@ -303,7 +361,9 @@ def get_recent_video_performance(
     # a per-video signal for "Content Language" — channel-level language
     # isn't reliably exposed by the API at all.
     video_params = {
-        "part": "snippet,statistics",
+        # contentDetails adds `duration`, which is the only Shorts signal the
+        # API offers. Free: videos.list is a flat 1 unit regardless of parts.
+        "part": "snippet,statistics,contentDetails",
         "id": ",".join(video_ids),
         "key": YOUTUBE_API_KEY,
     }
@@ -328,11 +388,18 @@ def get_recent_video_performance(
     performance_count = 0
     content_language = ""
     video_descriptions = []
+    durations = []
     for v in video_items:
         snippet = v.get("snippet", {})
         # Every fetched video feeds the email scan — that's the whole
         # point of pulling EMAIL_SCAN_SAMPLE_SIZE of them.
         video_descriptions.append(snippet.get("description", ""))
+        # Shorts detection reads the WIDE window (every fetched video, up to
+        # EMAIL_SCAN_SAMPLE_SIZE) rather than the 10-video performance
+        # window: more videos means more chances to see a long-form upload,
+        # which makes a false "Shorts-only" verdict less likely. That matters
+        # because that verdict discards the channel outright.
+        durations.append(v.get("contentDetails", {}).get("duration"))
         if not content_language:
             content_language = snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or ""
 
@@ -357,15 +424,124 @@ def get_recent_video_performance(
         "upload_dates": upload_dates,
         # Size of the *performance* window (still 10), not the email scan.
         "sample_size": performance_count,
-        "email_scan_size": len(video_descriptions),
         # Most creators never set this, so it's frequently "" (Unknown) —
         # best-effort only, not a guaranteed signal.
         "content_language": content_language,
+        # True only if EVERY fetched video is <= SHORTS_MAX_SECONDS and none
+        # had an unreadable duration. main.pre_push_drop_reason discards
+        # these before any Airtable row is written.
+        "shorts_only": is_shorts_only(durations),
         # An email seen in EMAIL_MIN_VIDEO_REPEATS+ of the sampled videos'
         # descriptions — a stronger signal than a single mention anywhere.
         "repeated_email": find_repeated_email(video_descriptions),
         "video_descriptions": video_descriptions,
+        # Where the newest-EMAIL_SCAN_SAMPLE_SIZE window ended, so
+        # scan_older_videos_for_email() can continue from here instead of
+        # re-fetching page 1 (2 wasted units) to find the same place.
+        # "" when this channel has no older uploads.
+        "next_page_token": payload.get("nextPageToken", ""),
     }
+
+
+def scan_older_videos_for_email(
+    channel_id: str,
+    uploads_playlist_id: str,
+    page_token: str,
+    known_descriptions: list[str],
+    max_pages: int = EMAIL_DEEP_SCAN_PAGES,
+) -> str:
+    """
+    Keep paging back through a channel's uploads, looking for a contact
+    email that the newest-EMAIL_SCAN_SAMPLE_SIZE window didn't turn up.
+
+    Step 3 of the email chain (see main.resolve_email). Only worth running
+    when steps 1-2 found nothing: channels that pivoted to Shorts often
+    have terse recent descriptions while their older long-form videos
+    still carry a "business inquiries" line.
+
+    `known_descriptions` are the descriptions already scanned by step 1.
+    Older descriptions are ADDED to those rather than counted on their
+    own, so a channel with two recent mentions plus one older mention
+    clears EMAIL_MIN_VIDEO_REPEATS — while a single mention anywhere
+    still doesn't, which is the same bar step 1 applies.
+
+    Quota cost: 2 units per page fetched (playlistItems.list +
+    videos.list), and zero when `page_token` is empty or max_pages is 0.
+    Stops as soon as an email clears the threshold, so a channel that
+    answers on the first extra page never pays for the second.
+
+    Every failure is soft — a bad page returns "" rather than raising,
+    matching the rest of this module.
+    """
+    if not uploads_playlist_id or not page_token or max_pages <= 0:
+        return ""
+
+    descriptions = list(known_descriptions)
+
+    for _ in range(max_pages):
+        params = {
+            "part": "contentDetails",
+            "playlistId": uploads_playlist_id,
+            "maxResults": EMAIL_SCAN_SAMPLE_SIZE,
+            "pageToken": page_token,
+            "key": YOUTUBE_API_KEY,
+        }
+        resp = requests.get(f"{YOUTUBE_API_BASE_URL}/playlistItems", params=params, timeout=30)
+        record_spend(QUOTA_COST_PLAYLIST_ITEMS_LIST, call_name=f"playlistItems.list({channel_id}, older)")
+
+        if resp.status_code != 200:
+            logger.info(
+                "Older-uploads page failed for %s: %s — stopping the email scan here.",
+                channel_id, resp.status_code,
+            )
+            return ""
+
+        payload = resp.json()
+        video_ids = [
+            i["contentDetails"]["videoId"]
+            for i in payload.get("items", [])
+            if i.get("contentDetails", {}).get("videoId")
+        ]
+        if not video_ids:
+            return ""
+
+        time.sleep(API_SLEEP_SECONDS)
+
+        video_params = {
+            "part": "snippet",
+            "id": ",".join(video_ids),
+            "key": YOUTUBE_API_KEY,
+        }
+        video_resp = requests.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
+        record_spend(QUOTA_COST_VIDEOS_LIST, call_name=f"videos.list({channel_id}, older)")
+
+        if video_resp.status_code != 200:
+            logger.info(
+                "Older-uploads videos.list failed for %s: %s — stopping the email scan here.",
+                channel_id, video_resp.status_code,
+            )
+            return ""
+
+        descriptions.extend(
+            v.get("snippet", {}).get("description", "")
+            for v in video_resp.json().get("items", [])
+        )
+
+        email = find_repeated_email(descriptions)
+        if email:
+            logger.info(
+                "Found %s for %s after scanning %d descriptions (older uploads).",
+                email, channel_id, len(descriptions),
+            )
+            return email
+
+        page_token = payload.get("nextPageToken", "")
+        if not page_token:
+            return ""
+
+        time.sleep(API_SLEEP_SECONDS)
+
+    return ""
 
 
 def calc_upload_frequency(upload_dates: list[str]) -> float:

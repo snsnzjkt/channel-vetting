@@ -109,11 +109,16 @@ budget.
    > more reliable "this is their real contact"
    > signal than a single mention — and falling back to the channel's
    > About description if no repeated one is found. If both come up
-   > empty and `USE_CLOAKBROWSER=true`, a last-resort lookup renders the
-   > channel's public About page in CloakBrowser and scans its visible
-   > text for the same pattern (see "CloakBrowser" below). There is no
-   > paid email-finder fallback (Hunter.io and Modash have been removed).
-   > Often still blank; treat as a bonus signal, not a guarantee.
+   > empty, it pages back through `EMAIL_DEEP_SCAN_PAGES` (default 2)
+   > pages of *older* uploads and applies the same repeat test across
+   > everything scanned so far, at 2 quota units per page. If that also
+   > comes up empty and `USE_PLAYWRIGHT_STEALTH=true`, a last-resort
+   > lookup follows the channel's public external link list in Playwright
+   > with stealth enabled — each link that isn't a social/platform domain,
+   > then that site's `/contact` page — and applies the same pattern.
+   > There is no paid email-finder fallback (Hunter.io and Modash have
+   > been removed). Often still blank; treat as a bonus signal, not a
+   > guarantee.
 
    > **Optional readable counts**: `Subscriber Count` and `Avg Views` stay
    > as Number fields (so you can still sort/filter numerically) but you
@@ -164,7 +169,7 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-### 3b. Optional: add CloakBrowser for site testing
+### 3b. Optional: add Playwright + stealth for site testing
 
 If you want to test a site with a stealth Chromium wrapper, this repo
 now includes a small smoke-test script:
@@ -173,27 +178,25 @@ now includes a small smoke-test script:
 python cloakbrowser_test.py --url https://example.com
 ```
 
-For protected sites, CloakBrowser also supports headed mode, humanized
-mouse/keyboard behavior, and proxies:
+For protected sites, the smoke test supports headed mode and proxies:
 
 ```bash
-python cloakbrowser_test.py --url https://target-site.example --headed --humanize --proxy http://user:pass@host:port
+python cloakbrowser_test.py --url https://target-site.example --headed --proxy http://user:pass@host:port
 ```
 
-If you have a CloakBrowser license key, set `CLOAKBROWSER_LICENSE_KEY`
-before running the script. On first run, the wrapper downloads its own
-Chromium binary automatically.
+If Playwright has not yet downloaded Chromium, run `python -m playwright
+install chromium` once before using the script.
 
-To try the browser-backed email backfill path on already-tracked records,
-run:
+To try the browser-backed email backfill path on already-tracked
+records, run:
 
 ```bash
-python backfill_missing_emails.py --use-cloakbrowser
+python backfill_missing_emails.py --use-playwright-stealth
 ```
 
-That adds a public-page browser check (for text already visible in the
-channel's About page) on top of the free text-based steps — there is no
-paid fallback to disable.
+That adds a public-page browser check (following the channel's external
+link list to the creator's own site) on top of the free text-based steps —
+there is no paid fallback to disable.
 
 ### 3c. Optional: `cloakbrowser-mcp` for interactive agent use
 
@@ -205,8 +208,9 @@ actual page to prototype extraction logic or debug selectors before that
 logic lands in `enrichment.py`.
 
 This is **entirely separate from the pipeline**: `main.py` and
-`enrichment.py` use the Python `cloakbrowser` package directly via
-`launch()` and never touch `.mcp.json` or the MCP server. The MCP server
+`browser_email.py` drive Playwright directly and never touch `.mcp.json`
+or the MCP server — no `cloakbrowser` Python package is installed at all
+any more. The MCP server
 requires an LLM client to drive it, which the scheduled
 `python main.py` run has no reason to grow. It is **not** used by, and
 not required for, the GitHub Actions workflow — the pipeline runs fine
@@ -241,8 +245,8 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `CANDIDATE_OVERSHOOT` | 1.5 | Multiple of remaining daily headroom that discovery banks in fresh candidates, to cover losses to enrichment failures and dedupe |
 | `DISCOVERY_DAYS_BACK` | 7 | How many days back `search.list` looks for videos (short and self-renewing by design — see below; `--days-back` overrides per run) |
 | `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
-| `USE_CLOAKBROWSER` | `false` | Enables the CloakBrowser About-page email fallback (see "CloakBrowser" below) |
-| `CLOAKBROWSER_LICENSE_KEY` | unset | Optional CloakBrowser Pro license key; runs unlicensed if unset |
+| `EMAIL_DEEP_SCAN_PAGES` | 2 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
+| `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see "Browser path" below). `USE_CLOAKBROWSER` is still accepted as an alias |
 
 ### 5. Edit your keywords / niches
 
@@ -297,7 +301,7 @@ python main.py
 | `enrichment.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
 | `scoring.py` | Fake-follower risk heuristic + weighted overall score + `qualify()` |
 | `do_not_contact.py` | DO NOT CONTACT suppression list — fetched fresh every run, fails closed |
-| `browser_email.py` | CloakBrowser About-page email fallback (last step of the email chain) |
+| `browser_email.py` | Playwright link-list email fallback (last step of the email chain) |
 | `prospect_day.py` | Single source of truth for "what day is it" for the daily caps (`PROSPECT_DAY_TZ`) |
 | `airtable_client.py` | Dedupe check, create/update records, `count_added_today()` (per-table, one table per niche) |
 | `quota_tracker.py` | Daily quota spend log (resets at midnight Pacific Time) |
@@ -318,19 +322,21 @@ Setup:
    repository secret** and add five secrets: `AIRTABLE_TOKEN`,
    `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_HOME_THEATER`,
    `AIRTABLE_TABLE_LIFESTYLE_SOFA`, `YOUTUBE_API_KEY` — same values as
-   your local `.env`. Optionally add `CLOAKBROWSER_LICENSE_KEY` too if you
-   have one; the workflow already references it, so adding the secret is
-   the only step needed, and it's fine to leave unset.
+   your local `.env`. That's the full list; no browser license secret is
+   needed any more.
 3. The workflow pins `PROSPECT_DAY_TZ` to `America/Toronto` in its env, and
-   runs with `USE_CLOAKBROWSER` **off** by default even though the runner
-   env var exists — GitHub-hosted runners sit on Azure datacenter IPs that
-   YouTube challenges hard, and CloakBrowser patches browser fingerprints,
-   not IP reputation. To test whether it works from a runner anyway,
-   trigger the workflow manually (**Actions > Channel Vetting Pipeline >
-   Run workflow**) with its `use_cloakbrowser` input checked; only make it
-   the schedule's default once a manual run has proven it out.
+   runs with `USE_PLAYWRIGHT_STEALTH` **off** by default even though the
+   runner env var exists — GitHub-hosted runners sit on Azure datacenter
+   IPs that YouTube challenges hard, and stealth patches browser
+   fingerprints, not IP reputation. To test whether it works from a runner
+   anyway, trigger the workflow manually (**Actions > Channel Vetting
+   Pipeline > Run workflow**) with its `use_playwright_stealth` input
+   checked — that also triggers the `playwright install --with-deps
+   chromium` step, since pip installs the driver but not the browser
+   binary. Only make it the schedule's default once a manual run has
+   proven it out.
 4. The workflow will run automatically on schedule; to run it immediately
-   without CloakBrowser, use the same **Run workflow** button.
+   without the browser step, use the same **Run workflow** button.
 5. To change the schedule, edit the `cron` line in the workflow file
    (cron is UTC; see https://crontab.guru to build a new expression).
 
@@ -340,13 +346,15 @@ Setup:
 python -m pytest
 ```
 
-Runs the full suite in `tests/` (76 tests at time of writing) covering
+Runs the full suite in `tests/` (126 tests at time of writing) covering
 discovery windowing/early-stop, qualification precedence, the DO NOT
 CONTACT fail-closed paths, `count_added_today()`/daily-cap behavior,
-`prospect_day.py`, the browser-email fallback, and a regression check
-that the removed paid email-finder integrations (Hunter.io, Modash) stay
-removed. No network calls or real credentials are needed — everything is
-mocked.
+`prospect_day.py`, the candidate pre-filter, every step of the email
+chain (including the older-uploads scan's quota arithmetic and which
+step gets credited for a hit), the browser-email fallback, and a
+regression check that the removed paid email-finder integrations
+(Hunter.io, Modash) stay removed. No network calls or real credentials
+are needed — everything is mocked.
 
 ## Tuning
 

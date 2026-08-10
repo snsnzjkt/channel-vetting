@@ -13,8 +13,6 @@ import logging
 import sys
 import time
 
-import pandas as pd
-
 # Channel titles can contain characters outside Windows' default console
 # codepage (cp1252) — without this, printing one crashes the whole run
 # partway through with UnicodeEncodeError.
@@ -26,6 +24,7 @@ from enrichment import (
     get_recent_video_performance,
     calc_upload_frequency,
     channel_age_months,
+    scan_older_videos_for_email,
 )
 from scoring import calc_fake_follower_risk, calc_overall_score, QUALIFIED, qualify
 from airtable_client import (
@@ -50,7 +49,7 @@ from config import (
     DAILY_FLAGGED_CAP,
     DAILY_QUALIFIED_CAP,
     DISCOVERY_DAYS_BACK,
-    USE_CLOAKBROWSER,
+    USE_PLAYWRIGHT_STEALTH,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -113,22 +112,107 @@ NICHES = {
 DEFAULT_NICHE_MATCH = 50.0
 
 
-def resolve_email(stats: dict, performance: dict, scraper=None) -> str:
+# One label per step of the chain below. backfill_missing_emails.py
+# aggregates these to report which step actually moved email coverage,
+# so they must stay distinct.
+EMAIL_SOURCE_REPEATED = "repeated across recent videos"
+EMAIL_SOURCE_ABOUT = "About description"
+EMAIL_SOURCE_OLDER = "repeated across older videos"
+EMAIL_SOURCE_BROWSER = "linked site or its /contact page (Playwright)"
+
+
+# --- Pre-push gate -------------------------------------------------------
+# The ONE place this pipeline discards a candidate outright instead of
+# flagging it for review. Everything else follows the flag-never-discard
+# rule; these two cases are exceptions because a human reviewing them is
+# pure cost.
+#
+# Dead channels: both measures have to be dead, not either. In the live
+# Home Theater table five rows were burning flagged budget at 0-281 subs
+# and 0-38 avg views, while the lowest legitimate Qualified channel sat at
+# 2,400 subs / 16,160 views — so 100/100 clears the junk with two orders of
+# magnitude to spare. Requiring BOTH keeps a small-but-growing channel
+# (few subs, real views) and a fading big one (many subs, few views) in the
+# table where a reviewer can see them.
+JUNK_MIN_SUBSCRIBERS = 100
+JUNK_MIN_AVG_VIEWS = 100
+
+DROP_DEAD_CHANNEL = "dead_channel"
+DROP_SHORTS_ONLY = "shorts_only"
+
+
+def pre_push_drop_reason(
+    subscriber_count: int | None,
+    avg_views: float | None,
+    shorts_only: bool = False,
+) -> str | None:
     """
-    Email fallback chain, cheapest and strongest signal first:
+    Why this candidate should never reach Airtable, or None to continue.
+
+    Applies regardless of what qualify() would have returned — a
+    Below View Minimum row for a dead channel is exactly the row this gate
+    exists to stop writing.
+    """
+    if shorts_only:
+        return DROP_SHORTS_ONLY
+    if (subscriber_count or 0) < JUNK_MIN_SUBSCRIBERS and (avg_views or 0) < JUNK_MIN_AVG_VIEWS:
+        return DROP_DEAD_CHANNEL
+    return None
+
+
+def resolve_email_with_source(stats: dict, performance: dict, scraper=None) -> tuple[str, str]:
+    """
+    Email fallback chain, cheapest and strongest signal first, returning
+    (email, source_label) — or ("", "") when no step found anything:
 
       1. An address repeated across several recent video descriptions.
       2. A single mention in the channel's own About description.
-      3. The rendered About page, read in CloakBrowser.
+      3. The same repeat test, extended over OLDER uploads.
+      4. The channel's public external link list, followed in Playwright:
+         each non-third-party link, then its /contact page.
 
     Steps 1-2 use data already fetched during enrichment and cost
-    nothing. Step 3 only runs when both found nothing, and only when a
-    scraper is supplied.
+    nothing. Step 3 costs 2 quota units per extra page and only runs when
+    1-2 found nothing, so channels whose address is already known never
+    trigger it. Step 4 is last because a browser session is the slowest
+    and least reliable option, not because it's the strongest signal.
+
+    Step 4 reads the LINK LIST, not the About text — step 2 already has
+    the full About description from channels.list, so re-reading it in a
+    browser could never add an address. See browser_email.py.
+
+    Reporting the source here is what lets callers attribute a hit to a
+    step. Comparing the result back against stats/performance can't: two
+    of the four steps (3 and 4) are indistinguishable that way.
     """
-    email = performance.get("repeated_email") or stats.get("business_email", "")
-    if not email and scraper is not None:
+    email = performance.get("repeated_email")
+    if email:
+        return email, EMAIL_SOURCE_REPEATED
+
+    email = stats.get("business_email", "")
+    if email:
+        return email, EMAIL_SOURCE_ABOUT
+
+    email = scan_older_videos_for_email(
+        stats["channel_id"],
+        stats.get("uploads_playlist_id", ""),
+        performance.get("next_page_token", ""),
+        performance.get("video_descriptions", []),
+    )
+    if email:
+        return email, EMAIL_SOURCE_OLDER
+
+    if scraper is not None:
         email = scraper.find_email(stats["channel_id"])
-    return email
+        if email:
+            return email, EMAIL_SOURCE_BROWSER
+
+    return "", ""
+
+
+def resolve_email(stats: dict, performance: dict, scraper=None) -> str:
+    """The chain above, for callers that only need the address itself."""
+    return resolve_email_with_source(stats, performance, scraper)[0]
 
 
 def push_until_full(
@@ -224,6 +308,21 @@ def process_candidate(
         logger.info("Skipping %s — no accessible recent video performance data.", stats.get("channel_title"))
         return None, "unreachable"
 
+    # Pre-push gate, placed before scoring and before the email chain so a
+    # discarded candidate costs no browser session and no deep-scan quota.
+    drop_reason = pre_push_drop_reason(
+        stats.get("subscriber_count"),
+        performance.get("avg_views"),
+        performance.get("shorts_only", False),
+    )
+    if drop_reason:
+        logger.info(
+            "Dropping %s before push — %s (%s subs, %s avg views).",
+            stats.get("channel_title"), drop_reason,
+            stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
+        )
+        return None, drop_reason
+
     upload_freq = calc_upload_frequency(performance["upload_dates"])
     fake_risk = calc_fake_follower_risk(
         stats["subscriber_count"], performance["avg_views"], performance["avg_engagement_rate"]
@@ -242,6 +341,8 @@ def process_candidate(
         channel_age_months(stats.get("published_at", "")),
         niche_config["min_avg_views"],
         niche_config["min_channel_age_months"],
+        subscriber_count=stats.get("subscriber_count"),
+        engagement_rate=performance.get("avg_engagement_rate"),
     )
 
     email = resolve_email(stats, performance, scraper)
@@ -371,16 +472,15 @@ def run_niche(
     )
     logger.info("Discovered %d unique candidate channel(s).", len(discovered))
 
-    # A DataFrame makes the pre-filter step easy to extend later (e.g.
-    # sorting/inspecting candidates by matched keyword count before
-    # spending enrichment quota on them).
-    candidates_df = pd.DataFrame(discovered)
-    if candidates_df.empty:
+    # Straight set-membership filter, deliberately not a DataFrame: a
+    # round trip through pandas rewrote the candidates on the way out —
+    # it appended its own bookkeeping column to every record and filled a
+    # NaN wherever one candidate carried a key another lacked (which also
+    # promoted that column's ints to floats). Nothing downstream wanted
+    # either.
+    if not discovered:
         logger.info("No candidates discovered — nothing to process.")
-        new_candidates = []
-    else:
-        candidates_df["already_tracked"] = candidates_df["channel_id"].isin(globally_tracked_ids)
-        new_candidates = candidates_df[~candidates_df["already_tracked"]].to_dict("records")
+    new_candidates = [c for c in discovered if c["channel_id"] not in globally_tracked_ids]
 
     logger.info(
         "%d candidate(s) already tracked elsewhere in the base, %d remaining to process.",
@@ -460,7 +560,7 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
     # a daily scheduled job silently doing nothing forever. See IMPORTANT 3.
     any_cap_check_completed = False
 
-    scraper = BrowserEmailScraper.launch() if USE_CLOAKBROWSER else null_scraper()
+    scraper = BrowserEmailScraper.launch() if USE_PLAYWRIGHT_STEALTH else null_scraper()
     try:
         for niche_name, niche_config in niches.items():
             missing_keys = [key for key in REQUIRED_NICHE_KEYS if key not in niche_config]

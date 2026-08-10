@@ -4,12 +4,10 @@ sitting in Airtable that don't have one yet.
 
 Does NOT re-run discovery (no search.list calls, no new candidates) — it
 re-enriches channels already tracked (channels.list + playlistItems.list +
-videos.list, ~3 quota units per channel) and runs them through the free
-email fallback chain plus an optional CloakBrowser pass over the public
-About page.
-
-Usage:
-    python backfill_missing_emails.py [--limit N]
+videos.list, ~3 quota units per channel), then re-runs main.py's full
+email fallback chain: the two free description-based steps, the older-
+uploads scan (2 more units per extra page), and an optional Playwright +
+stealth pass over the public About page.
 
 --limit caps how many missing-email records are processed per niche, so
 you can run this in controlled batches instead of all at once.
@@ -32,7 +30,7 @@ from enrichment import (
     get_recent_video_performance,
     FREEMAIL_DOMAINS,
 )
-from main import resolve_email
+from main import resolve_email_with_source
 from config import API_SLEEP_SECONDS, AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -90,25 +88,13 @@ def backfill_table(
             unreachable += 1
             continue
 
-        email = resolve_email(stats, performance, scraper)
+        # The chain reports which of its four steps produced the address —
+        # inferring it here by comparing the result back against
+        # stats/performance cannot tell the older-uploads scan apart from
+        # the browser pass, since neither is echoed in either dict.
+        email, source = resolve_email_with_source(stats, performance, scraper)
         title = (stats.get("channel_title") or "")[:40]
         if email:
-            # Attribute the hit to the step that actually produced it.
-            if email == performance.get("repeated_email"):
-                source = f"repeated across videos (scanned {performance.get('email_scan_size', '?')})"
-            elif email == stats.get("business_email"):
-                source = "About description"
-            else:
-                # With Hunter/Modash gone, resolve_email()'s only other
-                # source is the CloakBrowser scraper — if the email
-                # didn't come from repeated_email or business_email, it
-                # came from here. (The old `elif scraper.enabled: ...
-                # else: "About description"` duplicated this same label
-                # under an unreachable branch: scraper.enabled is False
-                # exactly when null_scraper() is in play, which always
-                # returns "" and so could never produce a matching email
-                # to reach this branch in the first place.)
-                source = "CloakBrowser visible text"
             by_source[source] += 1
             if email.rsplit("@", 1)[-1].lower() in FREEMAIL_DOMAINS:
                 freemail += 1
@@ -134,16 +120,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill missing Email values for already-tracked channels")
     parser.add_argument("--limit", type=int, default=None, help="Max records to process per niche")
     parser.add_argument(
+        "--use-playwright-stealth",
         "--use-cloakbrowser",
+        dest="use_playwright_stealth",
         action="store_true",
-        help="After the free text-based steps, try the channel About page in CloakBrowser.",
+        help="After the free text-based steps, try the channel About page in Playwright + stealth.",
     )
     args = parser.parse_args()
-    print(f"CloakBrowser fallback: {'ENABLED' if args.use_cloakbrowser else 'DISABLED'}\n")
+    print(f"Playwright+stealth fallback: {'ENABLED' if args.use_playwright_stealth else 'DISABLED'}\n")
 
     totals = {"checked": 0, "unreachable": 0, "found": 0, "freemail": 0}
     by_source: Counter = Counter()
-    scraper = BrowserEmailScraper.launch() if args.use_cloakbrowser else null_scraper()
+    scraper = BrowserEmailScraper.launch() if args.use_playwright_stealth else null_scraper()
     try:
         for niche_name, table_name in TABLES.items():
             result = backfill_table(niche_name, table_name, args.limit, scraper)

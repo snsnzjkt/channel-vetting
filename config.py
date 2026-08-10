@@ -89,7 +89,25 @@ DISCOVERY_DAYS_BACK = int(os.getenv("DISCOVERY_DAYS_BACK", 7))
 # date and each claim a separate daily cap.
 PROSPECT_DAY_TZ = os.getenv("PROSPECT_DAY_TZ", "America/Toronto")
 
+# --- Email deep scan (step 3 of the chain) ---
+# Extra pages of OLDER uploads to scan for a contact email, and only for
+# channels where the two free steps found nothing. Each page is 50 more
+# video descriptions for 2 quota units (playlistItems.list + videos.list),
+# so the worst case is bounded: 40 rows x 2 niches x 2 pages x 2 units =
+# 320 units against a QUOTA_CEILING of 8000, and in practice far less
+# because channels whose email is already known never trigger it.
+# Set to 0 to disable the step entirely.
+EMAIL_DEEP_SCAN_PAGES = int(os.getenv("EMAIL_DEEP_SCAN_PAGES", 2))
+
 # --- Browser-based email fallback ---
-# CloakBrowser is unverified on the GitHub Actions ubuntu-latest runner —
-# keep this off in CI until that's confirmed working there.
-USE_CLOAKBROWSER = os.getenv("USE_CLOAKBROWSER", "false").lower() == "true"
+# Playwright + stealth follows the channel's public external link list to
+# the creator's own site (and its /contact page), plus a Facebook page's
+# /about. It is not a CAPTCHA bypass and does not touch YouTube's gated
+# "business inquiries" address.
+USE_PLAYWRIGHT_STEALTH = os.getenv(
+	"USE_PLAYWRIGHT_STEALTH",
+	os.getenv("USE_CLOAKBROWSER", "false"),
+).lower() == "true"
+
+# Backward-compatible alias for existing env files and workflows.
+USE_CLOAKBROWSER = USE_PLAYWRIGHT_STEALTH

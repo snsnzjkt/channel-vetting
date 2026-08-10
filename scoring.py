@@ -11,6 +11,23 @@ QUALIFIED = "Qualified"
 BELOW_VIEW_MINIMUM = "Below View Minimum"
 NEW_CHANNEL = "New Channel"
 
+# --- Qualification thresholds (2026-08 criteria change) ---
+# A floor that applies on TOP of each niche's own min_avg_views rather than
+# replacing it, so Home Theater still wants its 10,000 from the brief and
+# the 25 rows already in that table stay comparable.
+GLOBAL_MIN_AVG_VIEWS = 2_000
+
+# avg_views / subscriber_count. Catches the channel whose audience size and
+# actual viewership don't match — the bought-audience shape. Calibrated
+# against the live table: of 12 Qualified Home Theater rows this demotes
+# exactly one (13,006 views / 274,000 subs = 0.047).
+MIN_VIEW_TO_SUB_RATIO = 0.05
+
+# A SOFT floor: being under it never rejects on its own. Below it, the
+# engagement rate has to vouch for the channel instead.
+SUBSCRIBER_SOFT_FLOOR = 1_000
+SOFT_FLOOR_MIN_ENGAGEMENT_RATE = 1.5  # %
+
 # --- Fake follower risk thresholds ---
 VIEW_TO_SUB_RATIO_HIGH_RISK = 0.02   # avg_views / subscriber_count below this is suspicious
 ENGAGEMENT_RATE_HIGH_RISK = 0.5      # engagement rate (%) below this is suspicious
@@ -136,27 +153,63 @@ def qualify(
     channel_age_months: float | None,
     min_avg_views: float,
     min_channel_age_months: float | None,
+    subscriber_count: int | None = None,
+    engagement_rate: float | None = None,
 ) -> str:
     """
     Check a channel against its niche's hard requirements from the
     influencer briefs, returning the value for the Airtable
     "Qualification" field.
 
-    Thresholds are passed in rather than read from a constant because
-    they differ per niche (Home Theater wants 10k+ average views,
+    Per-niche thresholds are passed in rather than read from a constant
+    because they differ per niche (Home Theater wants 10k+ average views,
     Lifestyle Sofa 2k+); they live on the NICHES entries in main.py.
 
-    Failing channels are flagged, never discarded — a human decides.
+    Three view-based criteria, all of which must hold to qualify:
 
-    Precedence: when both criteria fail, BELOW_VIEW_MINIMUM is reported.
-    A single-select holds one value, and views are the criterion that
+      1. avg_views >= the niche's own min_avg_views (from the brief).
+      2. avg_views >= GLOBAL_MIN_AVG_VIEWS — stacked on top of (1), not a
+         replacement for it, so a niche minimum below 2,000 can't let a
+         channel through and Home Theater's 10,000 bar is untouched.
+      3. avg_views / subscriber_count >= MIN_VIEW_TO_SUB_RATIO.
+
+    Plus a soft floor: under SUBSCRIBER_SOFT_FLOOR subscribers, an
+    engagement rate of at least SOFT_FLOOR_MIN_ENGAGEMENT_RATE has to
+    vouch for the channel. Being small is never disqualifying by itself,
+    which is what makes the floor soft; above the floor the engagement
+    rate is not consulted at all.
+
+    Failing channels are flagged, never discarded — a human decides. (The
+    only candidates discarded outright are handled earlier, by
+    main.pre_push_drop_reason.)
+
+    Precedence: any view-based failure outranks NEW_CHANNEL. A
+    single-select holds one value, and views are the criterion that
     prompted this gate.
 
-    channel_age_months of None means "unknown" and never disqualifies —
-    absent data is not evidence against a channel.
+    Unknown data never disqualifies: channel_age_months of None,
+    subscriber_count of None, and a subscriber_count of 0 (a hidden count)
+    all skip their respective checks rather than failing them. Absent data
+    is not evidence against a channel.
+
+    All three view failures report BELOW_VIEW_MINIMUM rather than minting
+    new "Qualification" options. airtable_client.push_record sends
+    typecast=True, which silently CREATES a missing Single Select option
+    instead of erroring, so a fourth value here would quietly change the
+    live table's schema and drop rows out of the reviewer's saved views.
     """
-    if avg_views < min_avg_views:
+    if avg_views < min_avg_views or avg_views < GLOBAL_MIN_AVG_VIEWS:
         return BELOW_VIEW_MINIMUM
+
+    if subscriber_count:
+        if (avg_views / subscriber_count) < MIN_VIEW_TO_SUB_RATIO:
+            return BELOW_VIEW_MINIMUM
+        if (
+            subscriber_count < SUBSCRIBER_SOFT_FLOOR
+            and (engagement_rate or 0.0) < SOFT_FLOOR_MIN_ENGAGEMENT_RATE
+        ):
+            return BELOW_VIEW_MINIMUM
+
     if (
         min_channel_age_months is not None
         and channel_age_months is not None

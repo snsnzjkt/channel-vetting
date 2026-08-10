@@ -21,6 +21,16 @@ rather than a dedupe list:
    a fld... field ID gone stale because a column was deleted and
    re-added rather than renamed) are all treated as fetch failures too.
 
+   Since 2026-08 the request goes through http_client.AIRTABLE, whose
+   retry adapter already absorbs transient 429/5xx (honouring
+   Retry-After) BEFORE any of the paths below can trigger. That does not
+   soften the contract — it sharpens it. A raised BlocklistUnavailable
+   now means the blocklist was unavailable across ~45 seconds of
+   retries, not that Airtable blinked once, which makes main.py's
+   whole-run abort MORE justified rather than less. Do not relax any
+   failure path on the theory that "the retries will handle it": the
+   retries are what make reaching these paths meaningful.
+
 2. NO CACHING. external_dedupe caches 24h against ~18k rows. This table
    is ~5 pages and takes seconds, so it is fetched fresh every run —
    somebody added to the blocklist this morning is honoured this
@@ -45,11 +55,15 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+# `requests` is still imported for its EXCEPTION types only (see the
+# `except requests.RequestException` clauses below) — every actual request
+# goes through the shared retrying session.
 import requests
 
 from airtable_client import _base_url, _headers
 from config import API_SLEEP_SECONDS
 from enrichment import normalize_handle
+from http_client import AIRTABLE as HTTP, safe_body
 
 logger = logging.getLogger(__name__)
 
@@ -135,15 +149,25 @@ def fetch_blocklist() -> Blocklist:
             params["offset"] = offset
 
         try:
-            resp = requests.get(
+            # HTTP is the shared retrying session: a 429 or 5xx has
+            # already been retried up to RETRY_TOTAL times (respecting
+            # Retry-After) by the time it lands here, so every failure
+            # path below now describes a *persistent* problem. GET is in
+            # the adapter's idempotent-method set, so retrying costs
+            # nothing but time.
+            resp = HTTP.get(
                 _base_url(DO_NOT_CONTACT_TABLE_ID), headers=_headers(), params=params, timeout=30
             )
         except requests.RequestException as e:
+            # Connection/timeout errors that survived the adapter's retries.
             raise BlocklistUnavailable(f"DO NOT CONTACT fetch failed: {e}") from e
 
         if resp.status_code != 200:
+            # safe_body() rather than resp.text: an Airtable error body is
+            # unbounded, and a 401/403 body is withheld entirely so a
+            # pasted log can't leak auth detail.
             raise BlocklistUnavailable(
-                f"DO NOT CONTACT fetch failed: {resp.status_code} {resp.text}"
+                f"DO NOT CONTACT fetch failed: {resp.status_code} {safe_body(resp)}"
             )
 
         try:

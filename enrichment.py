@@ -1,6 +1,18 @@
 """
 Enriches discovered channels with real stats via channels.list,
 playlistItems.list, and videos.list.
+
+Every call here goes through the shared retrying YouTube session in
+`http_client.py` (imported as HTTP), which carries the API key as a header
+rather than a `key=` query parameter — see that module's docstring.
+
+Nothing in this module raises on a failed lookup. A non-200, an empty
+result, an unparseable statistic and an unreachable API all resolve to
+None (or "" for the email scan) with a logged warning, because the only
+caller — main.process_candidate() — handles a falsy return by skipping the
+candidate and has no handler at all for an exception. An exception escaping
+this module unwinds all the way through push_until_full() into run_niche()
+and ends the run.
 """
 import logging
 import re
@@ -8,17 +20,20 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 
+# Kept for `requests.RequestException` only — the actual calls go through the
+# shared retrying session below, never through the module-level
+# `requests.get()`.
 import requests
 
 from config import (
     YOUTUBE_API_BASE_URL,
-    YOUTUBE_API_KEY,
     QUOTA_COST_CHANNELS_LIST,
     QUOTA_COST_PLAYLIST_ITEMS_LIST,
     QUOTA_COST_VIDEOS_LIST,
     API_SLEEP_SECONDS,
     EMAIL_DEEP_SCAN_PAGES,
 )
+from http_client import YOUTUBE as HTTP, safe_body
 from quota_tracker import record_spend
 
 logger = logging.getLogger(__name__)
@@ -245,6 +260,54 @@ def channel_age_months(published_at: str | None) -> float | None:
     return delta_days / DAYS_PER_MONTH
 
 
+def _as_int(value, default: int = 0) -> int:
+    """
+    int() that can't take a run down over one channel's statistics block.
+
+    `stats.get("subscriberCount", 0)` looks safe but isn't: the default only
+    applies when the key is ABSENT, and YouTube sometimes sends the key
+    present with a JSON `null` (hidden/unreported counters). `.get()` then
+    returns None, `int(None)` raises TypeError, and nothing up the call chain
+    catches it — `process_candidate()` only handles a `None` return, so one
+    channel with a null counter would end the whole niche. Unreadable means
+    "use the default", never "crash".
+    """
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.info("Unparseable numeric statistic %r — using %d.", value, default)
+        return default
+
+
+def _json_or_none(resp, call_name: str):
+    """
+    `resp.json()` that can't take a run down over an unparseable 200 body.
+
+    A 200 is not a promise of JSON. A corporate proxy, a captive portal, or a
+    Google frontend error page all return HTML with a 200, and
+    `requests.exceptions.JSONDecodeError` is raised for exactly that. Because
+    it subclasses RequestException, the guards around the requests above look
+    like they'd catch it — they don't, because `.json()` is called outside
+    them, so it would propagate through process_candidate() ->
+    push_until_full() -> run_niche() and kill the entire run.
+
+    `do_not_contact.fetch_blocklist()` already treats a non-JSON 200 as a
+    fetch failure for the same reason; this is the same defence applied on the
+    enrichment side, where the right answer is to skip the channel (None)
+    rather than abort the run.
+    """
+    try:
+        return resp.json()
+    except ValueError as e:
+        # ValueError, not requests.exceptions.JSONDecodeError: the latter
+        # subclasses both, and catching the builtin also covers a stdlib
+        # json.JSONDecodeError if the body is decoded some other way.
+        logger.warning("%s returned a 200 with a non-JSON body: %s", call_name, e)
+        return None
+
+
 def get_channel_stats(channel_id: str) -> dict | None:
     """
     Fetch subscriberCount, videoCount, viewCount, country, title, and
@@ -253,21 +316,49 @@ def get_channel_stats(channel_id: str) -> dict | None:
     Quota cost: 1 unit (channels.list with part=snippet,statistics,contentDetails).
 
     Returns None (and logs a warning) if the channel is private, deleted,
-    or otherwise inaccessible, so callers can skip it without crashing.
+    or otherwise inaccessible — including unreachable, see the exception
+    handler below — so callers can skip it without crashing.
     """
+    # No "key" in params, here or at any other call site in this module: the
+    # API key is set ONCE as the X-goog-api-key header on the shared session
+    # in http_client.py. It must not be reintroduced — `requests` embeds the
+    # full request URL in its exception messages, so a `key=` query parameter
+    # gets printed verbatim into stdout by any unhandled network error, which
+    # in CI is an Actions log retained for 90 days.
     params = {
         "part": "snippet,statistics,contentDetails",
         "id": channel_id,
-        "key": YOUTUBE_API_KEY,
     }
-    resp = requests.get(f"{YOUTUBE_API_BASE_URL}/channels", params=params, timeout=30)
-    record_spend(QUOTA_COST_CHANNELS_LIST, call_name=f"channels.list({channel_id})")
-
-    if resp.status_code != 200:
-        logger.warning("channels.list failed for %s: %s %s", channel_id, resp.status_code, resp.text)
+    try:
+        resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/channels", params=params, timeout=30)
+    except requests.RequestException as e:
+        # By the time an exception surfaces here the session's retry adapter
+        # has already burned all 5 attempts and ~45s of backoff (see
+        # http_client.py), so this is a genuinely unreachable API rather than
+        # a transient blip worth retrying again. Return None like any other
+        # inaccessible channel: uncaught, a single ConnectionError/ReadTimeout
+        # would unwind through process_candidate() -> push_until_full() ->
+        # run_niche(), none of which catch it, and kill the entire run over
+        # one bad channel.
+        logger.warning("channels.list request failed for %s: %s", channel_id, e)
         return None
 
-    items = resp.json().get("items", [])
+    if resp.status_code != 200:
+        logger.warning("channels.list failed for %s: %s %s", channel_id, resp.status_code, safe_body(resp))
+        return None
+
+    # Charged only AFTER the status check, not right after the request: an
+    # error response costs zero units on Google's side (a 403 quotaExceeded
+    # most of all), so recording spend unconditionally inflated our own
+    # quota_log and needlessly shrank the QUOTA_CEILING headroom the rest of
+    # the run gets to use. Only a call that actually returned data is billed.
+    record_spend(QUOTA_COST_CHANNELS_LIST, call_name=f"channels.list({channel_id})")
+
+    payload = _json_or_none(resp, f"channels.list({channel_id})")
+    if payload is None:
+        return None
+
+    items = payload.get("items", [])
     if not items:
         logger.warning("Channel %s not found (private, deleted, or terminated) — skipping.", channel_id)
         return None
@@ -287,9 +378,9 @@ def get_channel_stats(channel_id: str) -> dict | None:
         "country": snippet.get("country", "Unknown"),
         # From the snippet already being fetched — no extra quota.
         "published_at": snippet.get("publishedAt", ""),
-        "subscriber_count": int(stats.get("subscriberCount", 0)),
-        "video_count": int(stats.get("videoCount", 0)),
-        "view_count": int(stats.get("viewCount", 0)),
+        "subscriber_count": _as_int(stats.get("subscriberCount")),
+        "video_count": _as_int(stats.get("videoCount")),
+        "view_count": _as_int(stats.get("viewCount")),
         "uploads_playlist_id": uploads_playlist_id,
         "description": snippet.get("description", ""),
         "business_email": extract_business_email(snippet.get("description", "")),
@@ -322,26 +413,39 @@ def get_recent_video_performance(
     scanning 50 descriptions instead of 10 is free).
 
     Returns None if the channel has no accessible uploads playlist (e.g.
-    channel has zero public videos).
+    channel has zero public videos), or if either request can't be
+    completed — a network failure skips the candidate, it doesn't end the
+    run.
     """
     if not uploads_playlist_id:
         logger.warning("Channel %s has no uploads playlist — skipping video performance.", channel_id)
         return None
 
+    # No "key" — it travels as a header on the shared session. See
+    # get_channel_stats() above for why reintroducing it here is unsafe.
     params = {
         "part": "contentDetails",
         "playlistId": uploads_playlist_id,
         "maxResults": max_results,
-        "key": YOUTUBE_API_KEY,
     }
-    resp = requests.get(f"{YOUTUBE_API_BASE_URL}/playlistItems", params=params, timeout=30)
-    record_spend(QUOTA_COST_PLAYLIST_ITEMS_LIST, call_name=f"playlistItems.list({channel_id})")
-
-    if resp.status_code != 200:
-        logger.warning("playlistItems.list failed for %s: %s %s", channel_id, resp.status_code, resp.text)
+    try:
+        resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/playlistItems", params=params, timeout=30)
+    except requests.RequestException as e:
+        # Retries are already exhausted at this point — see get_channel_stats().
+        logger.warning("playlistItems.list request failed for %s: %s", channel_id, e)
         return None
 
-    payload = resp.json()
+    if resp.status_code != 200:
+        logger.warning("playlistItems.list failed for %s: %s %s", channel_id, resp.status_code, safe_body(resp))
+        return None
+
+    # Spend recorded only for a call that returned data — see get_channel_stats().
+    record_spend(QUOTA_COST_PLAYLIST_ITEMS_LIST, call_name=f"playlistItems.list({channel_id})")
+
+    payload = _json_or_none(resp, f"playlistItems.list({channel_id})")
+    if payload is None:
+        return None
+
     items = payload.get("items", [])
     video_ids = [i["contentDetails"]["videoId"] for i in items if i.get("contentDetails", {}).get("videoId")]
     # playlistItems returns newest-first, so the leading slice is "the last
@@ -365,16 +469,28 @@ def get_recent_video_performance(
         # API offers. Free: videos.list is a flat 1 unit regardless of parts.
         "part": "snippet,statistics,contentDetails",
         "id": ",".join(video_ids),
-        "key": YOUTUBE_API_KEY,
     }
-    video_resp = requests.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
-    record_spend(QUOTA_COST_VIDEOS_LIST, call_name=f"videos.list({channel_id})")
-
-    if video_resp.status_code != 200:
-        logger.warning("videos.list failed for %s: %s %s", channel_id, video_resp.status_code, video_resp.text)
+    try:
+        video_resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
+    except requests.RequestException as e:
+        # Retries are already exhausted at this point — see get_channel_stats().
+        # Note the playlistItems unit above is still (correctly) charged: that
+        # call did return data.
+        logger.warning("videos.list request failed for %s: %s", channel_id, e)
         return None
 
-    video_items = video_resp.json().get("items", [])
+    if video_resp.status_code != 200:
+        logger.warning("videos.list failed for %s: %s %s", channel_id, video_resp.status_code, safe_body(video_resp))
+        return None
+
+    # Spend recorded only for a call that returned data — see get_channel_stats().
+    record_spend(QUOTA_COST_VIDEOS_LIST, call_name=f"videos.list({channel_id})")
+
+    video_payload = _json_or_none(video_resp, f"videos.list({channel_id})")
+    if video_payload is None:
+        return None
+
+    video_items = video_payload.get("items", [])
     if not video_items:
         return None
 
@@ -407,8 +523,11 @@ def get_recent_video_performance(
         if v.get("id") not in performance_ids:
             continue
         stats = v.get("statistics", {})
-        total_views += int(stats.get("viewCount", 0))
-        total_engagements += int(stats.get("likeCount", 0)) + int(stats.get("commentCount", 0))
+        # _as_int, not int(): likeCount and commentCount are routinely absent
+        # (disabled likes/comments) and can arrive as an explicit null, which
+        # int() would turn into a TypeError mid-loop.
+        total_views += _as_int(stats.get("viewCount"))
+        total_engagements += _as_int(stats.get("likeCount")) + _as_int(stats.get("commentCount"))
         performance_count += 1
 
     if not performance_count:
@@ -470,8 +589,10 @@ def scan_older_videos_for_email(
     Stops as soon as an email clears the threshold, so a channel that
     answers on the first extra page never pays for the second.
 
-    Every failure is soft — a bad page returns "" rather than raising,
-    matching the rest of this module.
+    Every failure is soft — a bad page, or an unreachable API, returns ""
+    rather than raising, matching the rest of this module. This step is a
+    best-effort bonus on top of two free ones; nothing about it is worth
+    ending a run for.
     """
     if not uploads_playlist_id or not page_token or max_pages <= 0:
         return ""
@@ -479,15 +600,23 @@ def scan_older_videos_for_email(
     descriptions = list(known_descriptions)
 
     for _ in range(max_pages):
+        # No "key" — it travels as a header on the shared session. See
+        # get_channel_stats() for why reintroducing it here is unsafe.
         params = {
             "part": "contentDetails",
             "playlistId": uploads_playlist_id,
             "maxResults": EMAIL_SCAN_SAMPLE_SIZE,
             "pageToken": page_token,
-            "key": YOUTUBE_API_KEY,
         }
-        resp = requests.get(f"{YOUTUBE_API_BASE_URL}/playlistItems", params=params, timeout=30)
-        record_spend(QUOTA_COST_PLAYLIST_ITEMS_LIST, call_name=f"playlistItems.list({channel_id}, older)")
+        try:
+            resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/playlistItems", params=params, timeout=30)
+        except requests.RequestException as e:
+            # Retries are already exhausted at this point — see get_channel_stats().
+            logger.info(
+                "Older-uploads page request failed for %s: %s — stopping the email scan here.",
+                channel_id, e,
+            )
+            return ""
 
         if resp.status_code != 200:
             logger.info(
@@ -496,7 +625,13 @@ def scan_older_videos_for_email(
             )
             return ""
 
-        payload = resp.json()
+        # Spend recorded only for a call that returned data — see get_channel_stats().
+        record_spend(QUOTA_COST_PLAYLIST_ITEMS_LIST, call_name=f"playlistItems.list({channel_id}, older)")
+
+        payload = _json_or_none(resp, f"playlistItems.list({channel_id}, older)")
+        if payload is None:
+            return ""
+
         video_ids = [
             i["contentDetails"]["videoId"]
             for i in payload.get("items", [])
@@ -510,10 +645,16 @@ def scan_older_videos_for_email(
         video_params = {
             "part": "snippet",
             "id": ",".join(video_ids),
-            "key": YOUTUBE_API_KEY,
         }
-        video_resp = requests.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
-        record_spend(QUOTA_COST_VIDEOS_LIST, call_name=f"videos.list({channel_id}, older)")
+        try:
+            video_resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
+        except requests.RequestException as e:
+            # Retries are already exhausted at this point — see get_channel_stats().
+            logger.info(
+                "Older-uploads videos.list request failed for %s: %s — stopping the email scan here.",
+                channel_id, e,
+            )
+            return ""
 
         if video_resp.status_code != 200:
             logger.info(
@@ -522,9 +663,16 @@ def scan_older_videos_for_email(
             )
             return ""
 
+        # Spend recorded only for a call that returned data — see get_channel_stats().
+        record_spend(QUOTA_COST_VIDEOS_LIST, call_name=f"videos.list({channel_id}, older)")
+
+        video_payload = _json_or_none(video_resp, f"videos.list({channel_id}, older)")
+        if video_payload is None:
+            return ""
+
         descriptions.extend(
             v.get("snippet", {}).get("description", "")
-            for v in video_resp.json().get("items", [])
+            for v in video_payload.get("items", [])
         )
 
         email = find_repeated_email(descriptions)

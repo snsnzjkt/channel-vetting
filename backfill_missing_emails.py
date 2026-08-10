@@ -11,6 +11,13 @@ stealth pass over the public About page.
 
 --limit caps how many missing-email records are processed per niche, so
 you can run this in controlled batches instead of all at once.
+
+Deliberately makes NO direct HTTP calls of its own: every request it
+causes goes out through airtable_client / enrichment / browser_email, so
+it inherits the shared retrying sessions in http_client.py for free.
+That's why there is no `requests` or `http_client` import here — if you
+add a call site, route it through the shared session (http_client.AIRTABLE
+or .YOUTUBE) rather than reaching for a bare `requests.get()`.
 """
 import argparse
 import logging
@@ -30,7 +37,7 @@ from enrichment import (
     get_recent_video_performance,
     FREEMAIL_DOMAINS,
 )
-from main import resolve_email_with_source
+from main import csv_safe, resolve_email_with_source
 from config import API_SLEEP_SECONDS, AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -99,7 +106,14 @@ def backfill_table(
             if email.rsplit("@", 1)[-1].lower() in FREEMAIL_DOMAINS:
                 freemail += 1
 
-            push_record(table_name, {"Channel ID": channel_id, "Email": email})
+            # csv_safe() for the same reason main.py applies it on the normal
+            # path: this address can come from browser_email.py scraping an
+            # arbitrary third-party site, and a value starting with =/+/-/@
+            # becomes a live formula when the reviewer exports the table to
+            # CSV and opens it in Excel. Airtable itself is not a formula
+            # context, so this looks unnecessary right up until someone
+            # exports.
+            push_record(table_name, {"Channel ID": channel_id, "Email": csv_safe(email)})
             found += 1
             print(f"[{niche_name}] {i}/{total} [FOUND] {title} -> {email}  ({source})")
         else:

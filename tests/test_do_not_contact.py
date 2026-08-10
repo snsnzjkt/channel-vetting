@@ -2,15 +2,23 @@
 The blocklist is a suppression list: it fails closed and matches
 generously. Wrongly skipping a prospect costs one lead; wrongly
 contacting a blocklisted person is the harm being prevented.
+
+HTTP is mocked by patching `do_not_contact.HTTP` (the shared retrying
+session from http_client.py), NOT `do_not_contact.requests` — which the
+module now imports only for its exception TYPES. Patching the wrong one
+would send these tests at the real Airtable base; tests/conftest.py's
+autouse guard turns that into a hard failure rather than a live request.
 """
+import logging
+
 import pytest
 
 
 class _Resp:
-    def __init__(self, status_code, payload=None):
+    def __init__(self, status_code, payload=None, text="error body"):
         self.status_code = status_code
         self._payload = payload or {}
-        self.text = "error body"
+        self.text = text
 
     def json(self):
         return self._payload
@@ -36,7 +44,7 @@ def test_parses_all_observed_url_formats(monkeypatch):
         {"fields": {FIELD_URL: "youtube.com/@Tarasimonstudios"}},
         {"fields": {FIELD_URL: "https://www.youtube.com/@Chroniques_Atlas/videos"}},
     ]
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _page(records))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     bl = do_not_contact.fetch_blocklist()
@@ -47,7 +55,7 @@ def test_matches_handle_case_insensitively(monkeypatch):
     import do_not_contact
 
     records = [{"fields": {FIELD_URL: "https://www.youtube.com/@LinusTechTips"}}]
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _page(records))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     bl = do_not_contact.fetch_blocklist()
@@ -63,7 +71,7 @@ def test_matches_email_and_name(monkeypatch):
         {"fields": {FIELD_EMAIL: "  Info@LinusMediaGroup.com \n", FIELD_NAME: "Linus Tech Tips"}},
         {"fields": {FIELD_NAME: "superwog"}},  # no URL at all
     ]
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _page(records))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     bl = do_not_contact.fetch_blocklist()
@@ -83,7 +91,7 @@ def test_blank_field_values_never_enter_the_index(monkeypatch):
         {"fields": {FIELD_URL: "https://www.youtube.com/@RealChannel"}},
         {"fields": {FIELD_URL: "", FIELD_EMAIL: "", FIELD_NAME: ""}},
     ]
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _page(records))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     bl = do_not_contact.fetch_blocklist()
@@ -111,7 +119,7 @@ def test_blank_inputs_never_match_even_against_a_blank_index_entry():
 def test_raises_on_non_200(monkeypatch):
     import do_not_contact
 
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _Resp(500))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _Resp(500))
 
     with pytest.raises(do_not_contact.BlocklistUnavailable):
         do_not_contact.fetch_blocklist()
@@ -123,7 +131,7 @@ def test_raises_on_request_exception(monkeypatch):
     def boom(*a, **k):
         raise do_not_contact.requests.RequestException("network down")
 
-    monkeypatch.setattr(do_not_contact.requests, "get", boom)
+    monkeypatch.setattr(do_not_contact.HTTP, "get", boom)
 
     with pytest.raises(do_not_contact.BlocklistUnavailable):
         do_not_contact.fetch_blocklist()
@@ -134,7 +142,7 @@ def test_raises_when_blocklist_is_suspiciously_empty(monkeypatch):
     nobody is blocklisted."""
     import do_not_contact
 
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _page([]))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page([]))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     with pytest.raises(do_not_contact.BlocklistUnavailable):
@@ -153,7 +161,7 @@ def test_page_missing_records_key_raises_instead_of_returning_partial(monkeypatc
     page2 = _Resp(200, {})  # 200, but no "records" key at all
 
     responses = [page1, page2]
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: responses.pop(0))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: responses.pop(0))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     with pytest.raises(do_not_contact.BlocklistUnavailable):
@@ -174,7 +182,7 @@ def test_records_keyed_by_wrong_field_raises_instead_of_empty_index(monkeypatch)
         {"fields": {"Name": "Someone", "URL": "https://www.youtube.com/@someone"}}
         for _ in range(5)
     ]
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _page(records))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     with pytest.raises(do_not_contact.BlocklistUnavailable):
@@ -196,7 +204,7 @@ def test_non_json_response_body_raises_blocklist_unavailable(monkeypatch):
                 "Expecting value", "<html>not json</html>", 0
             )
 
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _BadJsonResp())
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _BadJsonResp())
 
     with pytest.raises(do_not_contact.BlocklistUnavailable):
         do_not_contact.fetch_blocklist()
@@ -210,7 +218,7 @@ def test_multi_page_results_accumulate(monkeypatch):
     page2 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelTwo"}}])
     responses = [page1, page2]
 
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: responses.pop(0))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: responses.pop(0))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     bl = do_not_contact.fetch_blocklist()
@@ -231,7 +239,7 @@ def test_offset_is_forwarded_into_the_next_page_request(monkeypatch):
         captured_params.append(k.get("params"))
         return responses.pop(0)
 
-    monkeypatch.setattr(do_not_contact.requests, "get", fake_get)
+    monkeypatch.setattr(do_not_contact.HTTP, "get", fake_get)
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     do_not_contact.fetch_blocklist()
@@ -249,7 +257,7 @@ def test_failure_on_a_later_page_raises_not_returns_earlier_pages(monkeypatch):
     page2 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelTwo"}}], offset="o2")
     responses = [page1, page2, _Resp(500)]
 
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: responses.pop(0))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: responses.pop(0))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     with pytest.raises(do_not_contact.BlocklistUnavailable):
@@ -268,7 +276,7 @@ def test_request_params_use_field_ids_and_returnFieldsByFieldId(monkeypatch):
         captured["params"] = params
         return _page(records)
 
-    monkeypatch.setattr(do_not_contact.requests, "get", fake_get)
+    monkeypatch.setattr(do_not_contact.HTTP, "get", fake_get)
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     do_not_contact.fetch_blocklist()
@@ -286,7 +294,7 @@ def test_match_accepts_a_full_url_as_the_handle_input(monkeypatch):
     import do_not_contact
 
     records = [{"fields": {FIELD_URL: "https://www.youtube.com/@LinusTechTips"}}]
-    monkeypatch.setattr(do_not_contact.requests, "get", lambda *a, **k: _page(records))
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
 
     bl = do_not_contact.fetch_blocklist()
@@ -294,3 +302,48 @@ def test_match_accepts_a_full_url_as_the_handle_input(monkeypatch):
     assert bl.match(handle="youtube.com/@LinusTechTips/videos")
     assert bl.match(handle="@LinusTechTips")
     assert bl.match(handle="linustechtips")
+
+
+def test_huge_error_body_is_truncated_not_reported_in_full(monkeypatch, caplog):
+    """The non-200 path reports the body through http_client.safe_body(),
+    so an Airtable error that echoes a whole rejected page back cannot
+    dump unbounded text into the run log (or into the abort message
+    main.py logs verbatim). It must still fail closed."""
+    import do_not_contact
+    from http_client import safe_body
+
+    huge = "x" * 20_000
+    monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _Resp(500, text=huge))
+
+    caplog.set_level(logging.DEBUG, logger="do_not_contact")
+    with pytest.raises(do_not_contact.BlocklistUnavailable) as excinfo:
+        do_not_contact.fetch_blocklist()
+
+    message = str(excinfo.value)
+    # Fail-closed contract intact, AND the body is bounded.
+    assert huge not in message
+    assert "truncated" in message
+    assert len(message) < len(huge)
+    assert safe_body(_Resp(500, text=huge)) in message
+    # Nothing logged the full body on the way out either.
+    assert not any(huge in record.getMessage() for record in caplog.records)
+
+
+def test_auth_failure_body_is_withheld_entirely(monkeypatch):
+    """safe_body() reports nothing but the status for 401/403 — that body
+    is noise attached to the one status most likely to get pasted into a
+    ticket. The abort itself is unchanged."""
+    import do_not_contact
+
+    monkeypatch.setattr(
+        do_not_contact.HTTP, "get",
+        lambda *a, **k: _Resp(403, text="token 'patXXXX' lacks scope data.records:read"),
+    )
+
+    with pytest.raises(do_not_contact.BlocklistUnavailable) as excinfo:
+        do_not_contact.fetch_blocklist()
+
+    message = str(excinfo.value)
+    assert "patXXXX" not in message
+    assert "403" in message
+    assert "withheld" in message

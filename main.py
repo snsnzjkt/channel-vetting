@@ -25,6 +25,7 @@ from enrichment import (
     calc_upload_frequency,
     channel_age_months,
     scan_older_videos_for_email,
+    count_longform_in_older_videos,
 )
 from scoring import calc_fake_follower_risk, calc_overall_score, QUALIFIED, qualify
 from search_zones import country_code, region_from_language_tag, zone_verdict
@@ -50,6 +51,7 @@ from config import (
     DAILY_FLAGGED_CAP,
     DAILY_QUALIFIED_CAP,
     DISCOVERY_DAYS_BACK,
+    EXPECTED_CANDIDATES_PER_KEYWORD,
     USE_PLAYWRIGHT_STEALTH,
 )
 
@@ -168,11 +170,60 @@ JUNK_MIN_AVG_VIEWS = 100
 # clears that bar rather than failing it.
 MIN_VIDEO_COUNT = 30
 
+# The same 30-video floor, but counting only videos confirmed NOT to be
+# Shorts. MIN_VIDEO_COUNT above reads statistics.videoCount, which lumps
+# Shorts in with everything else — so a channel with 300 Shorts and 4
+# long-form uploads cleared it, which is not what "30-40 videos minimum"
+# means for a brand looking to place a product in real content.
+#
+# is_shorts_only() does NOT cover this: it discards only channels that are
+# 100% Shorts, so the entire middle ground (a Shorts factory that posts the
+# occasional long-form video) passed both checks. Measured on 47 otherwise-
+# qualifying Home Theater candidates, 12 had fewer than 10 long-form videos
+# in their newest 50 and were being written as prospects.
+#
+# Confirmed against up to ~200 videos — the newest 50 from enrichment plus
+# LONGFORM_SCAN_MAX_PAGES more — see enrichment.count_longform_in_older_videos.
+MIN_LONGFORM_VIDEO_COUNT = 30
+
+# Content language must be English. The tag is the channel's own
+# defaultAudioLanguage/defaultLanguage, reduced to the most common value
+# across the sampled videos by enrichment.dominant_language().
+#
+# Matched on the "en" PREFIX, so en, en-US, en-GB and en-AU all pass: the
+# region subtag is not noise to be normalised away — main.resolve_country()
+# reads it to place channels that declare no country, which is the only
+# search-zone signal available for ~15% of candidates. Stripping it to a bare
+# "en" would silently blind the zone filter for exactly those channels.
+ENGLISH_LANGUAGE_PREFIX = "en"
+
 DROP_DEAD_CHANNEL = "dead_channel"
 DROP_SHORTS_ONLY = "shorts_only"
 DROP_BELOW_VIEW_MINIMUM = "below_view_minimum"
 DROP_TOO_FEW_VIDEOS = "too_few_videos"
+DROP_TOO_FEW_LONGFORM = "too_few_longform_videos"
+DROP_NOT_ENGLISH = "not_english"
 DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
+
+
+def is_english(content_language: str | None) -> bool:
+    """
+    Whether a content-language tag is English.
+
+    An UNSET tag is not English here — a deliberate break from this
+    pipeline's usual "absent data never disqualifies" rule (unknown channel
+    age, unknown country). The requirement is that every row's Content
+    Language reads as English, and a blank cannot satisfy it; keeping unsets
+    would put "Unknown" rows in a table specified to hold English channels.
+
+    The cost of the strict reading was measured before choosing it: across
+    197 enriched candidates, ZERO of the 47 that passed every other gate had
+    an unset language, because dominant_language() reads the whole 50-video
+    window rather than one video. So this discards essentially nothing today
+    — but it is the strict direction, and if a future sample does carry
+    unsets they will be dropped rather than written as Unknown.
+    """
+    return (content_language or "").strip().lower().startswith(ENGLISH_LANGUAGE_PREFIX)
 
 
 def pre_push_drop_reason(
@@ -181,6 +232,7 @@ def pre_push_drop_reason(
     shorts_only: bool = False,
     min_avg_views: float = 0,
     video_count: int | None = None,
+    content_language: str | None = None,
 ) -> str | None:
     """
     Why this candidate should never reach Airtable, or None to continue.
@@ -188,25 +240,54 @@ def pre_push_drop_reason(
     Applies regardless of what qualify() would have returned — a row for a
     dead channel is exactly the row this gate exists to stop writing.
 
-    Deliberately does NOT cover the search zone. That check needs a country
-    this function can't get for free (see resolve_country) and runs as its
-    own step in process_candidate; everything here is answerable from data
-    already fetched.
+    Deliberately does NOT cover the search zone, nor the long-form video
+    floor. Both need data this function can't get for free — a country
+    (see resolve_country) and up to three extra pages of uploads (see
+    longform_drop_reason) — so they run as their own steps in
+    process_candidate, AFTER everything here. Everything in this function is
+    answerable from data already fetched, which is what makes it the cheapest
+    place to discard.
 
     Unknown data never disqualifies, the same rule qualify() follows: a
     `video_count` of None means channels.list didn't report one, and an
     unreported catalogue size is not evidence of a small catalogue. A
     reported 0 is a real answer and is failed like any other number below
-    the floor.
+    the floor. The ONE exception is `content_language` — see is_english() for
+    why an unset language is treated as a failure there.
+
+    `content_language` defaults to None, which fails the English check. That
+    default is deliberate: a caller that forgets to pass it gets a loud
+    empty result rather than silently skipping the gate.
     """
     if shorts_only:
         return DROP_SHORTS_ONLY
+    if not is_english(content_language):
+        return DROP_NOT_ENGLISH
     if video_count is not None and video_count < MIN_VIDEO_COUNT:
         return DROP_TOO_FEW_VIDEOS
     if (avg_views or 0) < min_avg_views:
         return DROP_BELOW_VIEW_MINIMUM
     if (subscriber_count or 0) < JUNK_MIN_SUBSCRIBERS and (avg_views or 0) < JUNK_MIN_AVG_VIEWS:
         return DROP_DEAD_CHANNEL
+    return None
+
+
+def longform_drop_reason(longform_count: int) -> str | None:
+    """
+    Whether the channel showed MIN_LONGFORM_VIDEO_COUNT confirmed non-Shorts
+    uploads, or None to continue.
+
+    Split out from pre_push_drop_reason because establishing the count can
+    cost quota (see enrichment.count_longform_in_older_videos), so it must
+    run after every free check has had its chance to discard the candidate.
+
+    Unlike `video_count`, a shortfall here IS a failure even though the data
+    is partial. That is the point: a channel gets ~200 videos' worth of
+    chances to show 30 long-form uploads, and not showing them is the
+    evidence, not missing data.
+    """
+    if longform_count < MIN_LONGFORM_VIDEO_COUNT:
+        return DROP_TOO_FEW_LONGFORM
     return None
 
 
@@ -448,13 +529,14 @@ def process_candidate(
         performance.get("shorts_only", False),
         min_avg_views=niche_config["min_avg_views"],
         video_count=stats.get("video_count"),
+        content_language=performance.get("content_language"),
     )
     if drop_reason:
         logger.info(
-            "Dropping %s before push — %s (%s subs, %s avg views, %s videos).",
+            "Dropping %s before push — %s (%s subs, %s avg views, %s videos, lang %s).",
             stats.get("channel_title"), drop_reason,
             stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
-            stats.get("video_count"),
+            stats.get("video_count"), performance.get("content_language") or "unset",
         )
         return None, drop_reason
 
@@ -472,6 +554,29 @@ def process_candidate(
             stats.get("channel_title"), DROP_OUTSIDE_SEARCH_ZONE, country,
         )
         return None, DROP_OUTSIDE_SEARCH_ZONE
+
+    # Long-form floor, LAST of the discard gates because it is the only one
+    # that can cost quota: confirming 30 non-Shorts uploads may need up to
+    # LONGFORM_SCAN_MAX_PAGES extra pages (2 units each) for a channel whose
+    # newest 50 videos didn't already show them. Every free reason to discard
+    # has now had its turn, so nothing is paged for a candidate that was
+    # going to be dropped anyway.
+    longform_count = performance.get("longform_count", 0)
+    if longform_count < MIN_LONGFORM_VIDEO_COUNT:
+        longform_count = count_longform_in_older_videos(
+            channel_id,
+            stats.get("uploads_playlist_id", ""),
+            performance.get("next_page_token", ""),
+            already_counted=longform_count,
+            target=MIN_LONGFORM_VIDEO_COUNT,
+        )
+    drop_reason = longform_drop_reason(longform_count)
+    if drop_reason:
+        logger.info(
+            "Dropping %s before push — %s (%d confirmed non-Shorts of %s total videos).",
+            stats.get("channel_title"), drop_reason, longform_count, stats.get("video_count"),
+        )
+        return None, drop_reason
 
     upload_freq = calc_upload_frequency(performance["upload_dates"])
     fake_risk = calc_fake_follower_risk(
@@ -647,54 +752,142 @@ def run_niche(
         logger.info("'%s' is already at its daily cap — skipping (no quota spent).", niche_name)
         return 0, 0, set(), True
 
-    target_fresh = int((qualified_headroom + flagged_headroom) * CANDIDATE_OVERSHOOT)
-    logger.info("Starting discovery for %d keyword(s)...", len(keywords))
-    discovered = run_discovery(
-        keywords,
-        max_results_per_keyword=max_results_per_keyword,
-        days_back=days_back,
-        exclude_ids=globally_tracked_ids,
-        target_fresh=target_fresh,
-    )
-    logger.info("Discovered %d unique candidate channel(s).", len(discovered))
+    # --- Refill loop --------------------------------------------------
+    # Discover a batch of keywords, push what survives, and come back for
+    # more while the QUALIFIED budget has room and keywords remain (see the
+    # loop condition below for why flagged doesn't drive this).
+    #
+    # This used to be a single pass: discover
+    # (headroom * CANDIDATE_OVERSHOOT) candidates once, push, done. That
+    # worked while almost every candidate became a row, but the 2026-08
+    # criteria change moved the view floor, the video-count floor and the
+    # search zone into pre_push_drop_reason() as hard DISCARDS — measured,
+    # only ~15% of fresh candidates now survive to be written (18 of 122 on
+    # 2026-08-11). So a 40-row budget was handed 60 candidates, produced ~9
+    # rows, and stopped with 6 of 9 keywords never searched. The cap was
+    # unreachable by construction, and the only symptom was the
+    # "finished under its qualified budget" warning below, which reads as
+    # "discovery is running dry" — the wrong diagnosis, since the keywords
+    # had plenty left.
+    #
+    # Refilling makes the loop self-correcting in both directions: a bad
+    # survival rate keeps searching, and a good one stops early, so quota
+    # still tracks what the day's headroom actually needs.
+    pushed_qualified = 0
+    pushed_flagged = 0
+    total_discovered = 0
+    total_skipped = 0
+    pushed_ids: set[str] = set()
 
-    # Straight set-membership filter, deliberately not a DataFrame: a
-    # round trip through pandas rewrote the candidates on the way out —
-    # it appended its own bookkeeping column to every record and filled a
-    # NaN wherever one candidate carried a key another lacked (which also
-    # promoted that column's ints to floats). Nothing downstream wanted
-    # either.
-    if not discovered:
-        logger.info("No candidates discovered — nothing to process.")
-    new_candidates = [c for c in discovered if c["channel_id"] not in globally_tracked_ids]
+    # Local copy — the caller's set is shared across niches and must not be
+    # mutated here. Grows with every candidate this niche has ALREADY
+    # examined (pushed or dropped), so a later batch never re-enriches a
+    # channel an earlier one already paid for.
+    seen_ids = set(globally_tracked_ids)
+    remaining_keywords = list(keywords)
+    rounds = 0
 
-    logger.info(
-        "%d candidate(s) already tracked elsewhere in the base, %d remaining to process.",
-        len(discovered) - len(new_candidates), len(new_candidates),
-    )
+    while remaining_keywords:
+        # Only the QUALIFIED budget is worth spending another 100-unit
+        # search on. The flagged budget is a CEILING, not a target — it
+        # exists so a weak discovery day can't crowd the table with
+        # below-criteria channels, so flagged rows are written
+        # opportunistically as they turn up and never hunted for. Chasing it
+        # would also never terminate for a niche that cannot produce one at
+        # all: Lifestyle Sofa's min_channel_age_months is None, so qualify()
+        # can only ever return "Qualified" there and its flagged budget goes
+        # permanently unused (documented, expected). A loop that kept
+        # searching until flagged filled would burn every keyword in that
+        # niche, every day, for rows that can't exist.
+        #
+        # Tested after at least one round, so a niche whose qualified budget
+        # is already full still gets a single opportunistic pass for flagged.
+        if rounds and pushed_qualified >= qualified_headroom:
+            break
+        rounds += 1
 
-    counts = push_until_full(
-        new_candidates,
-        lambda c: process_candidate(c, external_handles, blocklist, niche_config, scraper),
-        table_name,
-        qualified_headroom,
-        flagged_headroom,
-    )
+        rows_wanted = (qualified_headroom - pushed_qualified) + (flagged_headroom - pushed_flagged)
+        # How many keywords to search this round. Ceiling division, floor of
+        # 1, so a small shortfall still searches one keyword rather than
+        # zero (which would spin the loop without spending or progressing).
+        wanted_candidates = max(1, int(rows_wanted * CANDIDATE_OVERSHOOT))
+        batch_size = max(
+            1,
+            -(-wanted_candidates // max(1, EXPECTED_CANDIDATES_PER_KEYWORD)),
+        )
+        batch = remaining_keywords[:batch_size]
+        remaining_keywords = remaining_keywords[batch_size:]
+
+        logger.info(
+            "Discovery round for '%s': %d keyword(s) %s — %d row(s) still wanted.",
+            niche_name, len(batch), batch, rows_wanted,
+        )
+        # target_fresh is deliberately NOT passed: the batch was already
+        # sized to the shortfall, and stopping part-way through it would
+        # consume keywords from remaining_keywords without searching them.
+        discovered = run_discovery(
+            batch,
+            max_results_per_keyword=max_results_per_keyword,
+            days_back=days_back,
+            exclude_ids=seen_ids,
+        )
+        total_discovered += len(discovered)
+        logger.info("Discovered %d unique candidate channel(s).", len(discovered))
+
+        # Straight set-membership filter, deliberately not a DataFrame: a
+        # round trip through pandas rewrote the candidates on the way out —
+        # it appended its own bookkeeping column to every record and filled a
+        # NaN wherever one candidate carried a key another lacked (which also
+        # promoted that column's ints to floats). Nothing downstream wanted
+        # either.
+        if not discovered:
+            logger.info("No candidates discovered — nothing to process.")
+        new_candidates = [c for c in discovered if c["channel_id"] not in seen_ids]
+
+        logger.info(
+            "%d candidate(s) already tracked or already examined, %d remaining to process.",
+            len(discovered) - len(new_candidates), len(new_candidates),
+        )
+
+        counts = push_until_full(
+            new_candidates,
+            lambda c: process_candidate(c, external_handles, blocklist, niche_config, scraper),
+            table_name,
+            qualified_headroom - pushed_qualified,
+            flagged_headroom - pushed_flagged,
+        )
+
+        pushed_qualified += counts["qualified"]
+        pushed_flagged += counts["flagged"]
+        total_skipped += counts["skipped"]
+        pushed_ids |= counts["pushed_ids"]
+        # Every candidate offered to push_until_full is now spent, whether it
+        # was written or dropped. push_until_full only returns before reading
+        # its whole list when BOTH budgets are full, which also ends this
+        # loop — so nothing unexamined is being discarded here.
+        seen_ids.update(c["channel_id"] for c in new_candidates)
+
+        logger.info(
+            "'%s' so far: %d/%d qualified, %d/%d flagged (%d keyword(s) left).",
+            niche_name, pushed_qualified, qualified_headroom,
+            pushed_flagged, flagged_headroom, len(remaining_keywords),
+        )
 
     logger.info(
         "'%s': pushed %d qualified, %d flagged, skipped %d.",
-        niche_name, counts["qualified"], counts["flagged"], counts["skipped"],
+        niche_name, pushed_qualified, pushed_flagged, total_skipped,
     )
 
-    if counts["qualified"] < qualified_headroom:
+    if pushed_qualified < qualified_headroom:
         logger.warning(
-            "'%s' finished under its qualified budget (%d of %d). Discovery is running "
-            "dry for these keywords — widen --days-back for a one-off sweep, or add "
-            "keywords from the brief's secondary content types.",
-            niche_name, counts["qualified"], qualified_headroom,
+            "'%s' finished under its qualified budget (%d of %d) with every keyword "
+            "searched. Discovery really is running dry for these keywords — widen "
+            "--days-back for a one-off sweep, or add keywords from the brief's "
+            "secondary content types.",
+            niche_name, pushed_qualified, qualified_headroom,
         )
 
-    return len(discovered), counts["qualified"] + counts["flagged"], counts["pushed_ids"], True
+    return total_discovered, pushed_qualified + pushed_flagged, pushed_ids, True
 
 
 # A NICHES entry missing any of these crashes run() with a bare KeyError

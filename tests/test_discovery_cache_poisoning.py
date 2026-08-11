@@ -299,7 +299,7 @@ def test_cache_key_uses_the_pacific_day_not_utc(monkeypatch):
     assert frozen_utc.strftime("%Y-%m-%d") == "2026-08-11", "the two clocks must differ here"
 
     # discovery imported the helper by name, so it sees the same frozen clock.
-    assert discovery._cache_key("kw") == "2026-08-10::kw"
+    assert discovery._cache_key("kw", max_results=50, days_back=7) == "2026-08-10::7d::n50::kw"
     assert discovery._cache_key("kw").startswith(quota_tracker.today_pacific())
 
 
@@ -308,6 +308,57 @@ def test_cache_key_normalises_the_keyword():
     import discovery
 
     assert discovery._cache_key("  Home Theater ") == discovery._cache_key("home theater")
+
+
+def test_a_wider_days_back_is_not_served_from_a_narrower_cached_result(monkeypatch, tmp_path):
+    """
+    CLAUDE.md's documented escape hatch for a thin day is `--days-back 90`.
+    While the key ignored days_back, the 09:00 cron's 7-day result satisfied
+    it — so the sweep returned the narrow window and spent nothing, with no
+    error and no way to tell from the output.
+    """
+    import discovery
+
+    monkeypatch.setattr(discovery, "SEARCH_CACHE_FILE", str(tmp_path / "search_cache.json"))
+    monkeypatch.setattr(discovery, "YOUTUBE_API_KEY", "fake-key")
+    monkeypatch.setattr(discovery.time, "sleep", lambda s: None)
+    monkeypatch.setattr(discovery, "record_spend", lambda *a, **k: None)
+    monkeypatch.setattr(discovery, "can_afford_search", lambda: True)
+
+    responses = [_Resp(200, _search_payload(["NARROW"]))]
+    monkeypatch.setattr(discovery.HTTP, "get", lambda *a, **k: responses.pop(0))
+
+    narrow = discovery.discover_channels_by_keyword("kw", max_results=50, days_back=7)
+    assert {c["channel_id"] for c in narrow} == {"NARROW"}
+
+    # The 90-day sweep must actually search rather than reuse the 7-day rows.
+    responses.append(_Resp(200, _search_payload(["WIDE1", "WIDE2"])))
+    wide = discovery.discover_channels_by_keyword("kw", max_results=50, days_back=90)
+    assert {c["channel_id"] for c in wide} == {"WIDE1", "WIDE2"}
+
+    # ...and each window keeps its own entry, so neither re-spends.
+    assert discovery._cache_key("kw", 50, 7) in discovery._load_cache()
+    assert discovery._cache_key("kw", 50, 90) in discovery._load_cache()
+
+
+def test_a_test_mode_result_does_not_satisfy_a_full_run(monkeypatch, tmp_path):
+    """`--test` caches max_results=5; a later full run must still ask for 50."""
+    import discovery
+
+    monkeypatch.setattr(discovery, "SEARCH_CACHE_FILE", str(tmp_path / "search_cache.json"))
+    monkeypatch.setattr(discovery, "YOUTUBE_API_KEY", "fake-key")
+    monkeypatch.setattr(discovery.time, "sleep", lambda s: None)
+    monkeypatch.setattr(discovery, "record_spend", lambda *a, **k: None)
+    monkeypatch.setattr(discovery, "can_afford_search", lambda: True)
+
+    responses = [_Resp(200, _search_payload(["SMOKE"]))]
+    monkeypatch.setattr(discovery.HTTP, "get", lambda *a, **k: responses.pop(0))
+
+    discovery.discover_channels_by_keyword("kw", max_results=5, days_back=7)
+
+    responses.append(_Resp(200, _search_payload([f"UC{i}" for i in range(4)])))
+    full = discovery.discover_channels_by_keyword("kw", max_results=50, days_back=7)
+    assert len(full) == 4
 
 
 def test_save_cache_is_atomic_and_leaves_no_tmp_file(monkeypatch, tmp_path):

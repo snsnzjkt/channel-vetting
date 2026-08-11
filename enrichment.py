@@ -32,6 +32,7 @@ from config import (
     QUOTA_COST_VIDEOS_LIST,
     API_SLEEP_SECONDS,
     EMAIL_DEEP_SCAN_PAGES,
+    LONGFORM_SCAN_MAX_PAGES,
 )
 from http_client import YOUTUBE as HTTP, safe_body
 from quota_tracker import record_spend
@@ -75,6 +76,7 @@ EMAIL_SCAN_SAMPLE_SIZE = 50
 # channel, making them incomparable with the records already in the base.
 # Widen the email scan, hold the scoring baseline still.
 PERFORMANCE_SAMPLE_SIZE = 10
+
 
 # Domains belonging to a third party that routinely shows up in creator
 # descriptions — shared platforms, link-aggregators, payment/tip/coupon
@@ -183,6 +185,41 @@ def is_shorts_only(durations) -> bool:
     if any(seconds is None for seconds in parsed):
         return False
     return all(seconds <= SHORTS_MAX_SECONDS for seconds in parsed)
+
+
+def count_longform(durations) -> int:
+    """
+    How many of `durations` are confirmed NOT Shorts, i.e. longer than
+    SHORTS_MAX_SECONDS.
+
+    Counts only durations that actually parse. An unreadable duration is
+    unknown, not long-form, so it never counts toward the total — the
+    opposite lean from is_shorts_only(), and for the same reason. This number
+    feeds a MINIMUM (main.MIN_LONGFORM_VIDEO_COUNT), so counting an unknown
+    as long-form would let a channel clear the bar on missing data. Here the
+    burden of proof sits on the channel to show a long-form catalogue.
+    """
+    return sum(
+        1 for d in durations
+        if (parse_iso8601_duration(d) or 0) > SHORTS_MAX_SECONDS
+    )
+
+
+def dominant_language(languages) -> str:
+    """
+    The most common non-empty language tag in a sample, or "" if none is set.
+
+    Ties break toward the first-seen tag (Counter.most_common is insertion-
+    stable for equal counts), so the newest upload wins a genuine tie.
+
+    Reading the MOST COMMON rather than the first non-empty one matters now
+    that the value is gated on: a single mislabelled upload (an `es` reaction
+    video on an otherwise English channel, or vice versa) would otherwise
+    decide the whole channel's fate. The tag is set per-video by the creator
+    and is inconsistent in exactly this way.
+    """
+    counts = Counter(lang for lang in languages if lang)
+    return counts.most_common(1)[0][0] if counts else ""
 
 
 def extract_business_email(description: str) -> str:
@@ -502,7 +539,7 @@ def get_recent_video_performance(
     total_views = 0
     total_engagements = 0  # likes + comments
     performance_count = 0
-    content_language = ""
+    video_languages = []
     video_descriptions = []
     durations = []
     for v in video_items:
@@ -516,8 +553,12 @@ def get_recent_video_performance(
         # which makes a false "Shorts-only" verdict less likely. That matters
         # because that verdict discards the channel outright.
         durations.append(v.get("contentDetails", {}).get("duration"))
-        if not content_language:
-            content_language = snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or ""
+        # Collected across the WIDE window and reduced by dominant_language()
+        # below, rather than taking the first non-empty tag: the value is now
+        # gated on, and one mislabelled upload must not decide the channel.
+        video_languages.append(
+            snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or ""
+        )
 
         # ...but only the newest PERFORMANCE_SAMPLE_SIZE feed the metrics.
         if v.get("id") not in performance_ids:
@@ -544,12 +585,19 @@ def get_recent_video_performance(
         # Size of the *performance* window (still 10), not the email scan.
         "sample_size": performance_count,
         # Most creators never set this, so it's frequently "" (Unknown) —
-        # best-effort only, not a guaranteed signal.
-        "content_language": content_language,
+        # best-effort only, not a guaranteed signal. The MOST COMMON tag
+        # across the wide window, not the newest video's.
+        "content_language": dominant_language(video_languages),
         # True only if EVERY fetched video is <= SHORTS_MAX_SECONDS and none
         # had an unreadable duration. main.pre_push_drop_reason discards
         # these before any Airtable row is written.
         "shorts_only": is_shorts_only(durations),
+        # Confirmed non-Shorts uploads in the wide window, and how many videos
+        # that window actually held. main.pre_push_drop_reason needs BOTH:
+        # "only 12 long-form" means something different when 12 of 12 videos
+        # were sampled than when 12 of 50 were.
+        "longform_count": count_longform(durations),
+        "duration_sample_size": len(durations),
         # An email seen in EMAIL_MIN_VIDEO_REPEATS+ of the sampled videos'
         # descriptions — a stronger signal than a single mention anywhere.
         "repeated_email": find_repeated_email(video_descriptions),
@@ -690,6 +738,131 @@ def scan_older_videos_for_email(
         time.sleep(API_SLEEP_SECONDS)
 
     return ""
+
+
+def count_longform_in_older_videos(
+    channel_id: str,
+    uploads_playlist_id: str,
+    page_token: str,
+    already_counted: int,
+    target: int,
+    max_pages: int = LONGFORM_SCAN_MAX_PAGES,
+) -> int:
+    """
+    Keep paging back through a channel's uploads counting confirmed non-Shorts
+    videos, until `target` is reached, the pages run out, or `max_pages` is
+    spent. Returns the total (including `already_counted`).
+
+    WHY this pages at all. The newest-EMAIL_SCAN_SAMPLE_SIZE window is a poor
+    sample for "does this channel have 30+ long-form videos", because a
+    channel that recently leaned into Shorts shows a Shorts-heavy newest 50
+    while holding hundreds of long-form uploads behind it. Measured over 47
+    otherwise-qualifying Home Theater candidates (2026-08-11), 29 already
+    show 30+ long-form in the newest 50 and pay nothing here; of the 18 that
+    don't, six are genuine mixed-format channels with large catalogues
+    (WorkshopAddict 22/50 across 2,418 uploads, Kat Viana 23/50 across 471,
+    Fat Hog Woodworking 25/50 across 199) that a newest-50-only rule would
+    wrongly discard.
+
+    Quota cost: 2 units per page (playlistItems.list + videos.list), and zero
+    when `page_token` is empty, `max_pages` is 0, or the target is already
+    met. The cap is what makes a Shorts factory cheap to reject rather than
+    expensive to prove: at 200 videos examined, a channel needs roughly a 15%
+    long-form rate to reach 30, so Dadrianca (2 of 50) is dropped after the
+    cap instead of being paged through 791 uploads.
+
+    Failures are soft, like the rest of this module: an unreachable page
+    returns what has been counted so far rather than raising. That leans
+    toward DISCARDING the channel (the count stays below target), which is
+    the same direction count_longform() leans for an unreadable duration —
+    the burden of proof is on the channel.
+    """
+    total = already_counted
+    if total >= target or not uploads_playlist_id or not page_token or max_pages <= 0:
+        return total
+
+    for _ in range(max_pages):
+        # No "key" — it travels as a header on the shared session. See
+        # get_channel_stats() for why reintroducing it here is unsafe.
+        params = {
+            "part": "contentDetails",
+            "playlistId": uploads_playlist_id,
+            "maxResults": EMAIL_SCAN_SAMPLE_SIZE,
+            "pageToken": page_token,
+        }
+        try:
+            resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/playlistItems", params=params, timeout=30)
+        except requests.RequestException as e:
+            # Retries are already exhausted at this point — see get_channel_stats().
+            logger.info(
+                "Older-uploads page request failed for %s: %s — stopping the long-form count at %d.",
+                channel_id, e, total,
+            )
+            return total
+
+        if resp.status_code != 200:
+            logger.info(
+                "Older-uploads page failed for %s: %s — stopping the long-form count at %d.",
+                channel_id, resp.status_code, total,
+            )
+            return total
+
+        # Spend recorded only for a call that returned data — see get_channel_stats().
+        record_spend(QUOTA_COST_PLAYLIST_ITEMS_LIST, call_name=f"playlistItems.list({channel_id}, longform)")
+
+        payload = _json_or_none(resp, f"playlistItems.list({channel_id}, longform)")
+        if payload is None:
+            return total
+
+        video_ids = [
+            i["contentDetails"]["videoId"]
+            for i in payload.get("items", [])
+            if i.get("contentDetails", {}).get("videoId")
+        ]
+        if not video_ids:
+            return total
+
+        time.sleep(API_SLEEP_SECONDS)
+
+        # contentDetails only — the duration is the sole thing needed here,
+        # and the call is a flat 1 unit regardless of the parts requested.
+        video_params = {"part": "contentDetails", "id": ",".join(video_ids)}
+        try:
+            video_resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
+        except requests.RequestException as e:
+            logger.info(
+                "Older-uploads videos.list request failed for %s: %s — stopping the long-form count at %d.",
+                channel_id, e, total,
+            )
+            return total
+
+        if video_resp.status_code != 200:
+            logger.info(
+                "Older-uploads videos.list failed for %s: %s — stopping the long-form count at %d.",
+                channel_id, video_resp.status_code, total,
+            )
+            return total
+
+        record_spend(QUOTA_COST_VIDEOS_LIST, call_name=f"videos.list({channel_id}, longform)")
+
+        video_payload = _json_or_none(video_resp, f"videos.list({channel_id}, longform)")
+        if video_payload is None:
+            return total
+
+        total += count_longform(
+            v.get("contentDetails", {}).get("duration")
+            for v in video_payload.get("items", [])
+        )
+        if total >= target:
+            return total
+
+        page_token = payload.get("nextPageToken", "")
+        if not page_token:
+            return total
+
+        time.sleep(API_SLEEP_SECONDS)
+
+    return total
 
 
 def calc_upload_frequency(upload_dates: list[str]) -> float:

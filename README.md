@@ -256,10 +256,12 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `API_SLEEP_SECONDS` | 0.5 | Delay between individual API calls |
 | `DAILY_QUALIFIED_CAP` | 30 | Max qualified rows pushed per niche table per day |
 | `DAILY_FLAGGED_CAP` | 10 | Max flagged (below-criteria) rows pushed per niche table per day |
-| `CANDIDATE_OVERSHOOT` | 1.5 | Multiple of remaining daily headroom that discovery banks in fresh candidates, to cover losses to enrichment failures and dedupe |
+| `CANDIDATE_OVERSHOOT` | 1.5 | Multiple of the remaining row shortfall that one discovery round banks in fresh candidates. Sizes a round only — `run_niche()` keeps discovering until the qualified cap is met or the keywords run out, so this does not limit the day's yield |
+| `EXPECTED_CANDIDATES_PER_KEYWORD` | 40 | Unique channels one keyword is expected to yield (measured ~42 at `max_results=50` over a 7-day window). Converts a row shortfall into a keyword count for the next discovery round |
 | `DISCOVERY_DAYS_BACK` | 7 | How many days back `search.list` looks for videos (short and self-renewing by design — see below; `--days-back` overrides per run) |
 | `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
 | `EMAIL_DEEP_SCAN_PAGES` | 2 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
+| `LONGFORM_SCAN_MAX_PAGES` | 3 | Extra pages of older uploads paged through to confirm 30+ non-Shorts videos, and only for channels the newest 50 left short of that bar (2 quota units per page; 0 judges on the newest 50 alone) |
 | `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see "Browser path" below). The search-zone filter does not depend on it. `USE_CLOAKBROWSER` is still accepted as an alias |
 
 ### 5. Edit your keywords / niches

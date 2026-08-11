@@ -52,7 +52,7 @@ def test_report_only_never_calls_push_record(monkeypatch):
     import audit_blocklist
 
     monkeypatch.setattr(audit_blocklist, "fetch_blocklist", lambda: _AlwaysHitBlocklist())
-    monkeypatch.setattr(audit_blocklist.requests, "get", lambda *a, **k: _records_page())
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", lambda *a, **k: _records_page())
     monkeypatch.setattr(audit_blocklist.time, "sleep", lambda s: None)
     monkeypatch.setattr(audit_blocklist, "push_record", lambda *a, **k: pytest.fail("must not write without --mark"))
     monkeypatch.setattr(sys, "argv", ["audit_blocklist.py"])
@@ -64,7 +64,7 @@ def test_no_hits_never_calls_push_record_even_with_mark(monkeypatch):
     import audit_blocklist
 
     monkeypatch.setattr(audit_blocklist, "fetch_blocklist", lambda: _NeverHitBlocklist())
-    monkeypatch.setattr(audit_blocklist.requests, "get", lambda *a, **k: _records_page())
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", lambda *a, **k: _records_page())
     monkeypatch.setattr(audit_blocklist.time, "sleep", lambda s: None)
     monkeypatch.setattr(audit_blocklist, "push_record", lambda *a, **k: pytest.fail("no hits — nothing to mark"))
     monkeypatch.setattr(audit_blocklist, "_status_option_exists", lambda table_name, records: True)
@@ -84,7 +84,7 @@ def test_mark_sends_only_channel_id_and_status(monkeypatch):
         return True
 
     monkeypatch.setattr(audit_blocklist, "fetch_blocklist", lambda: _AlwaysHitBlocklist())
-    monkeypatch.setattr(audit_blocklist.requests, "get", lambda *a, **k: _records_page())
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", lambda *a, **k: _records_page())
     monkeypatch.setattr(audit_blocklist.time, "sleep", lambda s: None)
     monkeypatch.setattr(audit_blocklist, "push_record", fake_push)
     monkeypatch.setattr(audit_blocklist, "_status_option_exists", lambda table_name, records: True)
@@ -103,7 +103,7 @@ def test_mark_aborts_when_status_option_confirmed_missing(monkeypatch):
     import audit_blocklist
 
     monkeypatch.setattr(audit_blocklist, "fetch_blocklist", lambda: _AlwaysHitBlocklist())
-    monkeypatch.setattr(audit_blocklist.requests, "get", lambda *a, **k: _records_page())
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", lambda *a, **k: _records_page())
     monkeypatch.setattr(audit_blocklist.time, "sleep", lambda s: None)
     monkeypatch.setattr(
         audit_blocklist, "push_record",
@@ -123,7 +123,7 @@ def test_mark_aborts_when_status_option_unknown_without_opt_in(monkeypatch):
     import audit_blocklist
 
     monkeypatch.setattr(audit_blocklist, "fetch_blocklist", lambda: _AlwaysHitBlocklist())
-    monkeypatch.setattr(audit_blocklist.requests, "get", lambda *a, **k: _records_page())
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", lambda *a, **k: _records_page())
     monkeypatch.setattr(audit_blocklist.time, "sleep", lambda s: None)
     monkeypatch.setattr(
         audit_blocklist, "push_record",
@@ -142,7 +142,7 @@ def test_mark_proceeds_when_unknown_but_explicitly_opted_in(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(audit_blocklist, "fetch_blocklist", lambda: _AlwaysHitBlocklist())
-    monkeypatch.setattr(audit_blocklist.requests, "get", lambda *a, **k: _records_page())
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", lambda *a, **k: _records_page())
     monkeypatch.setattr(audit_blocklist.time, "sleep", lambda s: None)
     monkeypatch.setattr(
         audit_blocklist, "push_record",
@@ -172,7 +172,7 @@ def test_status_option_exists_reads_schema_first(monkeypatch):
             ]
         })
 
-    monkeypatch.setattr(audit_blocklist.requests, "get", fake_get)
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", fake_get)
 
     assert audit_blocklist._status_option_exists("tblFake", []) is True
 
@@ -180,7 +180,7 @@ def test_status_option_exists_reads_schema_first(monkeypatch):
 def test_status_option_exists_falls_back_to_records_on_403(monkeypatch):
     import audit_blocklist
 
-    monkeypatch.setattr(audit_blocklist.requests, "get", lambda *a, **k: _Resp(403))
+    monkeypatch.setattr(audit_blocklist.HTTP, "get", lambda *a, **k: _Resp(403))
 
     records_with_status = [{"fields": {"Status": audit_blocklist.MARK_STATUS}}]
     assert audit_blocklist._status_option_exists("tblFake", records_with_status) is True

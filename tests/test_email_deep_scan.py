@@ -76,7 +76,10 @@ class _FakeApi:
 def _patch_enrichment(monkeypatch, api, spend=None):
     import enrichment
 
-    monkeypatch.setattr(enrichment.requests, "get", api.get)
+    # The shared session object, not the `requests` module: enrichment calls
+    # HTTP.get() (http_client.YOUTUBE). Patching enrichment.requests would
+    # leave the real network live and trip the block_real_http guard.
+    monkeypatch.setattr(enrichment.HTTP, "get", api.get)
     monkeypatch.setattr(enrichment.time, "sleep", lambda *a, **k: None)
     monkeypatch.setattr(
         enrichment, "record_spend",
@@ -206,7 +209,30 @@ def test_api_error_returns_empty_rather_than_raising(monkeypatch):
     """A failed page must never break a pipeline run."""
     import enrichment
 
-    monkeypatch.setattr(enrichment.requests, "get", lambda *a, **k: _Resp(500))
+    monkeypatch.setattr(enrichment.HTTP, "get", lambda *a, **k: _Resp(500))
+    monkeypatch.setattr(enrichment.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(enrichment, "record_spend", lambda *a, **k: None)
+
+    assert enrichment.scan_older_videos_for_email(
+        "UC1", "PL1", "TOKEN2", known_descriptions=[], max_pages=2,
+    ) == ""
+
+
+def test_network_error_returns_empty_rather_than_raising(monkeypatch):
+    """A dead network must not end the run either.
+
+    The retry adapter has already given up by the time RequestException
+    reaches this function, so there is nothing left to do but skip the
+    optional deep scan — this step is a bonus on top of two free ones.
+    """
+    import requests
+
+    import enrichment
+
+    def boom(*a, **k):
+        raise requests.ConnectionError("no route to host")
+
+    monkeypatch.setattr(enrichment.HTTP, "get", boom)
     monkeypatch.setattr(enrichment.time, "sleep", lambda *a, **k: None)
     monkeypatch.setattr(enrichment, "record_spend", lambda *a, **k: None)
 
@@ -221,7 +247,7 @@ def test_missing_uploads_playlist_returns_empty(monkeypatch):
     def boom(*a, **k):
         raise AssertionError("must not call the API without an uploads playlist")
 
-    monkeypatch.setattr(enrichment.requests, "get", boom)
+    monkeypatch.setattr(enrichment.HTTP, "get", boom)
 
     assert enrichment.scan_older_videos_for_email(
         "UC1", "", "TOKEN2", known_descriptions=[], max_pages=2,

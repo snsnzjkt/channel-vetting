@@ -9,14 +9,32 @@ import logging
 import time
 from urllib.parse import quote
 
+# Kept for `requests.RequestException` only — the actual calls go through the
+# shared session below, never through the module-level `requests.get()` etc.
 import requests
 
 from config import AIRTABLE_TOKEN, AIRTABLE_BASE_ID, API_SLEEP_SECONDS
+from http_client import AIRTABLE as HTTP, post_with_rate_limit_retry, safe_body
 from prospect_day import today_iso
 
 logger = logging.getLogger(__name__)
 
 AIRTABLE_API_BASE_URL = "https://api.airtable.com/v0"
+
+# The `time.sleep(API_SLEEP_SECONDS)` calls between pagination pages are now
+# only PACING — the thing that actually survives a rate-limit event is the
+# retry adapter mounted on the shared session (see http_client.py). Pacing
+# alone was never sufficient here: Airtable's 5 req/s limit is per BASE, not
+# per token, and this base is shared with eight other tables, other
+# automations, and human editors. A colleague pasting 500 rows into an
+# outreach table can 429 this pipeline no matter how politely it paces
+# itself, so retry is required rather than a nice-to-have. Don't "simplify"
+# by dropping either half: pacing avoids provoking the limit, retry recovers
+# when someone else does.
+#
+# POST is the one method the adapter does NOT retry (a retried POST on a 5xx
+# can create a duplicate row); push_record() therefore goes through
+# post_with_rate_limit_retry(), which retries on 429 alone.
 
 
 class AirtableReadError(RuntimeError):
@@ -45,6 +63,42 @@ def _headers() -> dict:
     }
 
 
+def _quote_formula_value(value: str) -> str:
+    """
+    Escape a value for use inside a single-quoted Airtable formula string.
+
+    Returns the escaped INNER text only — callers still write their own
+    surrounding quotes, e.g. `f"{{Channel ID}} = '{_quote_formula_value(cid)}'"`.
+    Returning it bare keeps the formula readable at the call site and makes
+    it obvious which side of the quoting each piece belongs to.
+
+    Backslashes are escaped FIRST, then single quotes; doing it the other way
+    round would re-escape the backslashes this function just introduced and
+    turn `O'Brien` into `O\\\\'Brien`.
+
+    Why this is a correctness fix and not tidying
+    ---------------------------------------------
+    These formulas used to interpolate raw values. A value containing an
+    apostrophe closes the string early and Airtable rejects the whole
+    request with a 422 — and every read here is written to fail soft, so
+    `channel_exists()` logs the 422 and returns None. None means "no
+    existing record", so `push_record()` takes the POST branch and creates a
+    SECOND row for a channel that already has one, breaking its documented
+    "Never creates duplicates" guarantee. Worse, that duplicate row carries
+    fresh Status/Notes defaults, which is exactly the reviewer-state loss
+    PROTECTED_UPDATE_FIELDS exists to prevent — the strip only applies on
+    the PATCH path this bug routes around.
+
+    A YouTube channel ID can't itself contain a quote, so the pipeline's own
+    path is safe. But `backfill_missing_emails.py` feeds `channel_exists()`
+    IDs read back out of a HUMAN-MAINTAINED Airtable table, and
+    `count_added_today()` interpolates a "Qualification" value whose options
+    live in that same hand-edited schema. Both are one typo away from a
+    value this has to survive.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def get_existing_channel_ids(table_name: str) -> set[str]:
     """
     Paginate through `table_name` and collect every existing "Channel ID"
@@ -70,13 +124,13 @@ def get_existing_channel_ids(table_name: str) -> set[str]:
             params["offset"] = offset
 
         try:
-            resp = requests.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+            resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
         except requests.RequestException as e:
             raise AirtableReadError(f"get_existing_channel_ids({table_name}) request failed: {e}") from e
 
         if resp.status_code != 200:
             raise AirtableReadError(
-                f"get_existing_channel_ids({table_name}) failed: {resp.status_code} {resp.text}"
+                f"get_existing_channel_ids({table_name}) failed: {resp.status_code} {safe_body(resp)}"
             )
 
         data = resp.json()
@@ -111,13 +165,13 @@ def get_records_missing_email(table_name: str) -> list[str]:
             params["offset"] = offset
 
         try:
-            resp = requests.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+            resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
         except requests.RequestException as e:
             logger.error("Airtable request failed while paginating records missing email (%s): %s", table_name, e)
             break
 
         if resp.status_code != 200:
-            logger.error("Airtable get_records_missing_email failed (%s): %s %s", table_name, resp.status_code, resp.text)
+            logger.error("Airtable get_records_missing_email failed (%s): %s %s", table_name, resp.status_code, safe_body(resp))
             break
 
         data = resp.json()
@@ -139,18 +193,22 @@ def channel_exists(table_name: str, channel_id: str) -> str | None:
     """
     Look up a single channel by Channel ID via filterByFormula.
     Returns the Airtable record ID if found, else None.
+
+    The channel_id is escaped rather than interpolated raw: a malformed
+    formula is a 422, a 422 returns None, and None sends push_record() down
+    the POST path that creates a duplicate row. See _quote_formula_value().
     """
-    formula = f"{{Channel ID}} = '{channel_id}'"
+    formula = f"{{Channel ID}} = '{_quote_formula_value(channel_id)}'"
     params = {"filterByFormula": formula, "maxRecords": 1}
 
     try:
-        resp = requests.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+        resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
     except requests.RequestException as e:
         logger.error("Airtable request failed during channel_exists(%s, %s): %s", table_name, channel_id, e)
         return None
 
     if resp.status_code != 200:
-        logger.error("Airtable channel_exists failed for %s in %s: %s %s", channel_id, table_name, resp.status_code, resp.text)
+        logger.error("Airtable channel_exists failed for %s in %s: %s %s", channel_id, table_name, resp.status_code, safe_body(resp))
         return None
 
     records = resp.json().get("records", [])
@@ -163,13 +221,13 @@ def delete_record(table_name: str, record_id: str) -> bool:
     end — callers must be certain before calling this.
     """
     try:
-        resp = requests.delete(f"{_base_url(table_name)}/{record_id}", headers=_headers(), timeout=30)
+        resp = HTTP.delete(f"{_base_url(table_name)}/{record_id}", headers=_headers(), timeout=30)
     except requests.RequestException as e:
         logger.error("Airtable request failed while deleting %s from %s: %s", record_id, table_name, e)
         return False
 
     if resp.status_code != 200:
-        logger.error("Airtable delete_record failed for %s in %s: %s %s", record_id, table_name, resp.status_code, resp.text)
+        logger.error("Airtable delete_record failed for %s in %s: %s %s", record_id, table_name, resp.status_code, safe_body(resp))
         return False
 
     return True
@@ -223,14 +281,21 @@ def push_record(table_name: str, record: dict, overwrite_status_and_notes: bool 
 
     try:
         if existing_record_id:
-            resp = requests.patch(
+            # PATCH is addressed at a known record ID, so the session-level
+            # retry adapter can safely repeat it — a retry converges on the
+            # same end state.
+            resp = HTTP.patch(
                 f"{_base_url(table_name)}/{existing_record_id}",
                 headers=_headers(),
                 json=payload,
                 timeout=30,
             )
         else:
-            resp = requests.post(
+            # POST is excluded from the adapter's retry set because a retry
+            # after a lost 5xx response would create a duplicate row. This
+            # helper retries on 429 only — the one status that means Airtable
+            # rejected the request WITHOUT processing it. See http_client.py.
+            resp = post_with_rate_limit_retry(
                 _base_url(table_name),
                 headers=_headers(),
                 json=payload,
@@ -241,7 +306,7 @@ def push_record(table_name: str, record: dict, overwrite_status_and_notes: bool 
         return False
 
     if resp.status_code not in (200, 201):
-        logger.error("Airtable push_record failed for %s in %s: %s %s", channel_id, table_name, resp.status_code, resp.text)
+        logger.error("Airtable push_record failed for %s in %s: %s %s", channel_id, table_name, resp.status_code, safe_body(resp))
         return False
 
     return True
@@ -258,9 +323,15 @@ def count_added_today(table_name: str, qualification: str | None = None) -> int:
     Raises AirtableReadError if the read cannot be completed — callers
     must skip the niche rather than assume a full budget.
     """
+    # today_iso() is a machine-generated ISO date and can't contain a quote,
+    # but `qualification` is a Single Select option name from a hand-edited
+    # Airtable schema — escaped so an apostrophe can't malform the formula
+    # (see _quote_formula_value). A 422 here raises AirtableReadError, so the
+    # failure is loud rather than a silent duplicate, but the niche is still
+    # skipped for the day, which is a whole run's worth of prospects lost.
     conditions = [f"DATESTR({{Date Added}}) = '{today_iso()}'"]
     if qualification:
-        conditions.append(f"{{Qualification}} = '{qualification}'")
+        conditions.append(f"{{Qualification}} = '{_quote_formula_value(qualification)}'")
     formula = f"AND({', '.join(conditions)})" if len(conditions) > 1 else conditions[0]
 
     count = 0
@@ -271,13 +342,13 @@ def count_added_today(table_name: str, qualification: str | None = None) -> int:
             params["offset"] = offset
 
         try:
-            resp = requests.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+            resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
         except requests.RequestException as e:
             raise AirtableReadError(f"count_added_today({table_name}) request failed: {e}") from e
 
         if resp.status_code != 200:
             raise AirtableReadError(
-                f"count_added_today({table_name}) failed: {resp.status_code} {resp.text}"
+                f"count_added_today({table_name}) failed: {resp.status_code} {safe_body(resp)}"
             )
 
         data = resp.json()

@@ -18,9 +18,12 @@ import time
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# `requests` stays imported for its exception types (RequestException in
+# _status_option_exists); requests themselves go through the shared session.
 import requests
 
 from airtable_client import AIRTABLE_API_BASE_URL, _base_url, _headers, push_record
+from http_client import AIRTABLE as HTTP, safe_body
 from config import AIRTABLE_BASE_ID, AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA, API_SLEEP_SECONDS
 from do_not_contact import BlocklistUnavailable, fetch_blocklist
 from enrichment import normalize_handle
@@ -51,7 +54,10 @@ def _all_records(table_name: str) -> list[dict]:
         params = {"pageSize": 100}
         if offset:
             params["offset"] = offset
-        resp = requests.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+        # Via the shared session, so a 429 from a colleague hammering the
+        # base mid-audit is retried rather than aborting the whole audit
+        # through raise_for_status().
+        resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json()
         records.extend(data.get("records", []))
@@ -85,7 +91,7 @@ def _status_option_exists(table_name: str, records: list[dict]) -> bool | None:
                 must require an explicit opt-in before writing.
     """
     try:
-        resp = requests.get(
+        resp = HTTP.get(
             f"{AIRTABLE_API_BASE_URL}/meta/bases/{AIRTABLE_BASE_ID}/tables",
             headers=_headers(),
             timeout=30,
@@ -104,9 +110,12 @@ def _status_option_exists(table_name: str, records: list[dict]) -> bool | None:
                 return None  # table found, but no "Status" field — can't confirm
         return None  # table not present in the schema response
     elif resp is not None:
+        # safe_body() withholds 401/403 bodies outright, which is exactly
+        # the status this path expects (this repo's token lacks schema
+        # scope), and truncates anything else.
         logger.warning(
             "Schema read failed (%s %s) — falling back to scanning existing Status values.",
-            resp.status_code, resp.text,
+            resp.status_code, safe_body(resp),
         )
 
     existing_statuses = {r.get("fields", {}).get(STATUS_FIELD_NAME) for r in records}

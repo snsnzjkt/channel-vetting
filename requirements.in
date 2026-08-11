@@ -1,0 +1,29 @@
+# Direct dependencies only. requirements.txt is the LOCKED, hash-pinned
+# resolution of this file (transitive deps included) and is what actually
+# gets installed — in CI via `pip install --require-hashes -r requirements.txt`.
+#
+# To regenerate the lock after editing this file:
+#
+#   uv pip compile --generate-hashes --universal --python-version 3.12 \
+#       requirements.in -o requirements.txt
+#
+# --universal matters: a plain platform-specific resolve omits the
+# `sys_platform == 'win32'` marker branch (colorama), which breaks local
+# Windows installs while looking fine in CI.
+#
+# The resolution assumes Python >= 3.12, matching `python-version` in
+# .github/workflows/channel-vetting.yml. On 3.10/3.11 pytest additionally
+# needs tomli and exceptiongroup, which are deliberately absent.
+
+requests==2.34.2
+python-dotenv==1.2.2
+playwright==1.62.0
+playwright-stealth==2.0.3
+pytest==8.3.3
+
+# Required, not optional: quota_tracker.py resolves
+# ZoneInfo("America/Los_Angeles") and prospect_day.py resolves
+# PROSPECT_DAY_TZ. Windows ships no system tz database, so zoneinfo raises
+# ZoneInfoNotFoundError without this package. CI hides the problem because
+# ubuntu-latest has a system tzdb — the failure is local-Windows-only.
+tzdata==2026.3

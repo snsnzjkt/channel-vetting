@@ -199,14 +199,19 @@ def _stub_performance(**overrides):
         "avg_views": 50_000,
         "avg_engagement_rate": 1.0,
         "upload_dates": [],
-        "content_language": "",
+        # "en" and a full long-form catalogue: both are hard gates now, so a
+        # stub without them is discarded before any record is built.
+        "content_language": "en",
         "repeated_email": "",
+        "longform_count": 50,
+        "duration_sample_size": 50,
+        "next_page_token": "",
     }
     performance.update(overrides)
     return performance
 
 
-def _build_record(monkeypatch, *, channel_title="Chan", email="", content_language=""):
+def _build_record(monkeypatch, *, channel_title="Chan", email="", content_language="en"):
     """process_candidate() with every network call stubbed out."""
     import main
 
@@ -300,16 +305,61 @@ def test_an_ordinary_channel_name_and_email_are_written_unchanged(monkeypatch):
     assert record["Email"] == "admin@avnirvana.com"
 
 
-def test_the_source_and_content_language_fields_are_neutralised(monkeypatch):
+def test_a_hostile_content_language_is_dropped_outright(monkeypatch):
     """
-    Lower risk (Source is built from our own NICHES keywords), but both are
-    free-text fields, so neither is left uncovered.
+    Content Language is no longer attacker-influenced: the English gate
+    (main.is_english) requires the tag to START with "en", and no value
+    beginning with =, +, -, @ or whitespace can do that. So a formula payload
+    in this field can't reach Airtable at all — a stronger guarantee than the
+    csv_safe neutralisation this test used to assert.
+
+    csv_safe() stays applied to the field anyway; see the next test.
+
+    Calls process_candidate directly rather than via _build_record, which
+    asserts a record WAS built.
     """
     import main
 
-    record = _build_record(monkeypatch, content_language="=cmd()")
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(
+        main, "get_recent_video_performance",
+        lambda cid, pl: _stub_performance(content_language="=cmd()"),
+    )
+    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
-    assert record["Content Language"] == "'=cmd()"
+    record, reason = main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
+        {}, _NullBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+    )
+
+    assert record is None
+    assert reason == "not_english"
+
+
+def test_content_language_still_goes_through_csv_safe(monkeypatch):
+    """
+    Belt and braces. The English gate is what actually stops a payload here,
+    but the wrapping must stay wired: if that gate is ever relaxed (a second
+    allowed language, say), this field goes straight back to carrying
+    creator-set text into a reviewer's spreadsheet.
+    """
+    import main
+
+    record = _build_record(monkeypatch, content_language="en-GB")
+
+    assert record["Content Language"] == "en-GB"
+    assert record["Content Language"] == main.csv_safe(record["Content Language"])
+
+
+def test_the_source_field_is_neutralised(monkeypatch):
+    """Lower risk — Source is built from our own NICHES keywords — but it is
+    still a free-text field, so it isn't left uncovered."""
+    import main
+
+    record = _build_record(monkeypatch)
+
     # Source starts with SOURCE_LABEL, which is ours and safe — assert it is
     # passed through csv_safe by checking the call is wired, not by faking a
     # hostile keyword list.

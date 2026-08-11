@@ -63,8 +63,15 @@ def _stub_performance(**overrides):
         "avg_views": 5_000,
         "avg_engagement_rate": 1.0,
         "upload_dates": [],
-        "content_language": "",
+        # "en", not "": an unset language is a hard DROP (main.is_english),
+        # so a stub without one never reaches the behaviour under test.
+        "content_language": "en",
         "repeated_email": "",
+        # Enough confirmed non-Shorts uploads to clear MIN_LONGFORM_VIDEO_COUNT
+        # from the newest-50 window alone, so no test pages for more.
+        "longform_count": 50,
+        "duration_sample_size": 50,
+        "next_page_token": "",
     }
     performance.update(overrides)
     return performance

@@ -38,6 +38,10 @@ def drop_reason(**overrides):
         "shorts_only": False,
         "min_avg_views": HOME_THEATER_MIN_VIEWS,
         "video_count": PASSING_VIDEOS,
+        # Explicit because the gate treats an unset language as a FAILURE —
+        # see main.is_english(). Passing it here keeps each test below
+        # exercising the one gate it names.
+        "content_language": "en",
     }
     kwargs.update(overrides)
     return pre_push_drop_reason(**kwargs)
@@ -212,6 +216,91 @@ def test_an_unreadable_duration_among_shorts_does_not_force_a_drop():
     from enrichment import is_shorts_only
 
     assert is_shorts_only(["PT30S", "PT45S", ""]) is False
+
+
+# --- the English content-language gate ------------------------------------
+
+
+def test_drops_a_channel_whose_content_is_not_english():
+    assert drop_reason(content_language="de") == "not_english"
+    assert drop_reason(content_language="pl") == "not_english"
+    assert drop_reason(content_language="vi") == "not_english"
+
+
+def test_regional_english_variants_all_pass():
+    """
+    en-GB/en-US/en-AU must pass, and must NOT be normalised to a bare "en":
+    resolve_country() reads the region subtag to place channels that declare
+    no country, and that is the only zone signal for ~15% of candidates.
+    """
+    for tag in ("en", "en-US", "en-GB", "en-AU", "en-CA", "EN-gb"):
+        assert drop_reason(content_language=tag) is None, tag
+
+
+def test_an_unset_language_is_dropped_not_kept():
+    """
+    The deliberate exception to "absent data never disqualifies": the table
+    is specified to hold English channels, and a blank can't satisfy that.
+    Measured cost when this was chosen: 0 of 47 otherwise-qualifying
+    candidates had an unset language.
+    """
+    assert drop_reason(content_language="") == "not_english"
+    assert drop_reason(content_language=None) == "not_english"
+    assert drop_reason(content_language="   ") == "not_english"
+
+
+def test_zxx_no_linguistic_content_is_not_english():
+    """`zxx` is the ISO code for "no linguistic content" — a real value seen
+    on a live candidate, and not a channel to approach in English."""
+    assert drop_reason(content_language="zxx") == "not_english"
+
+
+def test_a_language_merely_containing_en_is_not_english():
+    """Prefix match, not substring: "ben" (Bengali) must not pass as English."""
+    assert drop_reason(content_language="ben") == "not_english"
+    assert drop_reason(content_language="hen") == "not_english"
+
+
+# --- the long-form (non-Shorts) video floor -------------------------------
+
+
+def test_counts_only_confirmed_long_form_videos():
+    from enrichment import count_longform
+
+    assert count_longform(["PT30S", "PT61S", "PT12M"]) == 2
+    assert count_longform(["PT30S", "PT59S"]) == 0
+    assert count_longform([]) == 0
+
+
+def test_an_unreadable_duration_never_counts_as_long_form():
+    """
+    Opposite lean from is_shorts_only, and for the same reason: this number
+    feeds a MINIMUM, so counting an unknown would let a channel clear the bar
+    on missing data.
+    """
+    from enrichment import count_longform
+
+    assert count_longform(["", None, "P0D", "garbage"]) == 0
+    assert count_longform(["PT12M", ""]) == 1
+
+
+def test_drops_a_shorts_factory_that_posts_the_occasional_long_video():
+    """
+    The gap this gate closes. is_shorts_only() only catches 100%-Shorts
+    channels, and statistics.videoCount counts Shorts as videos — so a
+    channel with 300 Shorts and 4 long-form uploads cleared both checks.
+    """
+    from main import longform_drop_reason
+
+    assert longform_drop_reason(4) == "too_few_longform_videos"
+    assert longform_drop_reason(29) == "too_few_longform_videos"
+
+
+def test_exactly_thirty_long_form_videos_is_kept():
+    from main import longform_drop_reason
+
+    assert longform_drop_reason(30) is None
+    assert longform_drop_reason(400) is None
 
 
 # --- precedence between the gates ----------------------------------------

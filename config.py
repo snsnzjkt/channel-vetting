@@ -64,7 +64,29 @@ DAILY_FLAGGED_CAP = int(os.getenv("DAILY_FLAGGED_CAP", 10))
 
 # Discovery banks this multiple of the remaining headroom in fresh
 # candidates, covering the ones lost to enrichment failure and dedupe.
+#
+# This is now a BATCH-SIZING hint only, not the thing that decides whether
+# the day's cap can be reached. It used to be both, and that was a bug: the
+# 2026-08 criteria change made the view floor, the video-count floor and the
+# search zone HARD discards (see pre_push_drop_reason), which dropped the
+# share of fresh candidates that can become a row to ~15% — measured 18
+# survivors from 122 fresh candidates on 2026-08-11. At 1.5x, a 40-row
+# budget was fed 60 candidates and could only ever yield ~9 rows, and
+# discovery then stopped for good with most keywords never searched. The
+# caps were unreachable by construction.
+#
+# run_niche() now REFILLS: it discovers a batch, pushes what survives, and
+# goes back for more keywords while budget and keywords both remain. So this
+# value only sets how much is searched per round trip — too low costs an
+# extra round trip, too high costs quota on candidates the day didn't need.
 CANDIDATE_OVERSHOOT = float(os.getenv("CANDIDATE_OVERSHOOT", 1.5))
+
+# Unique channels one keyword yields at max_results=50 over a 7-day window.
+# Measured at ~42 (127 unique channels across 3 Home Theater keywords,
+# 2026-08-11). Used only to convert a row shortfall into a keyword count for
+# the next discovery batch; the refill loop is what actually guarantees the
+# budget fills, so drift here costs a round trip, never a short day.
+EXPECTED_CANDIDATES_PER_KEYWORD = int(os.getenv("EXPECTED_CANDIDATES_PER_KEYWORD", 40))
 
 # How far back search.list looks for videos, in days.
 #
@@ -98,6 +120,20 @@ PROSPECT_DAY_TZ = os.getenv("PROSPECT_DAY_TZ", "America/Toronto")
 # because channels whose email is already known never trigger it.
 # Set to 0 to disable the step entirely.
 EMAIL_DEEP_SCAN_PAGES = int(os.getenv("EMAIL_DEEP_SCAN_PAGES", 2))
+
+# --- Long-form confirmation (the "30+ videos that aren't Shorts" gate) ---
+# Extra pages of OLDER uploads to page through when confirming a channel has
+# main.MIN_LONGFORM_VIDEO_COUNT non-Shorts videos, and only for channels the
+# newest-50 window left short of that bar. 2 quota units per page.
+#
+# 3 pages means up to ~200 videos examined, so a channel needs roughly a 15%
+# long-form rate to reach 30 — which is the point of the cap. It admits a
+# genuine mixed-format channel (measured 20-26 long-form per 50 on real
+# candidates) and rejects a Shorts factory (2-7 per 50) without paging
+# through its whole catalogue. Raising it buys back only channels that post
+# long-form very rarely, which is the opposite of what a 30-video floor asks.
+# Set to 0 to judge on the newest-50 window alone.
+LONGFORM_SCAN_MAX_PAGES = int(os.getenv("LONGFORM_SCAN_MAX_PAGES", 3))
 
 # --- Browser-based email fallback ---
 # Playwright + stealth follows the channel's public external link list to

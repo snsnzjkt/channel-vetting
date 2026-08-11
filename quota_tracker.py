@@ -9,6 +9,7 @@ this script is in.
 import json
 import logging
 import os
+import time
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 
@@ -76,6 +77,46 @@ def _prune(log: dict) -> dict:
     return kept
 
 
+# How many times to retry the atomic rename, and how long to wait between
+# attempts. Windows-specific: os.replace() raises PermissionError (WinError 5)
+# when ANOTHER process holds a handle to either path — antivirus and search
+# indexers routinely open a file microseconds after it is written, which is
+# exactly what a tmp-file-then-rename pattern produces.
+#
+# This is not theoretical. It killed three runs on the dev machine on
+# 2026-08-11, one of them 4 keywords into a real discovery pass: record_spend()
+# is called after nearly every API response, so the exception unwound through
+# enrichment -> process_candidate -> push_until_full -> run_niche (none of
+# which catch it) and ended the run with the quota already spent. POSIX
+# rename() has no equivalent failure, which is why this went unnoticed in CI.
+REPLACE_MAX_ATTEMPTS = 5
+REPLACE_RETRY_SECONDS = 0.2
+
+
+def _replace_with_retry(tmp_path: str, target_path: str) -> None:
+    """
+    os.replace(), retried past a transient Windows file lock.
+
+    Deliberately re-raises after the last attempt rather than swallowing the
+    error. A silently skipped write is the fail-open direction _save_log()'s
+    whole docstring is about: the ledger would stop advancing while quota kept
+    being spent, and can_afford_search() would authorise the rest of the day
+    against a stale total. A raised error loses the run but not the accounting.
+    """
+    for attempt in range(1, REPLACE_MAX_ATTEMPTS + 1):
+        try:
+            os.replace(tmp_path, target_path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_MAX_ATTEMPTS:
+                raise
+            logger.warning(
+                "Could not replace %s (attempt %d/%d) — another process is holding it. Retrying.",
+                target_path, attempt, REPLACE_MAX_ATTEMPTS,
+            )
+            time.sleep(REPLACE_RETRY_SECONDS)
+
+
 def _save_log(log: dict) -> None:
     """
     Persist the spend log atomically: write to a `.tmp` sibling, fsync, then
@@ -105,7 +146,7 @@ def _save_log(log: dict) -> None:
             json.dump(log, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, QUOTA_LOG_FILE)
+        _replace_with_retry(tmp_path, QUOTA_LOG_FILE)
     except BaseException:
         # Clean up the half-written scratch file and let the error surface.
         # BaseException, not Exception, so a KeyboardInterrupt — the very

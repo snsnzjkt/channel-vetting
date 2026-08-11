@@ -24,7 +24,7 @@ from config import (
     API_SLEEP_SECONDS,
 )
 from http_client import YOUTUBE as HTTP, safe_body
-from quota_tracker import can_afford_search, record_spend, today_pacific
+from quota_tracker import can_afford_search, record_spend, today_pacific, _replace_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,13 @@ def _save_cache(cache: dict) -> None:
             json.dump(cache, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, SEARCH_CACHE_FILE)
+        # Shared with quota_tracker: os.replace() raises PermissionError on
+        # Windows when antivirus or a search indexer briefly holds either
+        # path, which a tmp-then-rename pattern reliably provokes. Losing this
+        # write costs 100 units per keyword on the next run; losing it by
+        # UNHANDLED exception costs the whole run, which is what happened
+        # three times on 2026-08-11.
+        _replace_with_retry(tmp_path, SEARCH_CACHE_FILE)
     except BaseException:
         # Same cleanup as quota_tracker._save_log(): don't leave a stale
         # scratch file behind on the interrupt this pattern exists to survive.
@@ -73,10 +79,19 @@ def _save_cache(cache: dict) -> None:
         raise
 
 
-def _cache_key(keyword: str) -> str:
+def _cache_key(keyword: str, max_results: int = 50, days_back: int = 90) -> str:
     """
     Cache key for one keyword on one day — where "day" is the PACIFIC day,
     the same boundary `quota_tracker` keys spend on.
+
+    `days_back` and `max_results` are part of the key because they change
+    what the API returns. They used to be left out, which made the documented
+    escape hatch for a thin discovery day a SILENT NO-OP: the 09:00 cron
+    searches a keyword with days_back=7 and caches it, then
+    `--days-back 90` later the same day reads that 7-day result straight back
+    out and reports it as a 90-day sweep. Same trap for `--test`, whose
+    max_results=5 result would satisfy a later full run's request for 50.
+    A cache may only return what the caller actually asked for.
 
     These two clocks must roll TOGETHER. When this used UTC, the cache day
     and the quota day were 7-8 hours apart: a run between 00:00 and 08:00
@@ -96,7 +111,7 @@ def _cache_key(keyword: str) -> str:
     separate.
     """
     today = today_pacific()
-    return f"{today}::{keyword.lower().strip()}"
+    return f"{today}::{days_back}d::n{max_results}::{keyword.lower().strip()}"
 
 
 def discover_channels_by_keyword(keyword: str, max_results: int = 50, days_back: int = 90) -> list[dict]:
@@ -115,7 +130,7 @@ def discover_channels_by_keyword(keyword: str, max_results: int = 50, days_back:
     same day costs zero additional quota.
     """
     cache = _load_cache()
-    key = _cache_key(keyword)
+    key = _cache_key(keyword, max_results=max_results, days_back=days_back)
     if key in cache:
         logger.info("Cache hit for keyword '%s' (today) — skipping search.list call.", keyword)
         return cache[key]

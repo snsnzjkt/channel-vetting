@@ -289,7 +289,7 @@ def test_process_candidate_pages_when_the_newest_window_is_short(monkeypatch):
         "longform_count": 22, "duration_sample_size": 50, "next_page_token": "t",
     })
     monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
-    monkeypatch.setattr(main, "resolve_email", lambda s, p, sc: "")
+    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "")
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     class _NullBlocklist:

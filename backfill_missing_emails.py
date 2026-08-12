@@ -32,6 +32,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from airtable_client import get_records_missing_email, push_record
 from browser_email import BrowserEmailScraper, null_scraper
+from influencers import InfluencersClient
 from enrichment import (
     get_channel_stats,
     get_recent_video_performance,
@@ -54,13 +55,17 @@ def backfill_table(
     table_name: str,
     limit: int | None,
     scraper,
+    enricher=None,
 ) -> dict:
     """
     Re-run the email fallback chain over one niche's email-less records.
 
     `scraper` is a browser_email.BrowserEmailScraper (or null_scraper())
-    shared across every channel and every niche in this run — see
-    resolve_email() in main.py for how it fits into the fallback chain.
+    and `enricher` an influencers.InfluencersClient (or null_client()),
+    both shared across every channel and every niche in this run — see
+    resolve_email() in main.py for how they fit into the fallback chain.
+    The single `enricher` is what keeps the run's lookup budget and its
+    credit-cap breaker shared rather than resetting per table.
 
     Returns a stats dict: how many records were considered, how many were
     unreachable (private/deleted/no videos), and how many emails were
@@ -95,11 +100,14 @@ def backfill_table(
             unreachable += 1
             continue
 
-        # The chain reports which of its four steps produced the address —
+        # The chain reports which of its five steps produced the address —
         # inferring it here by comparing the result back against
-        # stats/performance cannot tell the older-uploads scan apart from
-        # the browser pass, since neither is echoed in either dict.
-        email, source = resolve_email_with_source(stats, performance, scraper)
+        # stats/performance cannot tell the older-uploads scan, the
+        # influencers.club lookup and the browser pass apart, since none of
+        # the three is echoed in either dict.
+        email, source = resolve_email_with_source(
+            stats, performance, scraper, enricher
+        )
         title = (stats.get("channel_title") or "")[:40]
         if email:
             by_source[source] += 1
@@ -146,9 +154,20 @@ def main() -> None:
     totals = {"checked": 0, "unreachable": 0, "found": 0, "freemail": 0}
     by_source: Counter = Counter()
     scraper = BrowserEmailScraper.launch() if args.use_playwright_stealth else null_scraper()
+    # Email chain step 4. This script exists to re-run the chain over rows
+    # that have no address, which is exactly the population step 4 was added
+    # for — omitting it here would leave the tool unable to find (or report)
+    # anything the new step contributes.
+    enricher = InfluencersClient.from_config()
+    # Said out loud for the same reason the Playwright line above is: this
+    # is the only step that costs money, and "the key is set" and "the step
+    # is live" are different facts.
+    print(f"influencers.club step 4:     {'ENABLED' if enricher.enabled else 'DISABLED'}\n")
     try:
         for niche_name, table_name in TABLES.items():
-            result = backfill_table(niche_name, table_name, args.limit, scraper)
+            result = backfill_table(
+                niche_name, table_name, args.limit, scraper, enricher
+            )
             for key in totals:
                 totals[key] += result[key]
             by_source.update(result["by_source"])
@@ -165,6 +184,14 @@ def main() -> None:
           + (f"  ({totals['found'] / reachable * 100:.1f}% of reachable)" if reachable else ""))
     print(f"  of those, freemail: {totals['freemail']}  (would have been discarded before the blocklist split)")
     print(f"Still missing:       {checked - totals['found']}")
+    # Reported here even more than in main.py: get_records_missing_email()
+    # selects rows that by definition have no address, so nearly every
+    # record reaches step 4 — this is the higher-burn caller of the two.
+    if enricher.lookups_spent:
+        print(
+            f"influencers.club:    {enricher.lookups_spent} billable lookup(s), "
+            f"{enricher.credits_reported:g} credits reported by the vendor"
+        )
     if by_source:
         print("\nFound by step:")
         for source, count in by_source.most_common():

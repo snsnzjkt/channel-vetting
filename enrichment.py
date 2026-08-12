@@ -145,6 +145,19 @@ def is_blocklisted_email_domain(domain: str) -> bool:
     return domain.lower() in EMAIL_DOMAIN_BLOCKLIST
 
 
+def is_blocklisted_email(email: str) -> bool:
+    """
+    `is_blocklisted_email_domain` for a whole address.
+
+    The "split the domain off, lowercase it, look it up" idiom had been
+    written out at every call site that screens an address, which put the
+    domain-extraction rule in several places while the list it guards lives
+    in one. A future refinement (a trailing dot, a subdomain match) belongs
+    here, next to the list, rather than in each caller.
+    """
+    return is_blocklisted_email_domain(email.rsplit("@", 1)[-1])
+
+
 def parse_iso8601_duration(value: str | None) -> int | None:
     """
     Seconds for an ISO 8601 duration like videos.list returns ("PT12M35S"),
@@ -238,8 +251,7 @@ def extract_business_email(description: str) -> str:
     if not description:
         return ""
     for candidate in EMAIL_PATTERN.findall(description):
-        domain = candidate.rsplit("@", 1)[-1].lower()
-        if not is_blocklisted_email_domain(domain):
+        if not is_blocklisted_email(candidate):
             return candidate
     return ""
 
@@ -260,7 +272,7 @@ def find_repeated_email(video_descriptions: list[str]) -> str:
         # happens to print the same address twice doesn't inflate its count
         emails_in_video = {
             e for e in set(EMAIL_PATTERN.findall(description))
-            if not is_blocklisted_email_domain(e.rsplit("@", 1)[-1].lower())
+            if not is_blocklisted_email(e)
         }
         video_counter.update(emails_in_video)
 
@@ -345,27 +357,45 @@ def _json_or_none(resp, call_name: str):
         return None
 
 
-def get_channel_stats(channel_id: str) -> dict | None:
+def get_channel_stats(channel_id: str | None = None, *, handle: str | None = None) -> dict | None:
     """
     Fetch subscriberCount, videoCount, viewCount, country, title, and
     the uploads playlist ID for a channel.
 
-    Quota cost: 1 unit (channels.list with part=snippet,statistics,contentDetails).
+    Identify the channel by EITHER its UC… `channel_id` (channels.list?id=)
+    OR its `@handle` (channels.list?forHandle=) — exactly one is required.
+    The handle path exists for influencer_discovery.py, which surfaces
+    creators by @handle rather than by channel ID; resolving the id here
+    piggybacks on the channels.list call enrichment makes anyway, so a
+    discovery candidate costs no extra YouTube quota to bridge to an id.
+
+    Quota cost: 1 unit (channels.list with part=snippet,statistics,contentDetails)
+    — a flat 1 unit whether the lookup is by id or by forHandle.
 
     Returns None (and logs a warning) if the channel is private, deleted,
     or otherwise inaccessible — including unreachable, see the exception
-    handler below — so callers can skip it without crashing.
+    handler below — so callers can skip it without crashing. The returned
+    "channel_id" is always read from the RESPONSE (item["id"]), which is what
+    makes the forHandle path resolve to a real UC… id rather than echoing the
+    handle back.
     """
+    if bool(channel_id) == bool(handle):
+        raise ValueError("get_channel_stats requires exactly one of channel_id or handle")
+
     # No "key" in params, here or at any other call site in this module: the
     # API key is set ONCE as the X-goog-api-key header on the shared session
     # in http_client.py. It must not be reintroduced — `requests` embeds the
     # full request URL in its exception messages, so a `key=` query parameter
     # gets printed verbatim into stdout by any unhandled network error, which
     # in CI is an Actions log retained for 90 days.
-    params = {
-        "part": "snippet,statistics,contentDetails",
-        "id": channel_id,
-    }
+    params = {"part": "snippet,statistics,contentDetails"}
+    if channel_id:
+        params["id"] = channel_id
+    else:
+        # YouTube accepts the handle with or without the leading '@'; send it
+        # with, since normalize_handle() strips it everywhere else.
+        params["forHandle"] = f"@{handle}"
+    ident = channel_id or f"@{handle}"
     try:
         resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/channels", params=params, timeout=30)
     except requests.RequestException as e:
@@ -377,11 +407,11 @@ def get_channel_stats(channel_id: str) -> dict | None:
         # would unwind through process_candidate() -> push_until_full() ->
         # run_niche(), none of which catch it, and kill the entire run over
         # one bad channel.
-        logger.warning("channels.list request failed for %s: %s", channel_id, e)
+        logger.warning("channels.list request failed for %s: %s", ident, e)
         return None
 
     if resp.status_code != 200:
-        logger.warning("channels.list failed for %s: %s %s", channel_id, resp.status_code, safe_body(resp))
+        logger.warning("channels.list failed for %s: %s %s", ident, resp.status_code, safe_body(resp))
         return None
 
     # Charged only AFTER the status check, not right after the request: an
@@ -389,15 +419,15 @@ def get_channel_stats(channel_id: str) -> dict | None:
     # most of all), so recording spend unconditionally inflated our own
     # quota_log and needlessly shrank the QUOTA_CEILING headroom the rest of
     # the run gets to use. Only a call that actually returned data is billed.
-    record_spend(QUOTA_COST_CHANNELS_LIST, call_name=f"channels.list({channel_id})")
+    record_spend(QUOTA_COST_CHANNELS_LIST, call_name=f"channels.list({ident})")
 
-    payload = _json_or_none(resp, f"channels.list({channel_id})")
+    payload = _json_or_none(resp, f"channels.list({ident})")
     if payload is None:
         return None
 
     items = payload.get("items", [])
     if not items:
-        logger.warning("Channel %s not found (private, deleted, or terminated) — skipping.", channel_id)
+        logger.warning("Channel %s not found (private, deleted, or terminated) — skipping.", ident)
         return None
 
     item = items[0]
@@ -406,11 +436,16 @@ def get_channel_stats(channel_id: str) -> dict | None:
     content_details = item.get("contentDetails", {})
     uploads_playlist_id = content_details.get("relatedPlaylists", {}).get("uploads")
 
+    # Read the id from the RESPONSE so a forHandle lookup resolves to the real
+    # UC… id; fall back to the input for an id lookup whose mock/payload omits
+    # it (preserves the pre-forHandle behaviour every existing caller relied on).
+    resolved_id = item.get("id") or channel_id
+
     if stats.get("hiddenSubscriberCount"):
-        logger.info("Channel %s has a hidden subscriber count.", channel_id)
+        logger.info("Channel %s has a hidden subscriber count.", ident)
 
     return {
-        "channel_id": channel_id,
+        "channel_id": resolved_id,
         "channel_title": snippet.get("title"),
         "country": snippet.get("country", "Unknown"),
         # From the snippet already being fetched — no extra quota.

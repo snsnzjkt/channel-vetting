@@ -230,7 +230,7 @@ def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
 
     monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
     monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
-    monkeypatch.setattr(main, "resolve_email", lambda stats, performance, scraper: "creator@blocked.example")
+    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "creator@blocked.example")
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
     monkeypatch.setattr(main, "push_record", lambda t, r: pytest.fail("blocked candidate must never be pushed"))
 
@@ -256,7 +256,7 @@ def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
     sentinel_scraper = object()
     received = {}
 
-    def fake_resolve_email(stats, performance, scraper=None):
+    def fake_resolve_email(stats, performance, scraper=None, enricher=None):
         received["scraper"] = scraper
         return ""
 
@@ -287,7 +287,7 @@ def _run_process_candidate(monkeypatch, niche_config, *, avg_views, age, **stat_
         lambda cid, pl: _stub_performance(avg_views=avg_views),
     )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: age)
-    monkeypatch.setattr(main, "resolve_email", lambda stats, performance, scraper: "")
+    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "")
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
@@ -401,7 +401,7 @@ def test_the_language_region_subtag_resolves_a_country_the_api_left_blank(monkey
         lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-IN"),
     )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email", lambda stats, performance, scraper: "")
+    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "")
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
@@ -430,7 +430,7 @@ def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
         lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-US"),
     )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email", lambda stats, performance, scraper: "")
+    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "")
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}

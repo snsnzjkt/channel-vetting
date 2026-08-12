@@ -22,6 +22,7 @@ from http_client.py — not on `airtable_client.requests`, which the module
 now imports only for `requests.RequestException`.
 """
 import logging
+import math
 
 
 class _Resp:
@@ -329,6 +330,53 @@ def test_push_record_honours_retry_after_on_a_429(monkeypatch):
 
     assert airtable_client.push_record("tblFake", _full_record()) is True
     assert slept == [5.0]
+
+
+def test_retry_after_rejects_nan_and_infinity():
+    """A `Retry-After: nan` header parses cleanly through float() and then
+    fails every comparison (`nan <= 0` and `nan > 300` are both False), so
+    without an isfinite() guard it reaches time.sleep(nan) and raises
+    ValueError out of a path nothing above run() catches. inf is caught by
+    the >300 bound but is rejected here too rather than relying on that."""
+    import http_client
+
+    default = 32.0
+    for bad in ("nan", "NaN", "inf", "-inf", "infinity"):
+        got = http_client._retry_after_seconds(_Resp(429, headers={"Retry-After": bad}), default)
+        assert got == default, f"{bad!r} should fall back to the default, got {got!r}"
+        assert math.isfinite(got)
+
+
+def test_retry_after_still_reads_a_sane_value():
+    """The guard must not regress the happy path: a plausible numeric header
+    is still honoured over the default."""
+    import http_client
+
+    assert http_client._retry_after_seconds(_Resp(429, headers={"Retry-After": "12"}), 32.0) == 12.0
+
+
+def test_push_record_survives_a_nan_retry_after(monkeypatch):
+    """End-to-end: a 429 carrying `Retry-After: nan` must not crash the run.
+    Before the isfinite() guard, post_with_rate_limit_retry() called
+    time.sleep(nan) and the ValueError unwound through push_record() ->
+    run_niche() -> run(), killing every remaining niche over one bad header."""
+    import airtable_client
+    import http_client
+
+    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+
+    responses = [_Resp(429, headers={"Retry-After": "nan"}), _Resp(201)]
+    monkeypatch.setattr(http_client.AIRTABLE, "post", lambda url, **k: responses.pop(0))
+
+    slept = []
+    monkeypatch.setattr(
+        airtable_client, "post_with_rate_limit_retry",
+        lambda url, **kwargs: http_client.post_with_rate_limit_retry(url, sleep=slept.append, **kwargs),
+    )
+
+    assert airtable_client.push_record("tblFake", _full_record()) is True
+    # Fell back to the hardcoded default instead of sleeping nan.
+    assert slept == [http_client.POST_RETRY_WAIT_SECONDS]
 
 
 def test_push_record_does_not_retry_a_500_post(monkeypatch):

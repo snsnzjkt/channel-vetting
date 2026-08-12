@@ -147,3 +147,64 @@ USE_PLAYWRIGHT_STEALTH = os.getenv(
 
 # Backward-compatible alias for existing env files and workflows.
 USE_CLOAKBROWSER = USE_PLAYWRIGHT_STEALTH
+
+# --- influencers.club (email chain step 4) ---
+# A creator-data platform whose enrich-by-handle endpoint resolves a
+# YouTube channel ID to a validated contact address. Runs BEFORE the
+# browser step because it is one HTTP call against up to four page loads,
+# and because `must_have` (below) makes a miss free.
+INFLUENCERS_API_KEY = os.getenv("INFLUENCERS_API_KEY")
+INFLUENCERS_BASE_URL = os.getenv(
+    "INFLUENCERS_BASE_URL",
+    "https://api-dashboard.influencers.club",
+)
+
+# The "profile" variant, deliberately, not "full". Both return the email;
+# full additionally returns growth curves, medians, income estimates and
+# audience demographics for 5x the price (1 credit vs 0.2), and this
+# pipeline scores channels off the YouTube Data API instead. Don't "upgrade"
+# this to full without a reason that isn't the word "full".
+INFLUENCERS_ENRICH_PATH = "/public/v1/creators/enrich/handle/profile/"
+
+# Bounds the credit spend of a single run the way EMAIL_DEEP_SCAN_PAGES
+# bounds the deep scan's quota spend. Only channels that reached step 4 —
+# i.e. the free steps missed — consume one, and only a returned address is
+# billed (see EMAIL_REQUIRED below), so this caps a runaway, not normal use.
+INFLUENCERS_MAX_LOOKUPS_PER_RUN = int(
+    os.getenv("INFLUENCERS_MAX_LOOKUPS_PER_RUN", 100)
+)
+
+# "must_have" over the "preferred" default: the docs state no credits are
+# charged for an empty result or a failed validation under must_have, which
+# turns a miss into a free call. "preferred" would bill 0.2 credits to be
+# told the address it found is unvalidated — and an unvalidated address is
+# worth nothing to an outreach table a human works from.
+INFLUENCERS_EMAIL_REQUIRED = "must_have"
+
+# --- influencers.club discovery (creator search — replaces search.list) ---
+# The same account/key, a different endpoint: POST /public/v1/discovery/
+# filters creators server-side on the criteria the pipeline already gates on
+# (English content, subscriber floor, an allowed country, a niche topic), so
+# a far larger fraction of what it returns can become a row than the ~15% of
+# raw YouTube search results that survive. Verified live 2026-08-13: the
+# response is {total, accounts:[{user_id, profile:{username, full_name,
+# followers, engagement_percent}}], credits_left, credits_cost}.
+INFLUENCERS_DISCOVERY_PATH = "/public/v1/discovery/"
+
+# UNLIKE search.list, discovery costs real money, not free YouTube quota:
+# 0.01 credits per creator RETURNED (measured). This ceiling bounds a run the
+# way INFLUENCERS_MAX_LOOKUPS_PER_RUN bounds the enrich step — a runaway
+# guard, not a normal-use limit (30 rows/table needs on the order of 1-3
+# credits of discovery once exclude_handles is filtering out the known base).
+INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN = float(
+    os.getenv("INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN", 50)
+)
+
+# exclude_handles caps at 10,000 entries per request (vendor limit, verified
+# accepted at HTTP 200). This is the credit-safety mechanism: a creator the
+# query would re-return that is already in our base is 0.01 spent on a row we
+# already have, so excluding server-side means the vendor never returns — and
+# never bills — them. A larger base than 10k needs the exclusion split or the
+# persistent server-side exclusion list (not yet wired — see the discovery
+# module).
+INFLUENCERS_MAX_EXCLUDE_HANDLES = 10_000

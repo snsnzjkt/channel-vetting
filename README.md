@@ -15,15 +15,20 @@ weak day can't flood a table with below-criteria channels:
    field rather than a local file — so a second run the same day tops up
    the day's count instead of doubling it. A niche already at both caps is
    skipped before any quota is spent.
-1. **Discovery** (`discovery.py`) — searches YouTube for videos matching your
-   niche keywords (`search.list`, type=video) and extracts the unique
-   channels behind the results. Results are cached per keyword per day so
-   re-running the same keyword twice in one day costs no extra quota. The
-   search window defaults to the last `DISCOVERY_DAYS_BACK` (7) days —
-   deliberately short and self-renewing, rather than a wide fixed window
-   that would return the same already-tracked channels every day. Stops
-   searching further keywords once enough fresh (not-yet-tracked)
-   candidates are banked to fill the day's remaining headroom.
+1. **Discovery** — finds candidate channels for the niche. With
+   `INFLUENCERS_API_KEY` set, it uses **influencers.club creator search**
+   (`influencer_discovery.py`), filtering server-side on the niche's own
+   criteria — content language, a subscriber floor, creator gender, and an
+   `ai_search` description of the niche — so far more of what it returns
+   survives the hard requirements below than raw keyword search does. Your
+   DO NOT CONTACT handles are excluded server-side (never dropped under the
+   vendor's per-request cap), so no credit is spent surfacing a creator you
+   are already suppressing. With no key set, discovery falls back to
+   **YouTube `search.list`** (`discovery.py`): keyword search (type=video),
+   cached per keyword per day, over a deliberately short and self-renewing
+   `DISCOVERY_DAYS_BACK` (7) day window rather than a wide one that returns
+   the same already-tracked channels every day. Either way, discovery keeps
+   going until the day's qualified budget is filled or candidates run out.
 2. **Pre-filter** — candidates already present in your Airtable base are
    dropped before any enrichment quota is spent on them.
 3. **DO NOT CONTACT screening** (`do_not_contact.py`) — every candidate is
@@ -185,60 +190,23 @@ venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 ```
 
-### 3b. Optional: add Playwright + stealth for site testing
+### 3b. Optional: Playwright + stealth for the browser email step
 
-If you want to test a site with a stealth Chromium wrapper, this repo
-now includes a small smoke-test script:
+The last step of the email fallback chain (`browser_email.py`) uses
+Playwright with stealth to follow a channel's public external link list to
+the creator's own site. It is off by default; enable it with
+`USE_PLAYWRIGHT_STEALTH=true`. If Playwright has not yet downloaded
+Chromium, run `python -m playwright install chromium` once first.
 
-```bash
-python cloakbrowser_test.py --url https://example.com
-```
-
-For protected sites, the smoke test supports headed mode and proxies:
-
-```bash
-python cloakbrowser_test.py --url https://target-site.example --headed --proxy http://user:pass@host:port
-```
-
-If Playwright has not yet downloaded Chromium, run `python -m playwright
-install chromium` once before using the script.
-
-To try the browser-backed email backfill path on already-tracked
-records, run:
+To try that browser-backed path against already-tracked, email-less rows
+without re-running discovery:
 
 ```bash
 python backfill_missing_emails.py --use-playwright-stealth
 ```
 
-That adds a public-page browser check (following the channel's external
-link list to the creator's own site) on top of the free text-based steps —
-there is no paid fallback to disable.
-
-### 3c. Optional: `cloakbrowser-mcp` for interactive agent use
-
-This repo's `.mcp.json` registers `cloakbrowser-mcp` (an npm package,
-pinned to `1.10.0`) as an MCP server named `cloakbrowser`. It lets Claude
-Code (or any other MCP client opened in this directory) drive a real
-CloakBrowser session interactively — useful for poking at a channel's
-actual page to prototype extraction logic or debug selectors before that
-logic lands in `enrichment.py`.
-
-This is **entirely separate from the pipeline**: `main.py` and
-`browser_email.py` drive Playwright directly and never touch `.mcp.json`
-or the MCP server — no `cloakbrowser` Python package is installed at all
-any more. The MCP server
-requires an LLM client to drive it, which the scheduled
-`python main.py` run has no reason to grow. It is **not** used by, and
-not required for, the GitHub Actions workflow — the pipeline runs fine
-with `.mcp.json` absent entirely.
-
-No secret is stored in `.mcp.json` — it references
-`CLOAKBROWSER_LICENSE_KEY` from your shell/session environment via
-`${CLOAKBROWSER_LICENSE_KEY:-}` and runs unlicensed if that variable
-isn't set. Requires Node.js (tested with Node 24.12.0 / npm 11.6.2) since
-`cloakbrowser-mcp` is fetched via `npx` on first use. After adding or
-editing `.mcp.json`, restart your MCP client and check `/mcp` (Claude
-Code) to confirm `cloakbrowser` is listed.
+That adds a public-page browser check on top of the free text-based email
+steps — there is no paid fallback to disable.
 
 ### 4. Configure environment variables
 
@@ -264,10 +232,11 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
 | `EMAIL_DEEP_SCAN_PAGES` | 2 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
 | `LONGFORM_SCAN_MAX_PAGES` | 3 | Extra pages of older uploads paged through to confirm 30+ non-Shorts videos, and only for channels the newest 50 left short of that bar (2 quota units per page; 0 judges on the newest 50 alone) |
-| `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see "Browser path" below). The search-zone filter does not depend on it. `USE_CLOAKBROWSER` is still accepted as an alias |
-| `INFLUENCERS_API_KEY` | _(unset)_ | Enables email chain step 4 (influencers.club enrich-by-handle). Unset means the step is skipped entirely — the pipeline runs fine without it |
+| `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see §3b). The search-zone filter does not depend on it. `USE_CLOAKBROWSER` is still accepted as an alias |
+| `INFLUENCERS_API_KEY` | _(unset)_ | Enables influencers.club **discovery** (replacing `search.list`) and email chain **step 4** (enrich-by-handle). Unset means both are skipped and discovery falls back to `search.list` — the pipeline runs fine without it |
 | `INFLUENCERS_BASE_URL` | `https://api-dashboard.influencers.club` | API host override |
-| `INFLUENCERS_MAX_LOOKUPS_PER_RUN` | 100 | Hard cap on step-4 lookups per run, bounding credit spend. Only channels the free steps missed consume one, and a lookup that finds no address is not billed |
+| `INFLUENCERS_MAX_LOOKUPS_PER_RUN` | 100 | Hard cap on step-4 email lookups per run, bounding credit spend. Only channels the free steps missed consume one, and a lookup that finds no address is not billed |
+| `INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN` | 50 | Per-run credit ceiling for discovery (0.01 credits per creator returned). A runaway guard, not a normal-use limit |
 
 ### 5. Edit your keywords / niches
 
@@ -277,6 +246,14 @@ the "Lifestyle Sofa" and "Home Theater" Influencer Profiling briefs,
 Cynthia Lim, 15 April 2024), which Airtable table it pushes to, and its
 qualification thresholds — `min_avg_views` and `min_channel_age_months`
 (`None` if the niche has no age requirement, as with Lifestyle Sofa).
+
+Each entry also carries a `discovery_filters` dict — the server-side
+filters influencers.club discovery uses: content language, creator
+`gender`, a subscriber floor, and an `ai_search` description of the niche
+(or `topics` codes where the taxonomy fits). When `INFLUENCERS_API_KEY` is
+set these drive discovery; the `keywords` are only the `search.list`
+fallback used when no key is configured. Reword `ai_search` to steer which
+creators surface.
 
 Note that `min_avg_views` is **10,000 for both niches** as of the 2026-08
 criteria change. Lifestyle Sofa's brief says 2,000; that was deliberately
@@ -299,13 +276,14 @@ run.
 python main.py --test
 ```
 
-This runs with 1 keyword, `max_results=5`, on the first niche only, so it
-costs at most ~100 units of search quota plus a handful of enrichment
-units — enough to confirm YouTube and Airtable are both wired up
-correctly without burning a meaningful chunk of your daily budget. Add
-`--daily-cap N` to also cap both the qualified and flagged daily budgets
-at `N` for that run — useful for testing the capping behavior cheaply
-against your production Airtable base.
+This runs on the first niche only and, unless you pass `--daily-cap`,
+bounds the run to **2 qualified / 1 flagged** rows so it stays cheap. That
+bound matters: when influencers.club discovery is active it fills the daily
+cap rather than honouring `max_results`, so without it a "test" would
+discover toward a full day of real credits and quota. It's enough to
+confirm YouTube, Airtable (and influencers.club, if the key is set) are all
+wired up correctly. Pass `--daily-cap N` to set a different bound for that
+run — useful for testing the capping behavior against production Airtable.
 
 ### 7. Run the full pipeline
 
@@ -326,17 +304,22 @@ python main.py
 | File | Purpose |
 |---|---|
 | `config.py` | Loads `.env`, defines constants (quota ceiling, daily caps, weights inputs, etc.) |
-| `discovery.py` | `search.list`-based channel discovery + per-day search cache |
+| `http_client.py` | Shared retrying HTTP sessions (Airtable / YouTube / influencers.club); API keys travel as headers, never query params |
+| `influencer_discovery.py` | influencers.club creator-search discovery source (replaces `search.list` when a key is set) |
+| `discovery.py` | `search.list`-based channel discovery + per-day search cache (the discovery fallback) |
 | `enrichment.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
 | `scoring.py` | Fake-follower risk heuristic + weighted overall score + `qualify()` (channel age) |
 | `search_zones.py` | Allowed-country tables (US/CA/UK/EU/AU, minus Ireland) + `zone_verdict()` |
 | `do_not_contact.py` | DO NOT CONTACT suppression list — fetched fresh every run, fails closed |
+| `external_dedupe.py` | 24h-cached @handle index over the base's other YouTube tables, to skip channels already tracked elsewhere |
 | `influencers.py` | influencers.club enrich-by-handle lookup (step 4 of the email chain) |
 | `browser_email.py` | Playwright link-list email fallback (last step of the email chain) |
 | `prospect_day.py` | Single source of truth for "what day is it" for the daily caps (`PROSPECT_DAY_TZ`) |
 | `airtable_client.py` | Dedupe check, create/update records, `count_added_today()` (per-table, one table per niche) |
 | `quota_tracker.py` | Daily quota spend log (resets at midnight Pacific Time) |
 | `audit_blocklist.py` | One-off: check rows already in the niche tables against DO NOT CONTACT |
+| `backfill_missing_emails.py` | One-off: re-run the email chain over rows that have no email yet |
+| `cleanup_external_duplicates.py` | One-off: delete niche-table rows already tracked elsewhere in the base (guarded by `--confirm`) |
 | `main.py` | Orchestrates the full pipeline; `--test` and `--daily-cap` flags |
 | `tests/` | pytest suite (see "Running the tests" below) |
 
@@ -350,24 +333,24 @@ in `--test` mode.
 Setup:
 1. Push this repo to GitHub.
 2. In the repo, go to **Settings > Secrets and variables > Actions > New
-   repository secret** and add five secrets: `AIRTABLE_TOKEN`,
+   repository secret** and add the five required secrets: `AIRTABLE_TOKEN`,
    `AIRTABLE_BASE_ID`, `AIRTABLE_TABLE_HOME_THEATER`,
-   `AIRTABLE_TABLE_LIFESTYLE_SOFA`, `YOUTUBE_API_KEY` — same values as
-   your local `.env`. That's the full list; no browser license secret is
-   needed any more.
-3. The workflow pins `PROSPECT_DAY_TZ` to `America/Toronto` in its env, and
-   runs with `USE_PLAYWRIGHT_STEALTH` **off** by default even though the
-   runner env var exists — GitHub-hosted runners sit on Azure datacenter
-   IPs that YouTube challenges hard, and stealth patches browser
-   fingerprints, not IP reputation. To test whether it works from a runner
-   anyway, trigger the workflow manually (**Actions > Channel Vetting
-   Pipeline > Run workflow**) with its `use_playwright_stealth` input
-   checked — that also triggers the `playwright install --with-deps
-   chromium` step, since pip installs the driver but not the browser
-   binary. Only make it the schedule's default once a manual run has
-   proven it out.
-4. The workflow will run automatically on schedule; to run it immediately
-   without the browser step, use the same **Run workflow** button.
+   `AIRTABLE_TABLE_LIFESTYLE_SOFA`, `YOUTUBE_API_KEY` — same values as your
+   local `.env`. Optionally add `INFLUENCERS_API_KEY` to turn on
+   influencers.club discovery and email step 4; without it the scheduled run
+   falls back to `search.list`. No browser license secret is needed.
+3. The workflow pins `PROSPECT_DAY_TZ` to `America/Toronto` in its env and
+   turns `USE_PLAYWRIGHT_STEALTH` **on for scheduled runs** — which also runs
+   the `playwright install --with-deps chromium` step, since pip installs the
+   Playwright driver but not the browser binary. Caveat: turning it on makes
+   the browser email step *run*, but GitHub-hosted runners sit on Azure
+   datacenter IPs that YouTube challenges hard, and stealth patches browser
+   fingerprints, not IP reputation — so "running" is not "working". `main.py`
+   logs a warning when the step was requested but the browser could not
+   start; watch the run log for it.
+4. To run immediately, use **Actions > Channel Vetting Pipeline > Run
+   workflow**. That manual dispatch exposes a `use_playwright_stealth` toggle
+   (on by default) — uncheck it to run without the browser step.
 5. To change the schedule, edit the `cron` line in the workflow file
    (cron is UTC; see https://crontab.guru to build a new expression).
 
@@ -377,17 +360,18 @@ Setup:
 python -m pytest
 ```
 
-Runs the full suite in `tests/` (257 tests at time of writing) covering
-discovery windowing/early-stop, the pre-push gate (view floor, video-count
-floor, dead and Shorts-only channels), the search-zone tables and their
-three-state verdict, qualification, the DO NOT
-CONTACT fail-closed paths, `count_added_today()`/daily-cap behavior,
-`prospect_day.py`, the candidate pre-filter, every step of the email
-chain (including the older-uploads scan's quota arithmetic and which
-step gets credited for a hit), the browser About-panel reader, and a
-regression check that the removed paid email-finder integrations
-(Hunter.io, Modash) stay removed. No network calls or real credentials
-are needed — everything is mocked.
+Runs the full suite in `tests/` (521 tests at time of writing) covering
+discovery windowing/early-stop, the influencers.club discovery source
+(pagination, credit budget, handle→channel-ID bridging, and its DO NOT
+CONTACT / already-tracked exclusion), the pre-push gate (view floor,
+video-count floor, dead and Shorts-only channels), the search-zone tables
+and their three-state verdict, qualification, the DO NOT CONTACT
+fail-closed paths, `count_added_today()`/daily-cap behavior,
+`prospect_day.py`, the candidate pre-filter, every step of the email chain
+(including the older-uploads scan's quota arithmetic and which step gets
+credited for a hit), and a regression check that the removed paid
+email-finder integrations (Hunter.io, Modash) stay removed. No network
+calls or real credentials are needed — everything is mocked.
 
 ## Tuning
 

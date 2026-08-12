@@ -89,6 +89,7 @@ def test_every_source_label_is_distinct():
         main.EMAIL_SOURCE_REPEATED,
         main.EMAIL_SOURCE_ABOUT,
         main.EMAIL_SOURCE_OLDER,
+        main.EMAIL_SOURCE_INFLUENCERS,
         main.EMAIL_SOURCE_BROWSER,
     ]
     assert len(set(labels)) == len(labels)

@@ -36,12 +36,13 @@ same request, so the key is set ONCE here and the URL becomes safe to log.
 Do not reintroduce `"key": YOUTUBE_API_KEY` into any `params` dict.
 """
 import logging
+import math
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config import YOUTUBE_API_KEY
+from config import YOUTUBE_API_KEY, INFLUENCERS_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,12 @@ RETRY_STATUSES = (429, 500, 502, 503, 504)
 # means Airtable rejected the request without processing it. That narrow
 # case is handled explicitly by post_with_rate_limit_retry() below rather
 # than by widening this set.
+#
+# Scope of that reasoning: it is about POSTs that CREATE something, not about
+# POST as a verb. INFLUENCERS_RETRY_METHODS below deliberately adds POST for
+# the influencers.club session, whose only POST is a lookup that creates
+# nothing — see the comment there. This set stays as-is and that one derives
+# from it, so a future edit here still reaches both.
 IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "PUT", "PATCH", "DELETE"})
 
 # Airtable's documented 429 cooldown is ~30s; give it a little room.
@@ -74,15 +81,21 @@ POST_RETRY_ATTEMPTS = 4
 POST_RETRY_WAIT_SECONDS = 32.0
 
 
-def _make_session() -> requests.Session:
+def _make_session(
+    *,
+    retry_statuses=RETRY_STATUSES,
+    allowed_methods=IDEMPOTENT_METHODS,
+    respect_retry_after=True,
+    read_retries=RETRY_TOTAL,
+) -> requests.Session:
     retry = Retry(
         total=RETRY_TOTAL,
         connect=RETRY_TOTAL,
-        read=RETRY_TOTAL,
+        read=read_retries,
         backoff_factor=BACKOFF_FACTOR,
-        status_forcelist=RETRY_STATUSES,
-        allowed_methods=IDEMPOTENT_METHODS,
-        respect_retry_after_header=True,
+        status_forcelist=retry_statuses,
+        allowed_methods=allowed_methods,
+        respect_retry_after_header=respect_retry_after,
         # Hand the final failed response back to the caller instead of
         # raising urllib3.exceptions.MaxRetryError. Every call site in this
         # pipeline already branches on `resp.status_code != 200` and logs
@@ -102,11 +115,98 @@ def _make_session() -> requests.Session:
 AIRTABLE = _make_session()
 YOUTUBE = _make_session()
 
+# 429 is deliberately ABSENT from this session's retry set.
+#
+# influencers.club overloads one status onto two conditions that need
+# opposite responses, and tells them apart by whether the body carries a
+# `retry_after` field:
+#
+#   with retry_after    -> the per-minute rate limit (300 req/min). Clears
+#                          on its own; retrying is correct.
+#   without retry_after -> the fair-use credit cap. It resets at
+#                          subscription renewal, so retrying "provides no
+#                          benefit" (their docs) — it cannot succeed today.
+#
+# `retry_after` is read from the documented body field OR the standard
+# Retry-After header, because misreading a plain rate limit as the cap would
+# disable the step for the whole run over a 30-second wait.
+#
+# Leaving 429 in the forcelist would make the adapter spend ~45s of backoff
+# on a cap that a month of backoff wouldn't clear, and it would do that for
+# EVERY remaining candidate in the run. Since the two cases are only
+# distinguishable from the response BODY, which the adapter never inspects,
+# the split has to happen at the call site: influencers.py handles both and
+# trips a circuit breaker on the cap.
+INFLUENCERS_RETRY_STATUSES = (500, 502, 503, 504)
+
+# POST *is* retried on this session, unlike every other one here, and the
+# reason IDEMPOTENT_METHODS excludes it does not apply: the exclusion exists
+# because a retried Airtable POST that succeeded-but-lost-its-response
+# creates a duplicate ROW. influencers.club's enrich endpoint is a lookup —
+# it creates nothing, so repeating it converges on the same answer. Billing
+# is per successful result, and a 5xx is not one, so a retried 5xx cannot
+# double-charge either.
+#
+# This is not optional politeness: the endpoint is only ever reached by POST,
+# so leaving POST out of the allowed set would make INFLUENCERS_RETRY_STATUSES
+# above dead configuration — the 5xx retry would silently never happen.
+INFLUENCERS_RETRY_METHODS = IDEMPOTENT_METHODS | {"POST"}
+# Retry-After is deliberately NOT honoured on this session.
+#
+# urllib3 2.x sleeps the header's value verbatim (`Retry.sleep_for_retry`
+# calls `time.sleep(retry_after)` with no ceiling — verified against the
+# pinned 2.7.0), and this session retries 5xx. So a 503 carrying
+# `Retry-After: 86400` would park the run inside the adapter for a day,
+# where neither the lookup budget nor the failure breaker can see it, because
+# find_email() has not been handed a response yet.
+#
+# Nothing is lost by refusing it: the only status whose cooldown this vendor
+# actually asks us to honour is 429, and that is handled explicitly in
+# influencers.py — where the wait IS capped (MAX_RATE_LIMIT_WAIT_SECONDS)
+# and the value is parsed defensively. 5xx retries fall back to the
+# exponential backoff above, which urllib3 caps on its own.
+#
+# AIRTABLE keeps respect_retry_after_header=True: its ~30s 429 cooldown is
+# documented, load-bearing, and comes from a service we trust.
+#
+# READ retries are disabled on this session, and that is the other half of
+# the POST decision above. The three retry kinds are not equally safe once
+# money is involved:
+#
+#   connect -> the connection was never established, so the vendor never
+#              processed the request and never billed. Safe to retry.
+#   status  -> the vendor answered 5xx, so it returned no result and billed
+#              nothing (billing is per successful result). Safe to retry.
+#   read    -> the request WAS sent and the response was lost. The vendor
+#              may have completed the lookup and charged a credit; we simply
+#              never saw it. Retrying spends a SECOND credit for one answer,
+#              and the budget only ever sees the final response, so the
+#              overspend is invisible.
+#
+# This is the money-shaped version of the duplicate-row rule at the top of
+# this file: the failure mode a retry is supposed to help is exactly the one
+# where repeating it does damage. A lost response therefore surfaces to
+# influencers.py as a RequestException, which returns "" and counts toward
+# the outage breaker — costing one address instead of an unbounded number of
+# duplicate charges.
+INFLUENCERS = _make_session(
+    retry_statuses=INFLUENCERS_RETRY_STATUSES,
+    allowed_methods=INFLUENCERS_RETRY_METHODS,
+    respect_retry_after=False,
+    read_retries=0,
+)
+
 # Guarded so importing this module never explodes when the key is unset —
 # discovery.py raises its own clear "YOUTUBE_API_KEY is not set" error, and
 # the test suite imports these modules without a populated .env.
 if YOUTUBE_API_KEY:
     YOUTUBE.headers["X-goog-api-key"] = YOUTUBE_API_KEY
+
+# Same reasoning as the YouTube key: a credential in a query string is a
+# credential printed into any unhandled network error's message, and in CI
+# that message lands in a log retained for 90 days.
+if INFLUENCERS_API_KEY:
+    INFLUENCERS.headers["Authorization"] = f"Bearer {INFLUENCERS_API_KEY}"
 
 
 def post_with_rate_limit_retry(url: str, *, sleep=None, **kwargs) -> requests.Response:
@@ -147,8 +247,15 @@ def _retry_after_seconds(resp: requests.Response, default: float) -> float:
     except (TypeError, ValueError):
         return default
     # Ignore nonsense (negative, or an implausibly long hold) rather than
-    # letting a bad header stall the run.
-    if value <= 0 or value > 300:
+    # letting a bad header stall the run. isfinite() is checked FIRST and is
+    # load-bearing, not defensive padding: float("nan") parses cleanly and
+    # then fails every comparison (`nan <= 0` is False, `nan > 300` is False),
+    # so without this guard a `Retry-After: nan` header would fall straight
+    # through to `return value` and reach time.sleep(nan) in
+    # post_with_rate_limit_retry(), which raises ValueError. Nothing between
+    # there and run() catches it, so one malformed header would kill the whole
+    # run — the same trap influencers._wait_seconds() guards against.
+    if not math.isfinite(value) or value <= 0 or value > 300:
         return default
     return value
 

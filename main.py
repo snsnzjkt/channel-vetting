@@ -39,6 +39,8 @@ from external_dedupe import fetch_external_handles
 from prospect_day import today_iso
 from quota_tracker import get_today_spend
 from browser_email import BrowserEmailScraper, null_scraper
+from influencers import InfluencersClient, null_client
+from influencer_discovery import InfluencerDiscovery
 from do_not_contact import BlocklistUnavailable, fetch_blocklist
 from config import (
     API_SLEEP_SECONDS,
@@ -52,6 +54,7 @@ from config import (
     DAILY_QUALIFIED_CAP,
     DISCOVERY_DAYS_BACK,
     EXPECTED_CANDIDATES_PER_KEYWORD,
+    INFLUENCERS_MAX_EXCLUDE_HANDLES,
     USE_PLAYWRIGHT_STEALTH,
 )
 
@@ -88,6 +91,33 @@ NICHES = {
         # bar again without unpicking the gate.
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
+        # influencers.club discovery filters (the source that replaces
+        # search.list when INFLUENCERS_API_KEY is set — see run_niche). The
+        # products being promoted are home-theatre gear, so the creators worth
+        # reaching are: theatre enthusiasts (home cinema / AV / media rooms),
+        # homebodies (people who build their nights-in around home
+        # entertainment), and furniture enthusiasts (media-/living-room
+        # furnishing). Relevance is carried by the ai_search SEMANTIC query,
+        # not by `topics`: the yt-topics taxonomy has no leaf for "home" or
+        # "furniture", and pinning topics to Movies/Technology would EXCLUDE
+        # the furniture/homebody creators (YouTube files them under Lifestyle).
+        # Reword ai_search to steer the niche; it is a 3–150 char free-text
+        # field verified live 2026-08-13.
+        #
+        # gender="male": the primary target for home-theatre products is men.
+        # This is the CREATOR's gender, filtered server-side (accepted values
+        # verified live: 'any' | 'male' | 'female'). There is also a separate
+        # audience.gender filter (target creators whose AUDIENCE skews male) if
+        # audience composition ever matters more than the creator's own gender.
+        "discovery_filters": {
+            "profile_language": ["en"],
+            "gender": "male",
+            "ai_search": (
+                "home theater and home cinema setups, media rooms, cozy homebody "
+                "home entertainment, living room furniture and home furnishing"
+            ),
+            "number_of_subscribers": {"min": 2000},
+        },
     },
     "Lifestyle Sofa": {
         "keywords": [
@@ -116,8 +146,27 @@ NICHES = {
         # views) are out of scope — this pipeline only observes YouTube.
         "min_avg_views": 10_000,
         "min_channel_age_months": None,
+        # Fashion, lifestyle, travel, house tours, and home decor — and
+        # especially women-led channels. gender="female" filters the CREATOR
+        # server-side (values verified live: 'any' | 'male' | 'female').
+        # Relevance rides on ai_search rather than topics: "house tours" and
+        # "home decor" have no yt-topics leaf, and pinning topics to the
+        # Fashion/Tourism leaves that DO exist would exclude the decor /
+        # house-tour creators. Reword ai_search to steer it.
+        "discovery_filters": {
+            "profile_language": ["en"],
+            "gender": "female",
+            "ai_search": "fashion and lifestyle vlogs, travel, house tours, home decor and interior styling",
+            "number_of_subscribers": {"min": 2000},
+        },
     },
 }
+
+# Outer refill-round cap for the influencers.club discovery loop. discovery
+# paginates internally and stops when supply or its credit ceiling runs out;
+# this only backstops a pathological run where a very low gate-survival rate
+# would otherwise keep asking for more candidates round after round.
+DISCOVERY_MAX_ROUNDS = 50
 
 # Niche match currently defaults to a neutral midpoint (50/100) since
 # automated topical matching isn't implemented yet — human reviewers can
@@ -132,6 +181,7 @@ DEFAULT_NICHE_MATCH = 70.0
 EMAIL_SOURCE_REPEATED = "repeated across recent videos"
 EMAIL_SOURCE_ABOUT = "About description"
 EMAIL_SOURCE_OLDER = "repeated across older videos"
+EMAIL_SOURCE_INFLUENCERS = "influencers.club enrichment"
 EMAIL_SOURCE_BROWSER = "linked site or its /contact page (Playwright)"
 
 
@@ -321,7 +371,9 @@ def resolve_country(stats: dict, performance: dict) -> str:
     return region_from_language_tag(performance.get("content_language"))
 
 
-def resolve_email_with_source(stats: dict, performance: dict, scraper=None) -> tuple[str, str]:
+def resolve_email_with_source(
+    stats: dict, performance: dict, scraper=None, enricher=None
+) -> tuple[str, str]:
     """
     Email fallback chain, cheapest and strongest signal first, returning
     (email, source_label) — or ("", "") when no step found anything:
@@ -329,22 +381,27 @@ def resolve_email_with_source(stats: dict, performance: dict, scraper=None) -> t
       1. An address repeated across several recent video descriptions.
       2. A single mention in the channel's own About description.
       3. The same repeat test, extended over OLDER uploads.
-      4. The channel's public external link list, followed in Playwright:
+      4. influencers.club's enrich-by-handle endpoint, keyed on channel ID.
+      5. The channel's public external link list, followed in Playwright:
          each non-third-party link, then its /contact page.
 
     Steps 1-2 use data already fetched during enrichment and cost
     nothing. Step 3 costs 2 quota units per extra page and only runs when
     1-2 found nothing, so channels whose address is already known never
-    trigger it. Step 4 is last because a browser session is the slowest
-    and least reliable option, not because it's the strongest signal.
+    trigger it.
 
-    Step 4 reads the LINK LIST, not the About text — step 2 already has
+    Step 4 precedes step 5 on cost, not on signal quality, and step 5 stays
+    last because it reads the creator's OWN site — a different source
+    rather than a worse one. influencers.py's module docstring carries that
+    argument in full; don't restate it here, or the two drift.
+
+    Step 5 reads the LINK LIST, not the About text — step 2 already has
     the full About description from channels.list, so re-reading it in a
     browser could never add an address. See browser_email.py.
 
     Reporting the source here is what lets callers attribute a hit to a
-    step. Comparing the result back against stats/performance can't: two
-    of the four steps (3 and 4) are indistinguishable that way.
+    step. Comparing the result back against stats/performance can't: steps
+    3, 4 and 5 are indistinguishable that way.
     """
     email = performance.get("repeated_email")
     if email:
@@ -363,17 +420,29 @@ def resolve_email_with_source(stats: dict, performance: dict, scraper=None) -> t
     if email:
         return email, EMAIL_SOURCE_OLDER
 
-    if scraper is not None:
-        email = scraper.find_email(stats["channel_id"])
-        if email:
-            return email, EMAIL_SOURCE_BROWSER
+    # Both collaborators ship a null object precisely so "absent" is an
+    # object that returns "". Normalising here keeps that as the ONE
+    # soft-disable mechanism — an `if x is not None` guard per step would
+    # be a second one doing the same job, and the two could disagree.
+    if enricher is None:
+        enricher = null_client()
+    if scraper is None:
+        scraper = null_scraper()
+
+    email = enricher.find_email(stats["channel_id"])
+    if email:
+        return email, EMAIL_SOURCE_INFLUENCERS
+
+    email = scraper.find_email(stats["channel_id"])
+    if email:
+        return email, EMAIL_SOURCE_BROWSER
 
     return "", ""
 
 
-def resolve_email(stats: dict, performance: dict, scraper=None) -> str:
+def resolve_email(stats: dict, performance: dict, scraper=None, enricher=None) -> str:
     """The chain above, for callers that only need the address itself."""
-    return resolve_email_with_source(stats, performance, scraper)[0]
+    return resolve_email_with_source(stats, performance, scraper, enricher)[0]
 
 
 def push_until_full(
@@ -482,9 +551,17 @@ def process_candidate(
     blocklist,
     niche_config: dict,
     scraper,
+    enricher=None,
+    known_channel_ids: set[str] | None = None,
 ) -> tuple[dict | None, str]:
     """Enrich, screen, qualify, and build an Airtable record for one candidate."""
-    channel_id = candidate["channel_id"]
+    known_channel_ids = known_channel_ids or set()
+    # A candidate carries EITHER a "channel_id" (discovery.py / YouTube search)
+    # OR a "handle" (influencer_discovery.py, which surfaces creators by
+    # @handle). get_channel_stats resolves the real UC… id off the response
+    # either way, so everything below is keyed on the resolved id.
+    channel_id = candidate.get("channel_id")
+    cand_handle = candidate.get("handle")
 
     # Checkpoint 1 — free, before spending ~3 quota units on enrichment.
     hit = blocklist.match(name=candidate.get("channel_title", ""))
@@ -492,9 +569,15 @@ def process_candidate(
         logger.info("BLOCKED (pre-enrichment) %s — DO NOT CONTACT (%s).", candidate.get("channel_title"), hit)
         return None, "blocked"
 
-    stats = get_channel_stats(channel_id)
+    stats = get_channel_stats(channel_id) if channel_id else get_channel_stats(handle=cand_handle)
     time.sleep(API_SLEEP_SECONDS)
     if stats is None:
+        return None, "unreachable"
+    # From here on channel_id is the RESOLVED id: the input for a search
+    # candidate, the forHandle lookup's result for a discovery candidate.
+    channel_id = stats.get("channel_id")
+    if not channel_id:
+        logger.info("No channel ID resolved for %s — skipping.", cand_handle or "candidate")
         return None, "unreachable"
 
     # Checkpoint 2 — the reliable key, known only after channels.list.
@@ -512,6 +595,18 @@ def process_candidate(
         logger.info(
             "Skipping %s — already tracked in '%s' (@%s).",
             stats.get("channel_title"), external_handles[handle], handle,
+        )
+        return None, "duplicate"
+
+    # Niche-table dedupe by the RESOLVED channel ID. run_niche pre-filters
+    # search.list candidates by channel_id before this runs, but discovery
+    # candidates arrive as @handles with no id, so this is the only place one
+    # already tracked in THIS niche's table is caught. It costs the 1-unit
+    # channels.list already spent above; the server-side exclude_handles is
+    # what avoids even that once tracked handles are persisted.
+    if channel_id in known_channel_ids:
+        logger.info(
+            "Skipping %s — already tracked in this niche's table.", stats.get("channel_title"),
         )
         return None, "duplicate"
 
@@ -599,7 +694,7 @@ def process_candidate(
         niche_config["min_channel_age_months"],
     )
 
-    email = resolve_email(stats, performance, scraper)
+    email = resolve_email(stats, performance, scraper, enricher)
 
     # Checkpoint 3 — catches agency addresses shared across channels.
     if email:
@@ -650,7 +745,7 @@ def process_candidate(
         # Wrapped: it's a free-text field echoing a value the channel owner
         # set on their videos.
         "Content Language": csv_safe(performance.get("content_language") or "Unknown"),
-        # Attacker-influenced: chain step 4 (browser_email.py) reads
+        # Attacker-influenced: chain step 5 (browser_email.py) reads
         # arbitrary third-party websites for this.
         "Email": csv_safe(email),
         "Fake Follower Risk Score": fake_risk,
@@ -675,6 +770,149 @@ def process_candidate(
     return record, qualification
 
 
+def _discovery_exclude_handles(blocklist, external_handles, seen_handles) -> set[str]:
+    """
+    Assemble the discovery exclude set, PRIORITISED under the 10k cap.
+
+    The order is deliberate, and DO NOT CONTACT comes first because it is the
+    exclusion that matters most: a creator on the suppression list is going to
+    be dropped by process_candidate's blocklist checkpoints no matter what, so
+    any discovery credit spent surfacing them is pure waste — and excluding
+    them server-side also means they never appear in results a reviewer sees.
+    So the blocklist's handles are never dropped to make room.
+
+    `seen_handles` (creators already examined THIS run) come next, so a later
+    round never re-bills an earlier round's candidates. External-table handles
+    fill whatever room is left under the cap; the ones that don't fit are still
+    caught after enrichment by process_candidate's external-handle check — at
+    the cost of one channels.list unit each, not a wrong contact.
+
+    The blocklist screening in process_candidate is unchanged and remains the
+    authoritative, fail-closed suppression gate (it also matches on email and
+    name, which a handle-only exclusion can't). This set is a cost-saver layered
+    in front of it, never a replacement for it.
+    """
+    must_keep = set(blocklist.handles) | set(seen_handles)
+    room = max(0, INFLUENCERS_MAX_EXCLUDE_HANDLES - len(must_keep))
+    external = sorted(set(external_handles) - must_keep)[:room]
+    return must_keep | set(external)
+
+
+def _run_discovery_rounds(
+    niche_name: str,
+    table_name: str,
+    niche_config: dict,
+    discovery,
+    globally_tracked_ids: set[str],
+    external_handles: dict[str, str],
+    blocklist,
+    scraper,
+    enricher,
+    qualified_headroom: int,
+    flagged_headroom: int,
+) -> dict:
+    """
+    Fill a niche's daily budget from influencers.club discovery instead of
+    search.list. Same refill shape as run_niche's keyword loop, with two
+    differences that follow from the source:
+
+      - the round's batch is a target creator COUNT handed to
+        discovery.discover() (which paginates the endpoint internally), not a
+        batch of keywords, and
+      - dedupe is by @handle, because discovery returns a handle rather than a
+        channel ID. exclude_handles asks the vendor to withhold creators
+        already in the base so they are never returned — and, at 0.01 credits
+        each, never billed.
+
+    Returns the same counters run_niche tracks:
+    {qualified, flagged, discovered, skipped, pushed_ids}.
+    """
+    pushed_qualified = 0
+    pushed_flagged = 0
+    total_discovered = 0
+    total_skipped = 0
+    pushed_ids: set[str] = set()
+
+    logger.info("Discovery source for '%s': influencers.club creator search.", niche_name)
+    # The exclude set is assembled per round (see _discovery_exclude_handles):
+    # DO NOT CONTACT handles first and never dropped, then this run's seen
+    # handles, then external-table handles filling the 10k cap. The niche
+    # tables store a Channel ID, not a handle, so their own rows aren't
+    # excluded server-side — the post-enrichment channel_id dedupe below
+    # (known_channel_ids) is the backstop for a re-discovered niche-table
+    # channel, at the cost of the 1-unit channels.list to resolve it.
+    filters = niche_config["discovery_filters"]
+    seen_handles: set[str] = set()
+    rounds = 0
+
+    while True:
+        # Same "one opportunistic round for flagged once qualified is full"
+        # rule as the keyword loop — the flagged budget is a ceiling, never a
+        # target, and for a niche whose min_channel_age_months is None it can
+        # never fill, so it must not drive the loop.
+        if rounds and pushed_qualified >= qualified_headroom:
+            break
+        rounds += 1
+        if rounds > DISCOVERY_MAX_ROUNDS:
+            logger.warning(
+                "'%s' hit the discovery round cap (%d) — stopping.",
+                niche_name, DISCOVERY_MAX_ROUNDS,
+            )
+            break
+
+        rows_wanted = (qualified_headroom - pushed_qualified) + (flagged_headroom - pushed_flagged)
+        # Oversized against the gate survival rate, exactly as the keyword
+        # loop oversizes its candidate batch; the loop itself is what
+        # guarantees the budget fills, so this only affects round count.
+        target = max(1, int(rows_wanted * CANDIDATE_OVERSHOOT))
+
+        candidates = discovery.discover(
+            filters=filters,
+            target=target,
+            exclude_handles=_discovery_exclude_handles(blocklist, external_handles, seen_handles),
+            source_label=f"influencers.club discovery ({niche_name})",
+        )
+        new_candidates = [c for c in candidates if c["handle"] not in seen_handles]
+        total_discovered += len(new_candidates)
+        logger.info(
+            "Discovery round for '%s': asked for %d, got %d new candidate(s).",
+            niche_name, target, len(new_candidates),
+        )
+        if not new_candidates:
+            logger.info("Discovery is dry for '%s' — stopping.", niche_name)
+            break
+
+        counts = push_until_full(
+            new_candidates,
+            lambda c: process_candidate(
+                c, external_handles, blocklist, niche_config, scraper, enricher,
+                known_channel_ids=globally_tracked_ids | pushed_ids,
+            ),
+            table_name,
+            qualified_headroom - pushed_qualified,
+            flagged_headroom - pushed_flagged,
+        )
+        pushed_qualified += counts["qualified"]
+        pushed_flagged += counts["flagged"]
+        total_skipped += counts["skipped"]
+        pushed_ids |= counts["pushed_ids"]
+        seen_handles.update(c["handle"] for c in new_candidates)
+
+        logger.info(
+            "'%s' so far: %d/%d qualified, %d/%d flagged (%.2f discovery credits spent).",
+            niche_name, pushed_qualified, qualified_headroom,
+            pushed_flagged, flagged_headroom, discovery.credits_spent,
+        )
+
+    return {
+        "qualified": pushed_qualified,
+        "flagged": pushed_flagged,
+        "discovered": total_discovered,
+        "skipped": total_skipped,
+        "pushed_ids": pushed_ids,
+    }
+
+
 def run_niche(
     niche_name: str,
     table_name: str,
@@ -686,6 +924,8 @@ def run_niche(
     blocklist,
     niche_config: dict,
     scraper,
+    enricher=None,
+    discovery=None,
 ) -> tuple[int, int, set[str], bool]:
     """
     Run discovery -> pre-filter -> enrich -> score -> push for one niche's
@@ -779,12 +1019,35 @@ def run_niche(
     total_skipped = 0
     pushed_ids: set[str] = set()
 
+    # Discovery source selection. When an influencers.club key is configured
+    # (discovery.enabled) and this niche carries discovery_filters, creator
+    # search REPLACES the keyword loop below: it filters on the niche's
+    # criteria server-side, so a far larger fraction of what it returns
+    # survives the gates than raw YouTube search does. With no key — or a
+    # niche without filters — control falls straight through to the keyword
+    # loop, so the pipeline still runs when influencers.club is unavailable.
+    use_discovery = (
+        discovery is not None and discovery.enabled and "discovery_filters" in niche_config
+    )
+    if use_discovery:
+        d = _run_discovery_rounds(
+            niche_name, table_name, niche_config, discovery,
+            globally_tracked_ids, external_handles, blocklist, scraper, enricher,
+            qualified_headroom, flagged_headroom,
+        )
+        pushed_qualified = d["qualified"]
+        pushed_flagged = d["flagged"]
+        total_discovered = d["discovered"]
+        total_skipped = d["skipped"]
+        pushed_ids = d["pushed_ids"]
+
     # Local copy — the caller's set is shared across niches and must not be
     # mutated here. Grows with every candidate this niche has ALREADY
     # examined (pushed or dropped), so a later batch never re-enriches a
-    # channel an earlier one already paid for.
+    # channel an earlier one already paid for. Emptied when discovery already
+    # ran, so the keyword loop below is skipped entirely in that mode.
     seen_ids = set(globally_tracked_ids)
-    remaining_keywords = list(keywords)
+    remaining_keywords = [] if use_discovery else list(keywords)
     rounds = 0
 
     while remaining_keywords:
@@ -851,7 +1114,9 @@ def run_niche(
 
         counts = push_until_full(
             new_candidates,
-            lambda c: process_candidate(c, external_handles, blocklist, niche_config, scraper),
+            lambda c: process_candidate(
+                c, external_handles, blocklist, niche_config, scraper, enricher
+            ),
             table_name,
             qualified_headroom - pushed_qualified,
             flagged_headroom - pushed_flagged,
@@ -878,7 +1143,7 @@ def run_niche(
         niche_name, pushed_qualified, pushed_flagged, total_skipped,
     )
 
-    if pushed_qualified < qualified_headroom:
+    if not use_discovery and pushed_qualified < qualified_headroom:
         logger.warning(
             "'%s' finished under its qualified budget (%d of %d) with every keyword "
             "searched. Discovery really is running dry for these keywords — widen "
@@ -939,10 +1204,30 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
     # a daily scheduled job silently doing nothing forever. See IMPORTANT 3.
     any_cap_check_completed = False
 
+    # Email chain step 4. One client per run so the lookup budget and the
+    # credit-cap breaker are scoped to the run, and inert when no API key
+    # is set — the same soft-disable contract as null_scraper() below.
+    enricher = InfluencersClient.from_config()
+    # Said out loud for the same reason the browser warning below is. This is
+    # the only step that costs money, and from_config() logs only when the key
+    # is ABSENT — so a live run was otherwise silent about whether step 4 ran
+    # at all, which is indistinguishable from it running and finding nothing.
+    if enricher.enabled:
+        logger.info("Email chain step 4 is live (influencers.club enrichment).")
+
+    # Discovery source, one client per run so its credit ceiling is run-scoped.
+    # Inert when no API key is set, in which case run_niche falls back to the
+    # YouTube search.list keyword loop — so the pipeline still runs without it.
+    discovery = InfluencerDiscovery.from_config()
+    if discovery.enabled:
+        logger.info("Discovery source: influencers.club creator search (replacing search.list).")
+    else:
+        logger.info("influencers.club discovery unavailable — discovery falls back to YouTube search.list.")
+
     scraper = BrowserEmailScraper.launch() if USE_PLAYWRIGHT_STEALTH else null_scraper()
     # launch() fails SOFT — a missing Chromium binary, a missing shared
     # library, or an unimportable playwright all return an inert scraper
-    # rather than raising, so the run continues with email chain step 4
+    # rather than raising, so the run continues with email chain step 5
     # silently doing nothing. That is the right behaviour (one email source
     # is not worth killing a run over) but it is invisible: the symptom is
     # simply fewer emails, on a metric nobody watches per-run. Say it out
@@ -951,7 +1236,7 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
     if USE_PLAYWRIGHT_STEALTH and not scraper.enabled:
         logger.warning(
             "USE_PLAYWRIGHT_STEALTH is on but the browser could not start — email "
-            "chain step 4 (linked site / contact page) is doing nothing this run. "
+            "chain step 5 (linked site / contact page) is doing nothing this run. "
             "On CI this usually means the 'Install Chromium for Playwright' step "
             "was skipped; locally, run: python -m playwright install chromium"
         )
@@ -980,6 +1265,8 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
                 blocklist,
                 niche_config,
                 scraper,
+                enricher,
+                discovery,
             )
             total_discovered += discovered
             total_processed += processed
@@ -995,6 +1282,19 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
     print(f"Total discovered:  {total_discovered}")
     print(f"Total processed:   {total_processed}")
     print(f"Quota used today:  {quota_used} / {DAILY_QUOTA_BUDGET}")
+    # An upper bound on credits, not a count of them: a lookup that found
+    # no address was free (see influencers.py). Reported because a credit
+    # spend nobody watches per-run is exactly how a budget gets a surprise.
+    if enricher.lookups_spent:
+        print(
+            f"influencers.club:  {enricher.lookups_spent} billable lookup(s), "
+            f"{enricher.credits_reported:g} credits reported by the vendor"
+        )
+    # Discovery credits are the exact figure the vendor billed (credits_cost),
+    # not an upper bound — every returned creator is charged, unlike an enrich
+    # miss which is free.
+    if discovery.credits_spent:
+        print(f"discovery credits: {discovery.credits_spent:g} spent on creator search")
 
     if not any_cap_check_completed:
         logger.error(
@@ -1039,7 +1339,21 @@ def main() -> None:
         DAILY_FLAGGED_CAP = args.daily_cap
 
     if args.test:
-        logger.info("Running in --test mode: 1 keyword, max_results=5, first niche only.")
+        # Bound the daily caps too, not just max_results. max_results only
+        # limits the search.list FALLBACK path; when influencers.club discovery
+        # is active it ignores max_results and fills the daily cap, so without
+        # this a --test run would discover, enrich, and push toward a full
+        # 30-row day (real credits, real quota, real rows) instead of a cheap
+        # smoke test. A caller who wants a specific size can still pass
+        # --daily-cap, which takes precedence.
+        if args.daily_cap is None:
+            DAILY_QUALIFIED_CAP = 2
+            DAILY_FLAGGED_CAP = 1
+        logger.info(
+            "Running in --test mode: first niche only, max_results=5, capped to "
+            "%d qualified / %d flagged (bounds discovery spend too).",
+            DAILY_QUALIFIED_CAP, DAILY_FLAGGED_CAP,
+        )
         first_niche_name = next(iter(NICHES))
         first_niche = NICHES[first_niche_name]
         test_niches = {first_niche_name: {**first_niche, "keywords": first_niche["keywords"][:1]}}

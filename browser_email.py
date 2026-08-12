@@ -1,5 +1,5 @@
 """
-Step 4 of the email chain: follows a YouTube channel's public external
+Step 5 of the email chain: follows a YouTube channel's public external
 LINK LIST looking for a contact address on the creator's own site.
 
 Do NOT add a country lookup here. `aboutChannelViewModel.country` exists

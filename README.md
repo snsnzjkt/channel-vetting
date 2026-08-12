@@ -126,13 +126,15 @@ budget.
    > empty, it pages back through `EMAIL_DEEP_SCAN_PAGES` (default 2)
    > pages of *older* uploads and applies the same repeat test across
    > everything scanned so far, at 2 quota units per page. If that also
-   > comes up empty and `USE_PLAYWRIGHT_STEALTH=true`, a last-resort
+   > comes up empty and `INFLUENCERS_API_KEY` is set, it asks
+   > influencers.club to resolve the channel ID to a validated address —
+   > one HTTP call, and nothing is billed when no address is found. If
+   > that misses too and `USE_PLAYWRIGHT_STEALTH=true`, a last-resort
    > lookup follows the channel's public external link list in Playwright
    > with stealth enabled — each link that isn't a social/platform domain,
    > then that site's `/contact` page — and applies the same pattern.
-   > There is no paid email-finder fallback (Hunter.io and Modash have
-   > been removed). Often still blank; treat as a bonus signal, not a
-   > guarantee.
+   > Hunter.io and Modash have been removed and are not coming back.
+   > Often still blank; treat as a bonus signal, not a guarantee.
 
    > **Optional readable counts**: `Subscriber Count` and `Avg Views` stay
    > as Number fields (so you can still sort/filter numerically) but you
@@ -263,6 +265,9 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `EMAIL_DEEP_SCAN_PAGES` | 2 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
 | `LONGFORM_SCAN_MAX_PAGES` | 3 | Extra pages of older uploads paged through to confirm 30+ non-Shorts videos, and only for channels the newest 50 left short of that bar (2 quota units per page; 0 judges on the newest 50 alone) |
 | `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see "Browser path" below). The search-zone filter does not depend on it. `USE_CLOAKBROWSER` is still accepted as an alias |
+| `INFLUENCERS_API_KEY` | _(unset)_ | Enables email chain step 4 (influencers.club enrich-by-handle). Unset means the step is skipped entirely — the pipeline runs fine without it |
+| `INFLUENCERS_BASE_URL` | `https://api-dashboard.influencers.club` | API host override |
+| `INFLUENCERS_MAX_LOOKUPS_PER_RUN` | 100 | Hard cap on step-4 lookups per run, bounding credit spend. Only channels the free steps missed consume one, and a lookup that finds no address is not billed |
 
 ### 5. Edit your keywords / niches
 
@@ -326,6 +331,7 @@ python main.py
 | `scoring.py` | Fake-follower risk heuristic + weighted overall score + `qualify()` (channel age) |
 | `search_zones.py` | Allowed-country tables (US/CA/UK/EU/AU, minus Ireland) + `zone_verdict()` |
 | `do_not_contact.py` | DO NOT CONTACT suppression list — fetched fresh every run, fails closed |
+| `influencers.py` | influencers.club enrich-by-handle lookup (step 4 of the email chain) |
 | `browser_email.py` | Playwright link-list email fallback (last step of the email chain) |
 | `prospect_day.py` | Single source of truth for "what day is it" for the daily caps (`PROSPECT_DAY_TZ`) |
 | `airtable_client.py` | Dedupe check, create/update records, `count_added_today()` (per-table, one table per niche) |

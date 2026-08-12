@@ -78,6 +78,12 @@ jobs:
       AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
       AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
       YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      # Email chain step 4. Absent, InfluencersClient.from_config() returns
+      # an inert client and the step silently does nothing — which on CI is
+      # exactly where it matters most, since the browser step below is the
+      # one degraded by datacenter IP reputation. An unset secret is still a
+      # valid configuration (the step just skips), so this is not gated.
+      INFLUENCERS_API_KEY: ${{ secrets.INFLUENCERS_API_KEY }}
       # ON for scheduled runs, and overridable on a manual dispatch.
       #
       # `github.event.inputs` is NULL on a schedule event — a workflow_dispatch

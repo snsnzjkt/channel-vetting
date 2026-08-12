@@ -71,10 +71,19 @@ def test_days_back_cli_override_in_test_mode(monkeypatch):
 
     captured = {}
     monkeypatch.setattr(main, "run", lambda **kw: captured.update(kw))
+    # --test now also bounds the daily caps (so a test run can't discover
+    # toward a full 30-row day of real credits/quota). main() reassigns these
+    # module globals, which would otherwise LEAK into later tests — snapshot
+    # them through monkeypatch so they're restored when this test ends.
+    monkeypatch.setattr(main, "DAILY_QUALIFIED_CAP", main.DAILY_QUALIFIED_CAP)
+    monkeypatch.setattr(main, "DAILY_FLAGGED_CAP", main.DAILY_FLAGGED_CAP)
     monkeypatch.setattr(sys, "argv", ["main.py", "--test", "--days-back", "43"])
 
     main.main()
     assert captured["days_back"] == 43
+    # --test with no explicit --daily-cap bounds the run so discovery stays cheap.
+    assert main.DAILY_QUALIFIED_CAP == 2
+    assert main.DAILY_FLAGGED_CAP == 1
 
 
 def test_days_back_defaults_to_discovery_days_back_when_omitted(monkeypatch):

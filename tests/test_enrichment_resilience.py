@@ -349,18 +349,33 @@ def test_videos_list_non_json_200_returns_none(monkeypatch):
 # gate on "every recent video passed 10k", which the average can't answer.
 
 
-def _videos_payload_with_views(view_counts):
-    return {
-        "items": [
-            {
-                "id": f"v{i}",
-                "snippet": {"description": ""},
-                "statistics": {"viewCount": str(vc), "likeCount": "1", "commentCount": "1"},
-                "contentDetails": {"duration": "PT10M"},
-            }
-            for i, vc in enumerate(view_counts)
-        ]
-    }
+# Old enough for its view count to have settled (well past PERFORMANCE_MATURITY_DAYS).
+_SETTLED = "2020-01-01T00:00:00Z"
+
+
+def _recent_iso(days_ago):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _videos_payload_with_views(view_counts, published_ats=None):
+    """view_counts entries may be None to omit viewCount entirely (an
+    unreported count). published_ats defaults every video to a settled date."""
+    if published_ats is None:
+        published_ats = [_SETTLED] * len(view_counts)
+    items = []
+    for i, (vc, pa) in enumerate(zip(view_counts, published_ats)):
+        stats = {"likeCount": "1", "commentCount": "1"}
+        if vc is not None:
+            stats["viewCount"] = str(vc)
+        items.append({
+            "id": f"v{i}",
+            "snippet": {"description": "", "publishedAt": pa},
+            "statistics": stats,
+            "contentDetails": {"duration": "PT10M"},
+        })
+    return {"items": items}
 
 
 def test_min_views_is_the_lowest_video_in_the_performance_window(monkeypatch):
@@ -384,6 +399,52 @@ def test_min_views_exposes_a_weak_video_the_average_hides(monkeypatch):
     result = enrichment.get_recent_video_performance("UC1", "PL1")
     assert result["avg_views"] > 10_000   # the mean clears the niche floor
     assert result["min_views"] == 900     # ...but one video is well under it
+
+
+def test_min_views_ignores_a_too_new_video(monkeypatch):
+    """A just-posted upload is still climbing toward 10k; it must not sink the
+    per-video floor. The 900-view video is 3 days old, so min skips it."""
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(3)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [50_000, 30_000, 900],
+            published_ats=[_SETTLED, _SETTLED, _recent_iso(3)],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["min_views"] == 30_000   # the fresh 900 is excluded
+
+
+def test_min_views_ignores_a_video_with_no_reported_view_count(monkeypatch):
+    """An absent viewCount is unknown, not 0 — it must not force min to 0 and
+    drop the channel."""
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(3)),
+        videos=_Resp(200, _videos_payload_with_views([50_000, None, 30_000])),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["min_views"] == 30_000   # the None-view video is excluded
+
+
+def test_min_views_is_none_when_no_window_video_has_settled(monkeypatch):
+    """A channel that just posted its whole newest window has no judgeable
+    per-video views yet — min_views is None (unknown), so the floor is skipped
+    rather than the channel dropped."""
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(2)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [900, 1_200], published_ats=[_recent_iso(2), _recent_iso(5)],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["min_views"] is None
+    assert result["avg_views"] > 0   # avg still computed over the window
 
 
 def test_deep_scan_non_json_200_returns_empty_string(monkeypatch):

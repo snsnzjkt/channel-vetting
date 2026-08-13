@@ -49,3 +49,12 @@ def test_unknown_or_unparseable_returns_none(dates):
     from enrichment import days_since_last_upload
 
     assert days_since_last_upload(dates) is None
+
+
+def test_a_bare_date_timestamp_is_handled_not_crashed():
+    """A date-only string (no time/offset) parses tz-NAIVE; the helper must
+    still diff it against an aware 'now' without raising a TypeError."""
+    from enrichment import days_since_last_upload
+
+    days = days_since_last_upload(["2020-01-01"])
+    assert days is not None and days > 365

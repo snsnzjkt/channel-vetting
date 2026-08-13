@@ -422,3 +422,60 @@ def test_a_channel_clearing_the_new_activity_gates_too_is_kept():
 )
 def test_new_activity_gate_precedence(overrides, expected):
     assert drop_reason(**overrides) == expected
+
+
+# --- wiring: process_candidate feeds the three signals into the gate -------
+# Unit tests above pin pre_push_drop_reason with scalars; these pin that
+# process_candidate actually maps performance -> the right gate arguments, so
+# a future mis-wire (e.g. min_views swapped with days_since) can't pass unseen.
+
+
+def _passing_perf(**overrides):
+    perf = {
+        "avg_views": 50_000, "min_views": 50_000, "avg_engagement_rate": 1.0,
+        "shorts_only": False, "content_language": "en",
+        # Recent, single date: passes recency; <2 dates -> cadence unknown.
+        "upload_dates": ["2026-08-01T00:00:00Z"],
+        "longform_count": 30, "duration_sample_size": 50, "next_page_token": "",
+    }
+    perf.update(overrides)
+    return perf
+
+
+def _process_candidate(monkeypatch, perf):
+    import main
+
+    stats = {
+        "channel_id": "UC1", "channel_title": "Clean Channel", "handle": "chan",
+        "description": "", "published_at": "2020-01-01T00:00:00Z",
+        "subscriber_count": 25_000, "uploads_playlist_id": "PL1",
+        "business_email": "", "video_count": 500, "country": "US",
+    }
+    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: stats)
+    monkeypatch.setattr(main, "get_recent_video_performance", lambda *a, **k: perf)
+    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+
+    class _NullBlocklist:
+        handles: set = set()
+
+        def match(self, handle="", email="", name=""):
+            return ""
+
+    return main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "Clean Channel", "matched_keywords": []},
+        {}, _NullBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+    )
+
+
+def test_process_candidate_drops_a_channel_with_a_weak_recent_video(monkeypatch):
+    record, reason = _process_candidate(monkeypatch, _passing_perf(min_views=500))
+    assert record is None
+    assert reason == "video_below_view_minimum"
+
+
+def test_process_candidate_drops_a_stale_channel(monkeypatch):
+    record, reason = _process_candidate(
+        monkeypatch, _passing_perf(upload_dates=["2020-01-01T00:00:00Z"]))
+    assert record is None
+    assert reason == "stale_channel"

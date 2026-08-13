@@ -25,3 +25,12 @@ def test_unparseable_returns_none(bad):
     from enrichment import channel_age_months
 
     assert channel_age_months(bad) is None
+
+
+def test_a_bare_date_publishedat_is_handled_not_crashed():
+    """A date-only publishedAt parses tz-naive; age must compute without
+    raising a TypeError against an aware 'now'."""
+    from enrichment import channel_age_months
+
+    age = channel_age_months("2020-01-01")
+    assert age is not None and age > 12

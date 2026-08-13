@@ -230,7 +230,13 @@ def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
 
     monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
     monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
-    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "creator@blocked.example")
+    # process_candidate resolves the email via resolve_email_with_source now;
+    # the None flag keeps the no-social drop from pre-empting the blocklist
+    # checkpoint this test is exercising.
+    monkeypatch.setattr(
+        main, "resolve_email_with_source",
+        lambda *a, **k: ("creator@blocked.example", "test-source", None),
+    )
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
     monkeypatch.setattr(main, "push_record", lambda t, r: pytest.fail("blocked candidate must never be pushed"))
 
@@ -248,7 +254,7 @@ def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
     assert result == {"qualified": 0, "flagged": 0, "skipped": 1, "pushed_ids": set()}
 
 
-# --- M13: resolve_email must be called WITH the scraper -------------------
+# --- M13: the email chain must be called WITH the scraper -----------------
 
 def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
     import main
@@ -258,11 +264,13 @@ def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
 
     def fake_resolve_email(stats, performance, scraper=None, enricher=None):
         received["scraper"] = scraper
-        return ""
+        return "", "", None
 
     monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
     monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
-    monkeypatch.setattr(main, "resolve_email", fake_resolve_email)
+    # process_candidate calls resolve_email_with_source (it needs the
+    # link-list-presence flag for the no-social drop), not resolve_email.
+    monkeypatch.setattr(main, "resolve_email_with_source", fake_resolve_email)
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
@@ -270,10 +278,58 @@ def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
 
     main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, sentinel_scraper)
 
-    # If the scraper argument were dropped, resolve_email's default
-    # (scraper=None) would silently swallow this — the browser step goes
-    # dead with no signal, which is exactly why this must be pinned.
+    # If the scraper argument were dropped, the chain's default (scraper=None)
+    # would silently swallow this — the browser step goes dead with no signal,
+    # which is exactly why this must be pinned.
     assert received.get("scraper") is sentinel_scraper
+
+
+# --- no-social drop: an empty external link list is discarded --------------
+
+def test_process_candidate_drops_a_channel_with_no_external_links(monkeypatch):
+    """
+    A channel whose About link list was read and came back EMPTY (no website,
+    no social profile) AND that yielded no contact email has no outreach
+    surface beyond YouTube — process_candidate must drop it, not push it.
+    """
+    import main
+
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
+    # has_external_links=False is the positive "no presence" signal.
+    monkeypatch.setattr(
+        main, "resolve_email_with_source", lambda *a, **k: ("", "", False),
+    )
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+
+    niche_config = {"min_avg_views": 0, "min_channel_age_months": None}
+    candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
+
+    record, reason = main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
+    assert record is None
+    assert reason == main.DROP_NO_SOCIAL
+
+
+def test_process_candidate_keeps_a_channel_when_link_presence_is_unknown(monkeypatch):
+    """
+    None (the link list was never read — browser off, or an address was found
+    at an earlier step) must NOT drop: absent data never disqualifies, the
+    same rule the zone check follows.
+    """
+    import main
+
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
+    monkeypatch.setattr(
+        main, "resolve_email_with_source", lambda *a, **k: ("", "", None),
+    )
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+
+    niche_config = {"min_avg_views": 0, "min_channel_age_months": None}
+    candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
+
+    record, reason = main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
+    assert record is not None, "unknown link presence must be kept, not dropped"
 
 
 # --- Bonus: the two niche thresholds must not be crossed at the call site --
@@ -287,7 +343,7 @@ def _run_process_candidate(monkeypatch, niche_config, *, avg_views, age, **stat_
         lambda cid, pl: _stub_performance(avg_views=avg_views),
     )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: age)
-    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "")
+    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
@@ -401,7 +457,7 @@ def test_the_language_region_subtag_resolves_a_country_the_api_left_blank(monkey
         lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-IN"),
     )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "")
+    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
@@ -430,7 +486,7 @@ def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
         lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-US"),
     )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: "")
+    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}

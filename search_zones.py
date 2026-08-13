@@ -294,4 +294,8 @@ def description_location_outside_zone(description: str | None) -> str:
     if not description:
         return ""
     match = _DESC_LOCATION_PATTERN.search(description)
-    return KNOWN_OUTSIDE_COUNTRY_NAMES[match.group(1).strip().lower()] if match else ""
+    # group(1) is captured from an alternation of already-normalized keys, with
+    # the \b anchors outside the capture, so it can't carry surrounding
+    # whitespace — only case differs (the pattern is IGNORECASE), so .lower()
+    # is enough to hit the (lowercase) KNOWN_OUTSIDE_COUNTRY_NAMES key.
+    return KNOWN_OUTSIDE_COUNTRY_NAMES[match.group(1).lower()] if match else ""

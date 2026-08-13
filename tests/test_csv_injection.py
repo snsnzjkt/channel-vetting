@@ -221,7 +221,11 @@ def _build_record(monkeypatch, *, channel_title="Chan", email="", content_langua
         lambda cid, pl: _stub_performance(content_language=content_language),
     )
     monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email", lambda *a, **k: email)
+    # process_candidate calls resolve_email_with_source (it needs the
+    # link-list-presence flag); None here keeps the no-social drop dormant.
+    monkeypatch.setattr(
+        main, "resolve_email_with_source", lambda *a, **k: (email, "test-source", None)
+    )
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": channel_title, "matched_keywords": []}
@@ -401,7 +405,7 @@ def test_backfill_neutralises_a_formula_email(monkeypatch):
     })
     monkeypatch.setattr(
         backfill, "resolve_email_with_source",
-        lambda *a, **k: ('=HYPERLINK("http://evil.tld","x")', "browser"),
+        lambda *a, **k: ('=HYPERLINK("http://evil.tld","x")', "browser", None),
     )
     monkeypatch.setattr(backfill, "push_record", lambda table, fields: pushed.append(fields) or True)
     monkeypatch.setattr(backfill.time, "sleep", lambda *a, **k: None)
@@ -429,7 +433,7 @@ def test_backfill_leaves_an_ordinary_email_byte_identical(monkeypatch):
     })
     monkeypatch.setattr(
         backfill, "resolve_email_with_source",
-        lambda *a, **k: ("admin@avnirvana.com", "about"),
+        lambda *a, **k: ("admin@avnirvana.com", "about", None),
     )
     monkeypatch.setattr(backfill, "push_record", lambda table, fields: pushed.append(fields) or True)
     monkeypatch.setattr(backfill.time, "sleep", lambda *a, **k: None)

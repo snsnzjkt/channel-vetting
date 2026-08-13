@@ -73,6 +73,17 @@ def _normalize_name(raw: str) -> str:
     return re.sub(r"\s+", " ", (raw or "").strip()).casefold()
 
 
+def _handle_key(handle: str) -> str:
+    """
+    Normalize a handle for index lookup. Prefers enrichment.normalize_handle
+    (which understands a full channel URL), falling back to a bare
+    strip/@-trim/lowercase for a plain handle string that isn't a URL. Both
+    sites that key a handle go through this, so the two lookup paths
+    (ExternalIndex.match and match_external's dict branch) can't drift apart.
+    """
+    return normalize_handle(handle) or (handle or "").strip().lstrip("@").lower()
+
+
 @dataclass
 class ExternalIndex:
     """
@@ -91,7 +102,7 @@ class ExternalIndex:
 
     def match(self, handle: str = "", name: str = "") -> str:
         """The source table a candidate is already tracked in, or ""."""
-        h = normalize_handle(handle) or (handle or "").strip().lstrip("@").lower()
+        h = _handle_key(handle)
         if h and h in self.handles:
             return self.handles[h]
         n = _normalize_name(name)
@@ -127,7 +138,7 @@ def match_external(external, handle: str = "", name: str = "") -> str:
     """
     if isinstance(external, ExternalIndex):
         return external.match(handle=handle, name=name)
-    h = normalize_handle(handle) or (handle or "").strip().lstrip("@").lower()
+    h = _handle_key(handle)
     return external.get(h, "") if h else ""
 
 

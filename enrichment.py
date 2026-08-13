@@ -289,6 +289,25 @@ def find_repeated_email(video_descriptions: list[str]) -> str:
 DAYS_PER_MONTH = 30.44
 
 
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    """
+    An ISO 8601 timestamp (YouTube's trailing-'Z' form) as a tz-aware
+    datetime, or None when it is missing or unparseable.
+
+    The single home of the tolerant-parse rule, shared by
+    channel_age_months() and days_since_last_upload() so the two can't drift
+    — and so "absent/unreadable data is unknown, never a negative verdict" is
+    decided in one place.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        logger.info("Unparseable ISO timestamp %r — treating as unknown.", value)
+        return None
+
+
 def channel_age_months(published_at: str | None) -> float | None:
     """
     Age of a channel in months, from the ISO 8601 timestamp channels.list
@@ -298,12 +317,8 @@ def channel_age_months(published_at: str | None) -> float | None:
     treat None as "unknown" and NOT as "new", since absent data is not
     evidence against a channel.
     """
-    if not published_at:
-        return None
-    try:
-        created = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        logger.info("Unparseable publishedAt %r — treating channel age as unknown.", published_at)
+    created = _parse_iso_timestamp(published_at)
+    if created is None:
         return None
     delta_days = (datetime.now(timezone.utc) - created).days
     return delta_days / DAYS_PER_MONTH
@@ -322,14 +337,7 @@ def days_since_last_upload(upload_dates: list[str]) -> float | None:
     treat None as "unknown" and NOT as "stale", the same rule
     channel_age_months() follows for an unknown publishedAt.
     """
-    parsed = []
-    for d in upload_dates:
-        if not d:
-            continue
-        try:
-            parsed.append(datetime.fromisoformat(d.replace("Z", "+00:00")))
-        except (ValueError, AttributeError):
-            continue
+    parsed = [dt for dt in (_parse_iso_timestamp(d) for d in upload_dates) if dt is not None]
     if not parsed:
         return None
     return (datetime.now(timezone.utc) - max(parsed)).days
@@ -643,9 +651,10 @@ def get_recent_video_performance(
         return None
 
     avg_views = total_views / performance_count
-    # The weakest video in the window. None only if performance_count is 0,
-    # which returned above — so this is always a real number here.
-    min_views = min(performance_views) if performance_views else None
+    # The weakest video in the window. performance_count > 0 is guaranteed
+    # above (the function already returned when it was 0), so performance_views
+    # is non-empty here.
+    min_views = min(performance_views)
     avg_engagement_rate = (total_engagements / total_views * 100) if total_views > 0 else 0.0
 
     return {

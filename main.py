@@ -263,6 +263,13 @@ ENGLISH_LANGUAGE_PREFIX = "en"
 # (enrichment's "min_views"), so it means "every recent video passed 10k", not
 # "the average did". Kept alongside min_avg_views, not replacing it, so a niche
 # can still be given its own average bar.
+#
+# This mirrors the 10,000 that both niches' per-niche min_avg_views currently
+# sit at. If a niche's min_avg_views is ever un-unified (see the Lifestyle Sofa
+# note in NICHES, which anticipates a return to 2,000), revisit whether this
+# shared per-video floor should track that niche's bar instead of staying a
+# fixed 10,000 — a per-video floor 5x a niche's own average bar would be
+# incoherent.
 MIN_VIEWS_PER_VIDEO = 10_000
 
 # A live channel, applied to BOTH niches: at least this many uploads per year,

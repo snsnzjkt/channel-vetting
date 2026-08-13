@@ -6,8 +6,9 @@ Does NOT re-run discovery (no search.list calls, no new candidates) — it
 re-enriches channels already tracked (channels.list + playlistItems.list +
 videos.list, ~3 quota units per channel), then re-runs main.py's full
 email fallback chain: the two free description-based steps, the older-
-uploads scan (2 more units per extra page), and an optional Playwright +
-stealth pass over the public About page.
+uploads scan (2 more units per extra page), the influencers.club lookup,
+and an optional Playwright + stealth pass over the channel's public
+external link list.
 
 --limit caps how many missing-email records are processed per niche, so
 you can run this in controlled batches instead of all at once.
@@ -148,7 +149,7 @@ def main() -> None:
         "--use-cloakbrowser",
         dest="use_playwright_stealth",
         action="store_true",
-        help="After the free text-based steps, try the channel About page in Playwright + stealth.",
+        help="After the free text-based steps, follow the channel's external link list in Playwright + stealth.",
     )
     args = parser.parse_args()
     print(f"Playwright+stealth fallback: {'ENABLED' if args.use_playwright_stealth else 'DISABLED'}\n")

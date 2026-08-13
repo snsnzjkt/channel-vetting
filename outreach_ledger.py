@@ -96,8 +96,13 @@ STATE_MAYBE_SENT = "MaybeSent"   # unknown outcome — never auto-retried
 
 SEND_STATES = frozenset({STATE_CLAIMED, STATE_SENT, STATE_NOT_SENT, STATE_MAYBE_SENT})
 
-# States that mean "do not send again without a human deciding to".
-BLOCKING_STATES = frozenset({STATE_SENT, STATE_MAYBE_SENT, STATE_CLAIMED})
+# There is deliberately NO set of "blocking" states here. classify_existing()
+# below decides that with an ordered if-chain, and a flat set cannot express
+# what the chain does: each state maps to a distinct REASON_*, and the order is
+# load-bearing (Sent outranks MaybeSent outranks Claimed). A BLOCKING_STATES
+# set sat here and was read by nothing — the dangerous kind of dead code, since
+# adding a state to it looks like blocking that state while changing no
+# behaviour. Add new blocking states to the chain, not to a set.
 
 # Refusal reasons. Surfaced verbatim in the run summary, so they are stable
 # identifiers rather than prose.

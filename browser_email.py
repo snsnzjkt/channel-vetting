@@ -47,7 +47,6 @@ from enrichment import THIRD_PARTY_DOMAINS, extract_business_email
 logger = logging.getLogger(__name__)
 
 NAV_TIMEOUT_MS = 30000
-EVAL_TIMEOUT_MS = 5000
 # How long to wait for a JS-rendered page to paint something readable.
 # Short on purpose: this runs per link per candidate, and a page with no
 # text after 8s is not going to yield an address.

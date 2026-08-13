@@ -12,8 +12,8 @@ CLAUDE.md
 \superpowers
 docs
 
-# cloakbrowser-mcp is run via `npx` (see .mcp.json); these should never
-# appear, but keep them out if a local npm install is ever done instead.
+# This is a pure-Python project with no package.json. Keep npm artefacts out
+# in case a stray install ever drops them here.
 node_modules/
 package-lock.json
 .gstack/

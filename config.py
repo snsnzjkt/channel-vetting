@@ -142,11 +142,11 @@ LONGFORM_SCAN_MAX_PAGES = int(os.getenv("LONGFORM_SCAN_MAX_PAGES", 3))
 # "business inquiries" address.
 USE_PLAYWRIGHT_STEALTH = os.getenv(
 	"USE_PLAYWRIGHT_STEALTH",
+	# The old name, still honoured so an existing .env keeps working. This
+	# fallback IS the whole back-compat surface — nothing imports a
+	# module-level USE_CLOAKBROWSER alias, so don't add one back.
 	os.getenv("USE_CLOAKBROWSER", "false"),
 ).lower() == "true"
-
-# Backward-compatible alias for existing env files and workflows.
-USE_CLOAKBROWSER = USE_PLAYWRIGHT_STEALTH
 
 # --- influencers.club (email chain step 4) ---
 # A creator-data platform whose enrich-by-handle endpoint resolves a

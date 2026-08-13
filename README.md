@@ -365,7 +365,8 @@ Setup:
 python -m pytest
 ```
 
-Runs the full suite in `tests/` (521 tests at time of writing) covering
+Runs the full suite in `tests/` (~570 tests; for the exact count run
+`python -m pytest --collect-only -q | tail -1`) covering
 discovery windowing/early-stop, the influencers.club discovery source
 (pagination, credit budget, handle→channel-ID bridging, and its DO NOT
 CONTACT / already-tracked exclusion), the pre-push gate (view floor,

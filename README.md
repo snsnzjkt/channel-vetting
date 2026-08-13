@@ -44,10 +44,15 @@ weak day can't flood a table with below-criteria channels:
    per-call rather than per-video.
 5. **Hard requirements** (`main.pre_push_drop_reason`, `search_zones.py`) —
    a candidate is **discarded**, with no row written, unless it clears all
-   of: 10,000+ average views (both niches), 30+ public videos, and a
-   location inside the allowed search zones — **US, Canada, UK, Europe,
-   Australia; Ireland excluded**. Dead channels and Shorts-only channels
-   are dropped here too. Location comes from the channel's own `country`
+   of: 10,000+ average views (both niches), **each of the last 10 videos
+   over 10,000 views**, 30+ public videos, **at least 10 uploads a year**,
+   **a most-recent upload inside a rolling 12 months**, and a location
+   inside the allowed search zones — **US, Canada, UK, Europe, Australia;
+   Ireland excluded**. Dead channels and Shorts-only channels are dropped
+   here too. The per-video, cadence, and recency floors read the same
+   already-fetched last-10 window as the average, so they cost no extra
+   quota; an unmeasurable one (too thin a window, no parseable upload date)
+   is *kept*, not dropped. Location comes from the channel's own `country`
    setting (85% of channels in the live tables set it), falling back to the
    region subtag of its content language (`en-GB` → GB) for the rest. A
    channel that declares neither is *kept*, not dropped — absent data
@@ -385,8 +390,10 @@ calls or real credentials are needed — everything is mocked.
   flagged budget goes unused.
 - Per-niche thresholds (`min_avg_views`, `min_channel_age_months`) live on
   each `NICHES` entry in `main.py`, not in `.env`.
-- The two shared hard requirements are elsewhere: `MIN_VIDEO_COUNT` (30) at
-  the top of `main.py`, and the allowed countries in `search_zones.py`
+- The shared hard requirements are elsewhere: at the top of `main.py`,
+  `MIN_VIDEO_COUNT` (30), `MIN_VIEWS_PER_VIDEO` (10,000 per video across the
+  last 10), `MIN_UPLOADS_PER_YEAR` (10), and `MAX_DAYS_SINCE_LAST_UPLOAD`
+  (365); and the allowed countries in `search_zones.py`
   (`ALLOWED_COUNTRY_CODES`, plus the name tables the About-panel lookup
   uses). Widening "Europe" to include Russia, Belarus or Turkey is a
   one-line edit there — they're excluded by default and flagged in a

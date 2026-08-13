@@ -25,6 +25,7 @@ from enrichment import (
     get_recent_video_performance,
     calc_upload_frequency,
     channel_age_months,
+    days_since_last_upload,
     scan_older_videos_for_email,
     count_longform_in_older_videos,
 )
@@ -255,14 +256,40 @@ MIN_LONGFORM_VIDEO_COUNT = 30
 # "en" would silently blind the zone filter for exactly those channels.
 ENGLISH_LANGUAGE_PREFIX = "en"
 
+# Every video in the newest-10 performance window must clear this, applied to
+# BOTH niches. This is the per-video reading of "min 10k+ views" — STRICTER
+# than the niche's min_avg_views floor, which one strong upload can carry over
+# the line while other recent videos flopped. Gated on the window's MINIMUM
+# (enrichment's "min_views"), so it means "every recent video passed 10k", not
+# "the average did". Kept alongside min_avg_views, not replacing it, so a niche
+# can still be given its own average bar.
+MIN_VIEWS_PER_VIDEO = 10_000
+
+# A live channel, applied to BOTH niches: at least this many uploads per year,
+# read from the sampled window's cadence (enrichment.calc_upload_frequency,
+# videos/month, annualised). A slower channel isn't publishing often enough to
+# be worth a placement. Unknown cadence (fewer than two sampled uploads) is
+# passed as None and never disqualifies, the same rule as an unknown age.
+MIN_UPLOADS_PER_YEAR = 10
+
+# Still-active: the most recent sampled upload must be within this many days
+# (a rolling ~12 months from today, NOT the calendar year). A channel that
+# went quiet a year ago is not one to approach, however strong its back
+# catalogue. An unknown last-upload date (nothing parseable in the window) is
+# passed as None and never disqualifies.
+MAX_DAYS_SINCE_LAST_UPLOAD = 365
+
 DROP_DEAD_CHANNEL = "dead_channel"
 DROP_SHORTS_ONLY = "shorts_only"
 DROP_BELOW_VIEW_MINIMUM = "below_view_minimum"
+DROP_VIDEO_BELOW_VIEW_MINIMUM = "video_below_view_minimum"
 DROP_TOO_FEW_VIDEOS = "too_few_videos"
 DROP_TOO_FEW_LONGFORM = "too_few_longform_videos"
 DROP_NOT_ENGLISH = "not_english"
 DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
 DROP_EXCLUDED_TOPIC = "excluded_topic"
+DROP_UPLOAD_CADENCE_TOO_LOW = "upload_cadence_too_low"
+DROP_STALE_CHANNEL = "stale_channel"
 
 # Whole categories a brand-partnership run must never surface, however well a
 # channel otherwise fits a niche: political commentary, ASMR, and firearms /
@@ -401,6 +428,9 @@ def pre_push_drop_reason(
     min_avg_views: float = 0,
     video_count: int | None = None,
     content_language: str | None = None,
+    min_views: int | None = None,
+    uploads_per_year: float | None = None,
+    days_since_last_upload: float | None = None,
 ) -> str | None:
     """
     Why this candidate should never reach Airtable, or None to continue.
@@ -426,6 +456,14 @@ def pre_push_drop_reason(
     `content_language` defaults to None, which fails the English check. That
     default is deliberate: a caller that forgets to pass it gets a loud
     empty result rather than silently skipping the gate.
+
+    `min_views`, `uploads_per_year` and `days_since_last_upload` are the three
+    activity/quality floors (each of the newest 10 videos over 10k, at least
+    10 uploads a year, a last upload inside a rolling 12 months). They follow
+    the video_count rule, NOT the content_language one: each defaults to None
+    and a None never disqualifies, because "we couldn't measure it" (an empty
+    window, fewer than two dated uploads, no parseable timestamp) is not
+    evidence against the channel. process_candidate supplies real values.
     """
     if shorts_only:
         return DROP_SHORTS_ONLY
@@ -435,6 +473,15 @@ def pre_push_drop_reason(
         return DROP_TOO_FEW_VIDEOS
     if (avg_views or 0) < min_avg_views:
         return DROP_BELOW_VIEW_MINIMUM
+    # The per-video floor sits right after the niche's own average floor: both
+    # are "views" criteria, and reporting the niche's own bar first keeps the
+    # log reading in the reviewer's terms.
+    if min_views is not None and min_views < MIN_VIEWS_PER_VIDEO:
+        return DROP_VIDEO_BELOW_VIEW_MINIMUM
+    if uploads_per_year is not None and uploads_per_year < MIN_UPLOADS_PER_YEAR:
+        return DROP_UPLOAD_CADENCE_TOO_LOW
+    if days_since_last_upload is not None and days_since_last_upload > MAX_DAYS_SINCE_LAST_UPLOAD:
+        return DROP_STALE_CHANNEL
     if (subscriber_count or 0) < JUNK_MIN_SUBSCRIBERS and (avg_views or 0) < JUNK_MIN_AVG_VIEWS:
         return DROP_DEAD_CHANNEL
     return None
@@ -754,6 +801,19 @@ def process_candidate(
         logger.info("Skipping %s — no accessible recent video performance data.", stats.get("channel_title"))
         return None, "unreachable"
 
+    # Activity/quality signals for the gate, all free from data already
+    # fetched. upload_freq (videos/month over the sampled window) is computed
+    # HERE, before the gate, so the cadence check can read it — and it is
+    # reused unchanged for the Overall Score and the "Upload Frequency" column
+    # below, never recomputed.
+    upload_dates = performance.get("upload_dates", [])
+    upload_freq = calc_upload_frequency(upload_dates)
+    # None (not 0) when the window is too thin to estimate a cadence — fewer
+    # than two dated uploads — so an unmeasurable channel isn't dropped on a
+    # made-up zero. See pre_push_drop_reason's None rule.
+    uploads_per_year = upload_freq * 12 if len(upload_dates) >= 2 else None
+    days_since = days_since_last_upload(upload_dates)
+
     # Pre-push gate, placed before scoring and before the email chain so a
     # discarded candidate costs no browser session and no deep-scan quota.
     drop_reason = pre_push_drop_reason(
@@ -763,13 +823,20 @@ def process_candidate(
         min_avg_views=niche_config["min_avg_views"],
         video_count=stats.get("video_count"),
         content_language=performance.get("content_language"),
+        min_views=performance.get("min_views"),
+        uploads_per_year=uploads_per_year,
+        days_since_last_upload=days_since,
     )
     if drop_reason:
         logger.info(
-            "Dropping %s before push — %s (%s subs, %s avg views, %s videos, lang %s).",
+            "Dropping %s before push — %s (%s subs, %s avg views, min %s, %s videos, "
+            "%s uploads/yr, %s days since upload, lang %s).",
             stats.get("channel_title"), drop_reason,
             stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
-            stats.get("video_count"), performance.get("content_language") or "unset",
+            performance.get("min_views"), stats.get("video_count"),
+            round(uploads_per_year, 1) if uploads_per_year is not None else "unknown",
+            days_since if days_since is not None else "unknown",
+            performance.get("content_language") or "unset",
         )
         return None, drop_reason
 
@@ -811,7 +878,8 @@ def process_candidate(
         )
         return None, drop_reason
 
-    upload_freq = calc_upload_frequency(performance["upload_dates"])
+    # upload_freq was computed once above the pre-push gate (the cadence
+    # check needs it) and is reused here rather than recomputed.
     fake_risk = calc_fake_follower_risk(
         stats["subscriber_count"], performance["avg_views"], performance["avg_engagement_rate"]
     )

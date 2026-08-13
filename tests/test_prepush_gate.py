@@ -327,3 +327,98 @@ def test_gate_precedence_is_stable(overrides, expected):
     visible decision.
     """
     assert drop_reason(**overrides) == expected
+
+
+# --- the per-video view floor (each of the last 10 videos > 10k) ----------
+# Stricter than the niche average floor: a channel can average well over
+# 10,000 while one weak video in the window sits below it. Gates on the
+# MINIMUM per-video views across the performance window, not the mean.
+
+
+def test_drops_a_channel_with_a_video_below_the_per_video_floor():
+    assert drop_reason(min_views=9_999) == "video_below_view_minimum"
+
+
+def test_exactly_at_the_per_video_floor_is_kept():
+    from main import MIN_VIEWS_PER_VIDEO
+
+    assert MIN_VIEWS_PER_VIDEO == 10_000
+    assert drop_reason(min_views=10_000) is None
+
+
+def test_the_per_video_floor_catches_what_the_average_hides():
+    """A 50k average clears the niche floor, but one 500-view upload in the
+    window means not every recent video passed 10k."""
+    assert drop_reason(avg_views=50_000, min_views=500) == "video_below_view_minimum"
+
+
+def test_an_unknown_min_views_does_not_disqualify():
+    """
+    None means the caller didn't measure a per-video minimum (an empty
+    performance window is already caught upstream in enrichment), not that a
+    video underperformed. Absent data never disqualifies — same rule as
+    video_count.
+    """
+    assert drop_reason(min_views=None) is None
+
+
+# --- the upload-cadence floor (>= 10 uploads a year) ----------------------
+
+
+def test_drops_a_channel_that_uploads_too_rarely():
+    assert drop_reason(uploads_per_year=9) == "upload_cadence_too_low"
+
+
+def test_exactly_ten_uploads_a_year_is_kept():
+    from main import MIN_UPLOADS_PER_YEAR
+
+    assert MIN_UPLOADS_PER_YEAR == 10
+    assert drop_reason(uploads_per_year=10) is None
+
+
+def test_an_unknown_cadence_does_not_disqualify():
+    """
+    Fewer than two sampled uploads can't yield a cadence, so the caller
+    passes None — unknown, not a failure.
+    """
+    assert drop_reason(uploads_per_year=None) is None
+
+
+# --- the recency floor (last upload within a rolling 12 months) -----------
+
+
+def test_drops_a_channel_whose_last_upload_is_over_a_year_old():
+    assert drop_reason(days_since_last_upload=366) == "stale_channel"
+
+
+def test_exactly_a_year_since_the_last_upload_is_kept():
+    from main import MAX_DAYS_SINCE_LAST_UPLOAD
+
+    assert MAX_DAYS_SINCE_LAST_UPLOAD == 365
+    assert drop_reason(days_since_last_upload=365) is None
+
+
+def test_an_unknown_last_upload_date_does_not_disqualify():
+    """No parseable upload timestamp is unknown, not stale."""
+    assert drop_reason(days_since_last_upload=None) is None
+
+
+def test_a_channel_clearing_the_new_activity_gates_too_is_kept():
+    assert drop_reason(min_views=10_000, uploads_per_year=52, days_since_last_upload=3) is None
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        # The niche's own average floor is reported before the per-video one.
+        ({"avg_views": 5_000, "min_views": 5_000}, "below_view_minimum"),
+        # Per-video views before the activity gates: it's a numbers criterion
+        # the reviewer set, cadence/recency are about the channel's rhythm.
+        ({"min_views": 9_999, "uploads_per_year": 1, "days_since_last_upload": 999},
+         "video_below_view_minimum"),
+        # Cadence before recency.
+        ({"uploads_per_year": 1, "days_since_last_upload": 999}, "upload_cadence_too_low"),
+    ],
+)
+def test_new_activity_gate_precedence(overrides, expected):
+    assert drop_reason(**overrides) == expected

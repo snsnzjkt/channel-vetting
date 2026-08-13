@@ -309,6 +309,32 @@ def channel_age_months(published_at: str | None) -> float | None:
     return delta_days / DAYS_PER_MONTH
 
 
+def days_since_last_upload(upload_dates: list[str]) -> float | None:
+    """
+    Days since the channel's most recent SAMPLED upload, from the ISO 8601
+    timestamps get_recent_video_performance() returns in `upload_dates`.
+
+    The NEWEST date is what counts, taken with max() rather than trusting the
+    list's order: a channel that posted after a long gap is active, and a
+    reordering of the sample must not change the verdict.
+
+    Returns None when the list is empty or nothing parses — callers must
+    treat None as "unknown" and NOT as "stale", the same rule
+    channel_age_months() follows for an unknown publishedAt.
+    """
+    parsed = []
+    for d in upload_dates:
+        if not d:
+            continue
+        try:
+            parsed.append(datetime.fromisoformat(d.replace("Z", "+00:00")))
+        except (ValueError, AttributeError):
+            continue
+    if not parsed:
+        return None
+    return (datetime.now(timezone.utc) - max(parsed)).days
+
+
 def _as_int(value, default: int = 0) -> int:
     """
     int() that can't take a run down over one channel's statistics block.
@@ -574,6 +600,10 @@ def get_recent_video_performance(
     total_views = 0
     total_engagements = 0  # likes + comments
     performance_count = 0
+    # Per-video views across the performance window, kept so the caller can
+    # gate on "every recent video passed a view floor" — a stricter test than
+    # avg_views, which one strong upload can carry over the line on its own.
+    performance_views = []
     video_languages = []
     video_descriptions = []
     durations = []
@@ -602,7 +632,9 @@ def get_recent_video_performance(
         # _as_int, not int(): likeCount and commentCount are routinely absent
         # (disabled likes/comments) and can arrive as an explicit null, which
         # int() would turn into a TypeError mid-loop.
-        total_views += _as_int(stats.get("viewCount"))
+        views = _as_int(stats.get("viewCount"))
+        total_views += views
+        performance_views.append(views)
         total_engagements += _as_int(stats.get("likeCount")) + _as_int(stats.get("commentCount"))
         performance_count += 1
 
@@ -611,10 +643,17 @@ def get_recent_video_performance(
         return None
 
     avg_views = total_views / performance_count
+    # The weakest video in the window. None only if performance_count is 0,
+    # which returned above — so this is always a real number here.
+    min_views = min(performance_views) if performance_views else None
     avg_engagement_rate = (total_engagements / total_views * 100) if total_views > 0 else 0.0
 
     return {
         "avg_views": avg_views,
+        # The lowest per-video views in the performance window — main's
+        # per-video floor gates on this so a single weak recent upload isn't
+        # hidden by a strong average.
+        "min_views": min_views,
         "avg_engagement_rate": avg_engagement_rate,
         "upload_dates": upload_dates,
         # Size of the *performance* window (still 10), not the email scan.

@@ -10,6 +10,7 @@ Run with --test to sanity-check the whole pipeline cheaply (1 keyword,
 """
 import argparse
 import logging
+import re
 import sys
 import time
 
@@ -254,6 +255,69 @@ DROP_TOO_FEW_VIDEOS = "too_few_videos"
 DROP_TOO_FEW_LONGFORM = "too_few_longform_videos"
 DROP_NOT_ENGLISH = "not_english"
 DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
+DROP_EXCLUDED_TOPIC = "excluded_topic"
+
+# Whole categories a brand-partnership run must never surface, however well a
+# channel otherwise fits a niche: political commentary, ASMR, and firearms /
+# gun-review content. Discarded outright like the gates above (not flagged) —
+# the brief rules them out, so a human reviewing them is pure cost.
+#
+# Matched as WHOLE WORDS (case-insensitive) against the channel's OWN title
+# and About description only — its self-identification — never its video
+# descriptions, which would drag in false positives (a home-theater channel
+# reviewing a war film; a decor channel styling a "campaign" desk).
+#
+# The term lists are deliberately tuned against THIS pipeline's two niches,
+# where the obvious words are landmines:
+#   - firearms omits bare "gun"/"shotgun"/"shooting" ("nail/glue/spray gun"
+#     are DIY/furniture vocabulary; "shotgun" is a home-theater MICROPHONE),
+#     AND omits "pistol"/"revolver"/"rifle": Home Theater is audiophile-
+#     adjacent and Lifestyle Sofa covers fashion/thrift, so those collide
+#     with the Sex Pistols, the Beatles' "Revolver", and the verb "rifle
+#     through". The remaining firearm-specific terms still catch a gun-review
+#     channel, which will carry firearm/handgun/ammo/AR-15/glock/etc.
+#   - political omits "conservative"/"liberal" (everyday decor/design
+#     adjectives: "a conservative palette", "liberal use of throw pillows")
+#     and "parliament" (the funk band Parliament-Funkadelic).
+# Over-excluding costs one lead; under-excluding lets a banned category
+# through. Tune the sets if a real prospect is ever wrongly dropped.
+EXCLUDED_TOPIC_TERMS = {
+    "political": [
+        "politics", "political", "geopolitics", "election", "elections",
+        "democrat", "democrats", "republican", "republicans", "libertarian",
+        "leftist", "left-wing", "right-wing", "congress", "senate",
+        "communism", "socialism", "MAGA",
+    ],
+    "asmr": ["asmr", "tingles", "mouth sounds"],
+    "firearms": [
+        "firearm", "firearms", "handgun", "handguns", "ammo", "ammunition",
+        "AR-15", "AK-47", "glock", "concealed carry", "second amendment",
+        "gunsmith", "ballistics",
+    ],
+}
+
+# One pattern per category, matching any listed term on a word boundary.
+# Compiled once at import, not per candidate.
+_EXCLUDED_TOPIC_PATTERNS = {
+    category: re.compile(
+        r"\b(?:" + "|".join(re.escape(term) for term in terms) + r")\b",
+        re.IGNORECASE,
+    )
+    for category, terms in EXCLUDED_TOPIC_TERMS.items()
+}
+
+
+def excluded_topic_reason(*texts: str) -> str | None:
+    """
+    The first excluded category ('political' | 'asmr' | 'firearms') whose
+    terms appear in `texts`, or None. Free — reads only data already fetched
+    (the channel title and About description).
+    """
+    blob = " ".join(t for t in texts if t)
+    for category, pattern in _EXCLUDED_TOPIC_PATTERNS.items():
+        if pattern.search(blob):
+            return category
+    return None
 
 
 def is_english(content_language: str | None) -> bool:
@@ -609,6 +673,26 @@ def process_candidate(
             "Skipping %s — already tracked in this niche's table.", stats.get("channel_title"),
         )
         return None, "duplicate"
+
+    # Off-brand topic exclusion (political / ASMR / firearms). Reads the title
+    # and About description already fetched, and runs BEFORE
+    # get_recent_video_performance so an excluded channel skips the
+    # performance / longform / email quota below. It is a post-response
+    # BACKSTOP, not a cost-free filter: the channels.list unit above is already
+    # spent by here, and on the discovery path the creator's 0.01 discovery
+    # credit was already billed when the vendor returned it. Saving THOSE would
+    # need a server-side negation filter in discovery_filters — a follow-up,
+    # and only after the vendor's bio-negation field is verified live the way
+    # gender/topics were — the same reason exclude_handles exists. This local
+    # gate stays regardless: it is the only tier that also covers the
+    # search.list fallback, and it is deterministic across both paths.
+    topic = excluded_topic_reason(stats.get("channel_title", ""), stats.get("description", ""))
+    if topic:
+        logger.info(
+            "Dropping %s before push — %s (%s).",
+            stats.get("channel_title"), DROP_EXCLUDED_TOPIC, topic,
+        )
+        return None, DROP_EXCLUDED_TOPIC
 
     performance = get_recent_video_performance(channel_id, stats.get("uploads_playlist_id"))
     time.sleep(API_SLEEP_SECONDS)

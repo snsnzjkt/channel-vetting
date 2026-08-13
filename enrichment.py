@@ -77,6 +77,14 @@ EMAIL_SCAN_SAMPLE_SIZE = 50
 # Widen the email scan, hold the scoring baseline still.
 PERFORMANCE_SAMPLE_SIZE = 10
 
+# A video's view count keeps climbing for a while after it's posted, so the
+# per-video floor (main.MIN_VIEWS_PER_VIDEO) only judges videos public at
+# least this long. Without it, a channel's freshest upload — still climbing
+# toward the floor — would sink the whole channel via the window MINIMUM,
+# dropping exactly the actively-uploading creators the recency/cadence gates
+# want to keep. 14 days is well past the bulk of a typical video's view accrual.
+PERFORMANCE_MATURITY_DAYS = 14
+
 
 # Domains belonging to a third party that routinely shows up in creator
 # descriptions — shared platforms, link-aggregators, payment/tip/coupon
@@ -289,6 +297,31 @@ def find_repeated_email(video_descriptions: list[str]) -> str:
 DAYS_PER_MONTH = 30.44
 
 
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    """
+    An ISO 8601 timestamp (YouTube's trailing-'Z' form) as a tz-aware
+    datetime, or None when it is missing or unparseable.
+
+    The single home of the tolerant-parse rule, shared by
+    channel_age_months() and days_since_last_upload() so the two can't drift
+    — and so "absent/unreadable data is unknown, never a negative verdict" is
+    decided in one place.
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        logger.info("Unparseable ISO timestamp %r — treating as unknown.", value)
+        return None
+    # A bare date (or any offsetless value) parses tz-NAIVE; coerce to UTC so
+    # every caller can subtract it from datetime.now(timezone.utc) without an
+    # aware/naive TypeError.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def channel_age_months(published_at: str | None) -> float | None:
     """
     Age of a channel in months, from the ISO 8601 timestamp channels.list
@@ -298,15 +331,45 @@ def channel_age_months(published_at: str | None) -> float | None:
     treat None as "unknown" and NOT as "new", since absent data is not
     evidence against a channel.
     """
-    if not published_at:
-        return None
-    try:
-        created = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        logger.info("Unparseable publishedAt %r — treating channel age as unknown.", published_at)
+    created = _parse_iso_timestamp(published_at)
+    if created is None:
         return None
     delta_days = (datetime.now(timezone.utc) - created).days
     return delta_days / DAYS_PER_MONTH
+
+
+def days_since_last_upload(upload_dates: list[str]) -> float | None:
+    """
+    Days since the channel's most recent SAMPLED upload, from the ISO 8601
+    timestamps get_recent_video_performance() returns in `upload_dates`.
+
+    The NEWEST date is what counts, taken with max() rather than trusting the
+    list's order: a channel that posted after a long gap is active, and a
+    reordering of the sample must not change the verdict.
+
+    Returns None when the list is empty or nothing parses — callers must
+    treat None as "unknown" and NOT as "stale", the same rule
+    channel_age_months() follows for an unknown publishedAt.
+    """
+    parsed = [dt for dt in (_parse_iso_timestamp(d) for d in upload_dates) if dt is not None]
+    if not parsed:
+        return None
+    return (datetime.now(timezone.utc) - max(parsed)).days
+
+
+def _view_count_is_settled(published_at: str | None) -> bool:
+    """
+    Whether a video has been public long enough (PERFORMANCE_MATURITY_DAYS)
+    for its view count to feed the per-video floor.
+
+    An unknown or unparseable publish date returns False: we can't confirm the
+    count has settled, so the video isn't judged rather than judged on a value
+    that may still be climbing — unknown never disqualifies.
+    """
+    published = _parse_iso_timestamp(published_at)
+    if published is None:
+        return False
+    return (datetime.now(timezone.utc) - published).days >= PERFORMANCE_MATURITY_DAYS
 
 
 def _as_int(value, default: int = 0) -> int:
@@ -574,6 +637,10 @@ def get_recent_video_performance(
     total_views = 0
     total_engagements = 0  # likes + comments
     performance_count = 0
+    # Per-video views across the performance window, kept so the caller can
+    # gate on "every recent video passed a view floor" — a stricter test than
+    # avg_views, which one strong upload can carry over the line on its own.
+    performance_views = []
     video_languages = []
     video_descriptions = []
     durations = []
@@ -602,19 +669,38 @@ def get_recent_video_performance(
         # _as_int, not int(): likeCount and commentCount are routinely absent
         # (disabled likes/comments) and can arrive as an explicit null, which
         # int() would turn into a TypeError mid-loop.
-        total_views += _as_int(stats.get("viewCount"))
+        raw_views = stats.get("viewCount")
+        views = _as_int(raw_views)
+        total_views += views
         total_engagements += _as_int(stats.get("likeCount")) + _as_int(stats.get("commentCount"))
         performance_count += 1
+        # The per-video floor (min_views) judges only videos whose count has
+        # SETTLED (public >= PERFORMANCE_MATURITY_DAYS) and is actually
+        # REPORTED. A just-posted upload is still climbing toward 10k, and an
+        # unreported count is unknown, not zero — counting either would sink
+        # the channel on a value that isn't a real underperformer. avg_views
+        # above is unchanged: it still spans the whole window.
+        if raw_views is not None and _view_count_is_settled(snippet.get("publishedAt")):
+            performance_views.append(views)
 
     if not performance_count:
         logger.warning("Channel %s returned no videos in the performance window — skipping.", channel_id)
         return None
 
     avg_views = total_views / performance_count
+    # The weakest SETTLED, reported video in the window (see the append guard
+    # above). None when no window video qualifies — e.g. a channel that just
+    # posted its whole newest window — so the per-video floor is skipped
+    # (unknown), not failed.
+    min_views = min(performance_views) if performance_views else None
     avg_engagement_rate = (total_engagements / total_views * 100) if total_views > 0 else 0.0
 
     return {
         "avg_views": avg_views,
+        # The lowest per-video views in the performance window — main's
+        # per-video floor gates on this so a single weak recent upload isn't
+        # hidden by a strong average.
+        "min_views": min_views,
         "avg_engagement_rate": avg_engagement_rate,
         "upload_dates": upload_dates,
         # Size of the *performance* window (still 10), not the email scan.

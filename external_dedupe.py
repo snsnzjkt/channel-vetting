@@ -30,7 +30,9 @@ trade. Don't "harden" this into raising.
 import json
 import logging
 import os
+import re
 import time
+from dataclasses import dataclass, field
 
 # `requests` stays imported for its exception types (RequestException
 # below); the requests themselves go through the shared retrying session.
@@ -48,21 +50,106 @@ EXTERNAL_CACHE_MAX_AGE_HOURS = 24
 
 # The 4 tables elsewhere in the base that track YouTube channels (the
 # other 5 tables in the base track Instagram/websites or are the two
-# tables this pipeline itself owns — irrelevant to this check).
+# tables this pipeline itself owns — irrelevant to this check). `name_field`
+# is the channel-name column, indexed alongside the handle so a creator who
+# RENAMED their @handle is still caught by name — the exact miss that let a
+# channel already in "Follow-up Outreach" (old handle @Newrecordday2013) get
+# re-added to Prospects after it became @newrecordday.
 EXTERNAL_TABLES = [
-    {"table_id": "tblFDvQiElfy7sER7", "name": "Home Theatre – YouTube Outreach", "link_field": "Link"},
-    {"table_id": "tbllgU6ITa4vkI6dG", "name": "Home Theatre – YouTube Leads", "link_field": "Link"},
-    {"table_id": "tblWJm5pRazEtBVqb", "name": "Home Theatre – YouTube Follow-up Outreach", "link_field": "Link"},
-    {"table_id": "tbl9OOxhwR5ujGZtF", "name": "Lifestyle – Sofa Influencers", "link_field": "YouTube URL"},
+    {"table_id": "tblFDvQiElfy7sER7", "name": "Home Theatre – YouTube Outreach", "link_field": "Link", "name_field": "Channel Name"},
+    {"table_id": "tbllgU6ITa4vkI6dG", "name": "Home Theatre – YouTube Leads", "link_field": "Link", "name_field": "Channel Name"},
+    {"table_id": "tblWJm5pRazEtBVqb", "name": "Home Theatre – YouTube Follow-up Outreach", "link_field": "Link", "name_field": "Channel Name"},
+    {"table_id": "tbl9OOxhwR5ujGZtF", "name": "Lifestyle – Sofa Influencers", "link_field": "YouTube URL", "name_field": "Name"},
 ]
 
 
-def _fetch_table_handles(table_id: str, link_field: str) -> set[str]:
+def _normalize_name(raw: str) -> str:
+    """
+    Fold a channel name for matching: strip, collapse internal whitespace,
+    casefold. The external table's "Channel Name" and the pipeline's
+    channels.list title are both the creator's raw display name, so this makes
+    "New Record Day" match "new record  day" while staying blank-safe.
+    """
+    return re.sub(r"\s+", " ", (raw or "").strip()).casefold()
+
+
+def _handle_key(handle: str) -> str:
+    """
+    Normalize a handle for index lookup. Prefers enrichment.normalize_handle
+    (which understands a full channel URL), falling back to a bare
+    strip/@-trim/lowercase for a plain handle string that isn't a URL. Both
+    sites that key a handle go through this, so the two lookup paths
+    (ExternalIndex.match and match_external's dict branch) can't drift apart.
+    """
+    return normalize_handle(handle) or (handle or "").strip().lstrip("@").lower()
+
+
+@dataclass
+class ExternalIndex:
+    """
+    What the base's other YouTube tables already track, keyed two ways.
+
+    `handles` is the reliable key (an @handle can't be confused with another
+    channel), so it is checked first. `names` is the fallback that survives a
+    handle RENAME — its cost is that two different channels sharing a display
+    name collide and one is skipped. For a DEDUPE list that fails open (worst
+    case: a lead we skip, never a wrong contact) that trade is the right one,
+    the same reason do_not_contact.Blocklist also matches on name.
+    """
+
+    handles: dict[str, str] = field(default_factory=dict)  # normalized handle -> source table
+    names: dict[str, str] = field(default_factory=dict)    # normalized name -> source table
+
+    def match(self, handle: str = "", name: str = "") -> str:
+        """The source table a candidate is already tracked in, or ""."""
+        h = _handle_key(handle)
+        if h and h in self.handles:
+            return self.handles[h]
+        n = _normalize_name(name)
+        if n and n in self.names:
+            return self.names[n]
+        return ""
+
+    # Handle-dict read compatibility, so existing handle-only consumers
+    # (cleanup_external_duplicates.py's `in`/`[]`/`len`, and the discovery
+    # exclude set's `set(index)`) keep working unchanged — only match()'s
+    # name awareness is new.
+    def __contains__(self, handle: str) -> bool:
+        return handle in self.handles
+
+    def __getitem__(self, handle: str) -> str:
+        return self.handles[handle]
+
+    def __iter__(self):
+        return iter(self.handles)
+
+    def __len__(self) -> int:
+        return len(self.handles)
+
+
+def match_external(external, handle: str = "", name: str = "") -> str:
+    """
+    Which external table a candidate is already tracked in, or "".
+
+    Accepts an ExternalIndex (matches @handle first, then channel name), or a
+    plain {handle: table} dict — the pre-names on-disk cache format, and the
+    shape lightweight callers/tests pass. A bare dict carries no names, so it
+    is handle-only, which is exactly the old behaviour.
+    """
+    if isinstance(external, ExternalIndex):
+        return external.match(handle=handle, name=name)
+    h = _handle_key(handle)
+    return external.get(h, "") if h else ""
+
+
+def _fetch_table_entries(table_id: str, link_field: str, name_field: str) -> tuple[set[str], set[str]]:
+    """Return (normalized handles, normalized names) for one external table."""
     handles: set[str] = set()
+    names: set[str] = set()
     offset = None
 
     while True:
-        params = {"fields[]": link_field, "pageSize": 100}
+        params = {"fields[]": [link_field, name_field], "pageSize": 100}
         if offset:
             params["offset"] = offset
 
@@ -70,7 +157,7 @@ def _fetch_table_handles(table_id: str, link_field: str) -> set[str]:
             resp = HTTP.get(_base_url(table_id), headers=_headers(), params=params, timeout=30)
         except requests.RequestException as e:
             # Log-and-return-partial is CORRECT here (unlike
-            # do_not_contact.py, which must fail closed): a missing handle
+            # do_not_contact.py, which must fail closed): a missing entry
             # only risks re-adding a channel someone already tracks. The
             # shared session has already retried transient 429/5xx, so a
             # partial index now means a persistent problem, not a blip.
@@ -85,24 +172,30 @@ def _fetch_table_handles(table_id: str, link_field: str) -> set[str]:
 
         data = resp.json()
         for record in data.get("records", []):
-            raw = record.get("fields", {}).get(link_field, "")
-            handle = normalize_handle(raw)
+            fields = record.get("fields", {})
+            handle = normalize_handle(fields.get(link_field, "") or "")
             if handle:
                 handles.add(handle)
+            name = _normalize_name(fields.get(name_field, "") or "")
+            if name:
+                names.add(name)
 
         offset = data.get("offset")
         if not offset:
             break
         time.sleep(API_SLEEP_SECONDS)
 
-    return handles
+    return handles, names
 
 
-def fetch_external_handles(force_refresh: bool = False) -> dict[str, str]:
+def fetch_external_handles(force_refresh: bool = False) -> ExternalIndex:
     """
-    Returns {normalized_handle: source_table_name} covering every handle
-    found across EXTERNAL_TABLES. Uses a local cache unless it's missing,
-    stale (> EXTERNAL_CACHE_MAX_AGE_HOURS old), or force_refresh=True.
+    Return an ExternalIndex (handles + names) covering every channel tracked
+    across EXTERNAL_TABLES. Uses a local cache unless it's missing, stale
+    (> EXTERNAL_CACHE_MAX_AGE_HOURS old), or force_refresh=True.
+
+    The name kept for backwards familiarity; it now returns the index, not a
+    bare handle dict — see ExternalIndex for why a name key was added.
     """
     if not force_refresh and os.path.exists(EXTERNAL_HANDLES_CACHE_FILE):
         try:
@@ -110,26 +203,43 @@ def fetch_external_handles(force_refresh: bool = False) -> dict[str, str]:
                 cache = json.load(f)
             age_hours = (time.time() - cache.get("fetched_at", 0)) / 3600
             if age_hours < EXTERNAL_CACHE_MAX_AGE_HOURS:
+                # `names` defaults empty for a cache written before names were
+                # indexed — it just refreshes into the fuller index next cycle.
                 logger.info(
-                    "Using cached external handle index (%.1fh old, %d handles).",
-                    age_hours, len(cache.get("handles", {})),
+                    "Using cached external index (%.1fh old, %d handles, %d names).",
+                    age_hours, len(cache.get("handles", {})), len(cache.get("names", {})),
                 )
-                return cache["handles"]
+                # .get for BOTH keys: a cache missing either (truncated, hand-
+                # edited, or written by another version) fails open to an empty
+                # index — never a KeyError that would abort the run, which this
+                # deliberately fail-open module must not do.
+                return ExternalIndex(
+                    handles=cache.get("handles", {}), names=cache.get("names", {})
+                )
         except (json.JSONDecodeError, OSError):
-            logger.warning("External handles cache was unreadable/corrupt; refreshing.")
+            logger.warning("External index cache was unreadable/corrupt; refreshing.")
 
     handles: dict[str, str] = {}
+    names: dict[str, str] = {}
     for table in EXTERNAL_TABLES:
-        table_handles = _fetch_table_handles(table["table_id"], table["link_field"])
+        table_handles, table_names = _fetch_table_entries(
+            table["table_id"], table["link_field"], table["name_field"]
+        )
         for h in table_handles:
             handles.setdefault(h, table["name"])
-        logger.info("'%s': found %d handle(s).", table["name"], len(table_handles))
+        for n in table_names:
+            names.setdefault(n, table["name"])
+        logger.info(
+            "'%s': found %d handle(s), %d name(s).", table["name"], len(table_handles), len(table_names)
+        )
         time.sleep(API_SLEEP_SECONDS)
 
-    _write_cache_atomically({"fetched_at": time.time(), "handles": handles})
+    _write_cache_atomically({"fetched_at": time.time(), "handles": handles, "names": names})
 
-    logger.info("Built external handle index: %d unique handle(s) total.", len(handles))
-    return handles
+    logger.info(
+        "Built external index: %d unique handle(s), %d unique name(s).", len(handles), len(names)
+    )
+    return ExternalIndex(handles=handles, names=names)
 
 
 def _write_cache_atomically(payload: dict) -> None:

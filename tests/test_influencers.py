@@ -503,6 +503,14 @@ class StubEmailSource:
         self.calls.append(channel_id)
         return self.email
 
+    def find_contact(self, channel_id):
+        # Used when this stub stands in for the browser scraper (step 5). An
+        # address implies the link list wasn't empty; no address leaves
+        # presence unknown (None) here — these tests don't exercise the
+        # empty-link-list case.
+        self.calls.append(channel_id)
+        return self.email, (True if self.email else None)
+
 
 def _stats(channel_id="UC123", business_email=""):
     return {
@@ -530,7 +538,7 @@ def test_step_4_runs_before_the_browser(no_deep_scan):
     enricher = StubEmailSource("api@creator.com")
     scraper = StubEmailSource("browser@creator.com")
 
-    email, source = main.resolve_email_with_source(
+    email, source, _ = main.resolve_email_with_source(
         _stats(), _performance(), scraper, enricher
     )
 
@@ -543,7 +551,7 @@ def test_browser_still_runs_when_step_4_misses(no_deep_scan):
     enricher = StubEmailSource("")
     scraper = StubEmailSource("browser@creator.com")
 
-    email, source = main.resolve_email_with_source(
+    email, source, _ = main.resolve_email_with_source(
         _stats(), _performance(), scraper, enricher
     )
 
@@ -557,7 +565,7 @@ def test_free_steps_still_win_over_step_4(no_deep_scan):
     an address is already known."""
     enricher = StubEmailSource("api@creator.com")
 
-    email, source = main.resolve_email_with_source(
+    email, source, _ = main.resolve_email_with_source(
         _stats(business_email="about@creator.com"), _performance(), None, enricher
     )
 
@@ -569,7 +577,7 @@ def test_free_steps_still_win_over_step_4(no_deep_scan):
 def test_repeated_email_still_wins_over_step_4(no_deep_scan):
     enricher = StubEmailSource("api@creator.com")
 
-    email, source = main.resolve_email_with_source(
+    email, source, _ = main.resolve_email_with_source(
         _stats(), _performance(repeated_email="repeat@creator.com"), None, enricher
     )
 
@@ -582,7 +590,7 @@ def test_chain_without_an_enricher_is_unchanged(no_deep_scan):
     """Existing callers that pass no enricher keep the old behaviour."""
     scraper = StubEmailSource("browser@creator.com")
 
-    email, source = main.resolve_email_with_source(_stats(), _performance(), scraper)
+    email, source, _ = main.resolve_email_with_source(_stats(), _performance(), scraper)
 
     assert email == "browser@creator.com"
     assert source == main.EMAIL_SOURCE_BROWSER

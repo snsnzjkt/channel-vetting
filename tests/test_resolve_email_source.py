@@ -23,19 +23,26 @@ def _performance(**overrides):
 
 
 class _Browser:
-    def __init__(self, email=""):
+    def __init__(self, email="", has_links=None):
         self._email = email
+        # An email implies the link list wasn't empty; default the flag to
+        # match, so a stub configured with just an address behaves like the
+        # real scraper (which returns True alongside a found address).
+        self._has_links = has_links if has_links is not None else bool(email) or None
         self.calls = 0
 
-    def find_email(self, channel_id):
+    def find_contact(self, channel_id):
         self.calls += 1
-        return self._email
+        return self._email, self._has_links
+
+    def find_email(self, channel_id):
+        return self.find_contact(channel_id)[0]
 
 
 def test_repeated_recent_videos_is_labelled(monkeypatch):
     import main
 
-    email, source = main.resolve_email_with_source(
+    email, source, _ = main.resolve_email_with_source(
         _stats(), _performance(repeated_email="a@b.com"), None,
     )
     assert (email, source) == ("a@b.com", main.EMAIL_SOURCE_REPEATED)
@@ -44,7 +51,7 @@ def test_repeated_recent_videos_is_labelled(monkeypatch):
 def test_about_description_is_labelled(monkeypatch):
     import main
 
-    email, source = main.resolve_email_with_source(
+    email, source, _ = main.resolve_email_with_source(
         _stats(business_email="a@b.com"), _performance(), None,
     )
     assert (email, source) == ("a@b.com", main.EMAIL_SOURCE_ABOUT)
@@ -56,7 +63,7 @@ def test_older_uploads_scan_is_labelled(monkeypatch):
 
     monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "a@b.com")
 
-    email, source = main.resolve_email_with_source(
+    email, source, _ = main.resolve_email_with_source(
         _stats(), _performance(next_page_token="T2"), _Browser("browser@b.com"),
     )
     assert (email, source) == ("a@b.com", main.EMAIL_SOURCE_OLDER)
@@ -67,10 +74,12 @@ def test_browser_is_labelled(monkeypatch):
 
     monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "")
 
-    email, source = main.resolve_email_with_source(
+    email, source, has_links = main.resolve_email_with_source(
         _stats(), _performance(), _Browser("browser@b.com"),
     )
     assert (email, source) == ("browser@b.com", main.EMAIL_SOURCE_BROWSER)
+    # A browser hit implies the link list was non-empty.
+    assert has_links is True
 
 
 def test_nothing_found_reports_no_source(monkeypatch):
@@ -78,7 +87,25 @@ def test_nothing_found_reports_no_source(monkeypatch):
 
     monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "")
 
-    assert main.resolve_email_with_source(_stats(), _performance(), _Browser("")) == ("", "")
+    # _Browser("") models a scraper that read the link list but found no
+    # email; with no has_links override it reports None (unknown presence).
+    assert main.resolve_email_with_source(_stats(), _performance(), _Browser("")) == ("", "", None)
+
+
+def test_empty_link_list_surfaces_as_false(monkeypatch):
+    """
+    A browser that read the About panel and saw NO links reports
+    has_external_links=False — the signal process_candidate turns into the
+    no-social drop. Distinct from None (list never read).
+    """
+    import main
+
+    monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "")
+
+    result = main.resolve_email_with_source(
+        _stats(), _performance(), _Browser("", has_links=False),
+    )
+    assert result == ("", "", False)
 
 
 def test_every_source_label_is_distinct():

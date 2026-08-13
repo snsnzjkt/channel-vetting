@@ -102,3 +102,39 @@ def test_process_candidate_drops_excluded_topic_before_performance(monkeypatch):
     assert record is None
     assert reason == main.DROP_EXCLUDED_TOPIC
     assert calls["perf"] == 0, "excluded channel must be dropped before the performance-fetch quota is spent"
+
+
+# --- wiring: the same terms are negated SERVER-SIDE in discovery ------------
+# The local gate above is a post-response BACKSTOP — on the discovery path the
+# 0.01 discovery credit is already billed by the time it runs. These assert the
+# credit-saving tier: the off-brand terms are handed to influencers.club as
+# `keywords_not_in_description`, so the categories are never returned (or
+# billed) in the first place, the way exclude_handles already avoids paying for
+# already-known creators.
+
+def test_both_niches_carry_the_discovery_negation_filter():
+    # Compare against the constant itself; test_discovery_negation_reuses_the_
+    # gate_terms_verbatim below is what pins that constant to EXCLUDED_TOPIC_TERMS.
+    for niche_name, cfg in main.NICHES.items():
+        filters = cfg["discovery_filters"]
+        assert filters.get("keywords_not_in_description") == main.EXCLUDED_TOPIC_KEYWORDS, niche_name
+
+
+def test_discovery_negation_reuses_the_gate_terms_verbatim():
+    """Derived FROM EXCLUDED_TOPIC_TERMS, not a hand-kept copy, so the server
+    pre-filter and the local backstop can't drift — every wired term is one the
+    local gate also recognises."""
+    assert main.EXCLUDED_TOPIC_KEYWORDS == sorted(
+        {t for terms in main.EXCLUDED_TOPIC_TERMS.values() for t in terms}
+    )
+    for term in main.EXCLUDED_TOPIC_KEYWORDS:
+        assert main.excluded_topic_reason(term) is not None, term
+
+
+def test_discovery_negation_omits_the_same_landmines_the_gate_omits():
+    """The vendor field matches case-insensitive whole words/phrases, exactly
+    like the gate — so the words the gate leaves out to protect the two niches
+    (a shotgun MIC, a nail gun, a 'conservative palette') must not sneak into
+    the discovery list either."""
+    for landmine in ("gun", "shotgun", "rifle", "pistol", "conservative", "liberal", "parliament"):
+        assert landmine not in main.EXCLUDED_TOPIC_KEYWORDS

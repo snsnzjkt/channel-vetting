@@ -118,6 +118,10 @@ NICHES = {
                 "home entertainment, living room furniture and home furnishing"
             ),
             "number_of_subscribers": {"min": 2000},
+            # A server-side "keywords_not_in_description" negation of the
+            # off-brand political / ASMR / firearms terms is wired in from
+            # EXCLUDED_TOPIC_TERMS after that dict is defined (it lives below
+            # this literal) — see EXCLUDED_TOPIC_KEYWORDS.
         },
     },
     "Lifestyle Sofa": {
@@ -159,6 +163,9 @@ NICHES = {
             "gender": "female",
             "ai_search": "fashion and lifestyle vlogs, travel, house tours, home decor and interior styling",
             "number_of_subscribers": {"min": 2000},
+            # As above: the off-brand "keywords_not_in_description" negation is
+            # wired in from EXCLUDED_TOPIC_TERMS below — see
+            # EXCLUDED_TOPIC_KEYWORDS.
         },
     },
 }
@@ -295,6 +302,53 @@ EXCLUDED_TOPIC_TERMS = {
         "gunsmith", "ballistics",
     ],
 }
+
+# The same off-brand terms, flattened for influencers.club discovery's
+# SERVER-SIDE negation filter (see the wiring loop below). Sent as the
+# vendor's `keywords_not_in_description`, which withholds any creator whose
+# profile bio carries one of these words/phrases — so the whole political /
+# ASMR / firearms categories are never RETURNED, and (at 0.01 credits per
+# returned creator) never BILLED. This is the credit-saving move
+# exclude_handles already makes for already-known creators: filtering these
+# out locally after the response, the way excluded_topic_reason() does, cannot
+# refund the discovery credit the vendor has already charged.
+#
+# Reuses EXCLUDED_TOPIC_TERMS verbatim rather than a hand-kept copy, so the
+# server pre-filter and the local backstop can never drift. Safe to reuse
+# because the vendor field matches the SAME way the local gate does — case-
+# insensitive, on whole words and multi-word phrases (verified live
+# 2026-08-14, the way gender's accepted values were: a wrong-type probe
+# names the field, and keywords_in/keywords_not partition the result set
+# exactly — P + N == base total). So the landmine words that gate deliberately
+# omits ("gun"/"rifle"/"conservative"/…) stay omitted here too; "MAGA" does
+# not match "magazine".
+EXCLUDED_TOPIC_KEYWORDS = sorted(
+    {term for terms in EXCLUDED_TOPIC_TERMS.values() for term in terms}
+)
+
+# Wire that negation into every niche that runs discovery. Done here, after
+# both NICHES and EXCLUDED_TOPIC_TERMS exist, rather than inline in the NICHES
+# literal above — which is defined before EXCLUDED_TOPIC_TERMS. Guarded on
+# presence so a future niche without discovery_filters (search.list only) is
+# left untouched rather than KeyError-ing at import.
+#
+# The local excluded_topic_reason() gate in process_candidate STAYS as the
+# deterministic backstop: it also reads the channel TITLE (not just the bio),
+# and it is the only tier that covers the search.list fallback path this
+# server-side filter never touches.
+for _niche_config in NICHES.values():
+    _discovery_filters = _niche_config.get("discovery_filters")
+    if _discovery_filters is not None:
+        # A per-niche list() copy, not the shared constant itself: each niche
+        # owns its own list, so a future per-niche exclusion edit can't mutate
+        # the other niche's filter (or EXCLUDED_TOPIC_KEYWORDS) in place. The
+        # copies are still all derived from EXCLUDED_TOPIC_TERMS at import, so
+        # the no-drift guarantee above is unaffected.
+        _discovery_filters["keywords_not_in_description"] = list(EXCLUDED_TOPIC_KEYWORDS)
+# Don't leak the loop's throwaway names into the module namespace (this is the
+# file's only top-level for-loop; the comprehensions around it leak nothing).
+del _niche_config, _discovery_filters
+
 
 # One pattern per category, matching any listed term on a word boundary.
 # Compiled once at import, not per candidate.

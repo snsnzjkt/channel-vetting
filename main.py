@@ -169,10 +169,30 @@ NICHES = {
 # would otherwise keep asking for more candidates round after round.
 DISCOVERY_MAX_ROUNDS = 50
 
-# Niche match currently defaults to a neutral midpoint (50/100) since
-# automated topical matching isn't implemented yet — human reviewers can
-# override the "Overall Score" judgment during Airtable review. Wire in a
-# real niche classifier here if/when one becomes available.
+# Automated topical matching isn't implemented, so every channel is scored
+# with the same niche-match value. 70.0 is a deliberate mild-positive prior,
+# NOT a neutral midpoint — it asserts that a candidate which came out of a
+# niche-targeted discovery query and survived the pre-push gate is somewhat
+# more likely than not to fit the brief. (It was 50.0 until 85e9537, which
+# raised it without updating this comment; the rows in the live tables were
+# all written under 70.0.)
+#
+# Two consequences before touching this:
+#
+#   - Because the value is constant, the "Overall Score" carries ZERO
+#     brand-fit signal. It ranks channels on size, views, engagement,
+#     consistency and trust only. Do not use it to order a human review
+#     queue by how on-brand a channel is; it cannot express that, and
+#     reviewers have to judge niche fit themselves during Airtable review.
+#
+#   - Changing the value re-bases every future score. It feeds
+#     calc_overall_score() at WEIGHT_NICHE_MATCH = 0.10 (scoring.py), so
+#     each point here moves every Overall Score by 0.1 — dropping back to
+#     50.0 would put new rows 2 points below the rows already in the live
+#     tables and make the two sets incomparable.
+#
+# Wire in a real niche classifier here if/when one becomes available; that
+# is the fix, rather than retuning this constant.
 DEFAULT_NICHE_MATCH = 70.0
 
 

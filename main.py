@@ -29,14 +29,19 @@ from enrichment import (
     count_longform_in_older_videos,
 )
 from scoring import calc_fake_follower_risk, calc_overall_score, QUALIFIED, qualify
-from search_zones import country_code, region_from_language_tag, zone_verdict
+from search_zones import (
+    country_code,
+    description_location_outside_zone,
+    region_from_language_tag,
+    zone_verdict,
+)
 from airtable_client import (
     get_existing_channel_ids,
     push_record,
     AirtableReadError,
     count_added_today,
 )
-from external_dedupe import fetch_external_handles
+from external_dedupe import fetch_external_handles, ExternalIndex, match_external
 from prospect_day import today_iso
 from quota_tracker import get_today_spend
 from browser_email import BrowserEmailScraper, null_scraper
@@ -611,7 +616,7 @@ def csv_safe(value: str) -> str:
 
 def process_candidate(
     candidate: dict,
-    external_handles: dict[str, str],
+    external_handles: ExternalIndex,
     blocklist,
     niche_config: dict,
     scraper,
@@ -651,14 +656,17 @@ def process_candidate(
         return None, "blocked"
 
     # Skip channels already tracked in the base's other YouTube outreach/
-    # leads/influencer tables (see external_dedupe.py) — checked here
-    # rather than pre-discovery, since we only know a candidate's @handle
-    # once channels.list has already run.
-    handle = stats.get("handle", "")
-    if handle and handle in external_handles:
+    # leads/influencer tables (see external_dedupe.py) — checked here rather
+    # than pre-discovery, since we only know a candidate's @handle once
+    # channels.list has run. Matches on @handle first and channel NAME second,
+    # so a creator who renamed their handle is still caught by name.
+    external_hit = match_external(
+        external_handles, handle=stats.get("handle", ""), name=stats.get("channel_title", ""),
+    )
+    if external_hit:
         logger.info(
-            "Skipping %s — already tracked in '%s' (@%s).",
-            stats.get("channel_title"), external_handles[handle], handle,
+            "Skipping %s — already tracked in '%s'.",
+            stats.get("channel_title"), external_hit,
         )
         return None, "duplicate"
 
@@ -693,6 +701,20 @@ def process_candidate(
             stats.get("channel_title"), DROP_EXCLUDED_TOPIC, topic,
         )
         return None, DROP_EXCLUDED_TOPIC
+
+    # Real-location check: a creator who set snippet.country to the US but
+    # states an outside-the-zone location in their About ("based in the
+    # Philippines") is dropped here. Free (reads the description already
+    # fetched) and placed before the performance fetch; the declared-country
+    # zone check further down still runs for everyone whose description says
+    # nothing about where they live.
+    desc_country = description_location_outside_zone(stats.get("description", ""))
+    if desc_country:
+        logger.info(
+            "Dropping %s before push — %s (description says %s, not the declared country).",
+            stats.get("channel_title"), DROP_OUTSIDE_SEARCH_ZONE, desc_country,
+        )
+        return None, DROP_OUTSIDE_SEARCH_ZONE
 
     performance = get_recent_video_performance(channel_id, stats.get("uploads_playlist_id"))
     time.sleep(API_SLEEP_SECONDS)
@@ -888,7 +910,7 @@ def _run_discovery_rounds(
     niche_config: dict,
     discovery,
     globally_tracked_ids: set[str],
-    external_handles: dict[str, str],
+    external_handles: ExternalIndex,
     blocklist,
     scraper,
     enricher,
@@ -1004,7 +1026,7 @@ def run_niche(
     max_results_per_keyword: int,
     days_back: int,
     globally_tracked_ids: set[str],
-    external_handles: dict[str, str],
+    external_handles: ExternalIndex,
     blocklist,
     niche_config: dict,
     scraper,

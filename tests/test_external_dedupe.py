@@ -45,12 +45,14 @@ def cache_path(tmp_path, monkeypatch):
 
 
 def _stub_fetch(monkeypatch, handles_by_table):
-    """Replace the per-table Airtable pagination with canned handle sets."""
+    """Replace the per-table Airtable pagination with canned handle sets
+    (names left empty — the cache/index tests below only exercise handles)."""
     import external_dedupe
 
     calls = iter(handles_by_table)
     monkeypatch.setattr(
-        external_dedupe, "_fetch_table_handles", lambda table_id, link_field: set(next(calls))
+        external_dedupe, "_fetch_table_entries",
+        lambda table_id, link_field, name_field: (set(next(calls)), set()),
     )
 
 
@@ -130,7 +132,7 @@ def test_read_failure_returns_partial_rather_than_raising(monkeypatch, caplog):
     monkeypatch.setattr(external_dedupe.HTTP, "get", lambda *a, **k: _Resp(500))
 
     caplog.set_level(logging.ERROR, logger="external_dedupe")
-    assert external_dedupe._fetch_table_handles("tblX", "Link") == set()
+    assert external_dedupe._fetch_table_entries("tblX", "Link", "Channel Name") == (set(), set())
     assert caplog.records  # the failure is loud, just not fatal
 
 
@@ -145,8 +147,72 @@ def test_pagination_error_body_is_truncated_in_the_log(monkeypatch, caplog):
     monkeypatch.setattr(external_dedupe.HTTP, "get", lambda *a, **k: _Resp(500, text=huge))
 
     caplog.set_level(logging.ERROR, logger="external_dedupe")
-    external_dedupe._fetch_table_handles("tblX", "Link")
+    external_dedupe._fetch_table_entries("tblX", "Link", "Channel Name")
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert huge not in logged
     assert "truncated" in logged
+
+
+# --------------------------------------------------------------------------
+# Name matching survives a handle rename (the "New Record Day" bug)
+# --------------------------------------------------------------------------
+
+def test_match_by_name_when_the_handle_changed():
+    """A creator already tracked externally under an OLD handle
+    (@Newrecordday2013) whose CURRENT handle is @newrecordday must still be
+    caught by their stable channel name."""
+    from external_dedupe import ExternalIndex
+
+    idx = ExternalIndex(
+        handles={"newrecordday2013": "Follow-up Outreach"},   # the old handle
+        names={"new record day": "Follow-up Outreach"},
+    )
+    # Current handle no longer matches; the name does.
+    assert idx.match(handle="@newrecordday", name="New Record Day") == "Follow-up Outreach"
+
+
+def test_match_prefers_handle_over_name():
+    from external_dedupe import ExternalIndex
+
+    idx = ExternalIndex(handles={"foo": "Leads"}, names={"bar channel": "Outreach"})
+    assert idx.match(handle="@Foo", name="Bar Channel") == "Leads"
+
+
+def test_match_is_blank_safe():
+    from external_dedupe import ExternalIndex
+
+    idx = ExternalIndex(handles={"foo": "Leads"}, names={"bar": "Outreach"})
+    assert idx.match() == ""
+    assert idx.match(handle="", name="") == ""
+    assert idx.match(handle="@nope", name="Nope") == ""
+
+
+def test_normalize_name_folds_whitespace_and_case():
+    from external_dedupe import _normalize_name
+
+    assert _normalize_name("  New Record   Day ") == "new record day"
+    assert _normalize_name("") == ""
+    assert _normalize_name(None) == ""
+
+
+def test_match_external_accepts_a_plain_handle_dict():
+    """A bare {handle: table} dict (pre-names cache / lightweight callers) is
+    handle-only, matching the old behaviour."""
+    from external_dedupe import match_external, ExternalIndex
+
+    assert match_external({"foo": "Leads"}, handle="@Foo") == "Leads"
+    assert match_external({"foo": "Leads"}, name="Foo") == ""   # dict carries no names
+    assert match_external(ExternalIndex(names={"foo": "Leads"}), name="Foo") == "Leads"
+
+
+def test_external_index_is_a_drop_in_for_the_handle_dict():
+    """cleanup_external_duplicates.py and the discovery exclude set read it
+    like the old dict; those operations must keep working."""
+    from external_dedupe import ExternalIndex
+
+    idx = ExternalIndex(handles={"a": "T1", "b": "T2"}, names={"n": "T1"})
+    assert "a" in idx and "b" in idx and "n" not in idx   # names are not handle keys
+    assert idx["a"] == "T1"
+    assert len(idx) == 2
+    assert set(idx) == {"a", "b"}   # iterates handles, not names

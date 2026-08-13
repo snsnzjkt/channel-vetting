@@ -40,6 +40,7 @@ again:
     describes the audience, not the creator's location, which is why only
     the explicit REGION SUBTAG is used and only when no country is known.
 """
+import re
 
 # Ireland is deliberately absent even though it is both an EU member and
 # the obvious neighbour of the UK zone — "UK (except Ireland)" was an
@@ -258,3 +259,39 @@ def zone_verdict(raw: str | None) -> bool | None:
     if not code:
         return None
     return code in ALLOWED_COUNTRY_CODES
+
+
+# Cues a creator uses to state where they actually LIVE, so a non-zone
+# country right after one is their location rather than a passing mention.
+# "from" is deliberately NOT a cue: "from India" too often means "parents
+# from India" or "clips from India", and "shot in"/"filmed in" describe a
+# location the video was made, not the creator's residence.
+_LOCATION_CUE = r"(?:based in|based out of|located in|living in|lives in|home base|📍|location\s*[:\-])"
+# Longest names first so "south korea" wins over "korea", "hong kong" over a
+# stray "kong", etc.
+_OUTSIDE_NAME_ALTERNATION = "|".join(
+    re.escape(n) for n in sorted(KNOWN_OUTSIDE_COUNTRY_NAMES, key=len, reverse=True)
+)
+_DESC_LOCATION_PATTERN = re.compile(
+    _LOCATION_CUE + r"[^\n,.]{0,30}?\b(" + _OUTSIDE_NAME_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
+
+
+def description_location_outside_zone(description: str | None) -> str:
+    """
+    The ISO code of a non-zone country a channel's About description gives as
+    its LOCATION (e.g. "based in the Philippines" -> "PH"), or "".
+
+    Catches creators who set snippet.country to the US but reveal their real,
+    outside-the-zone location in their description. An explicit location cue
+    is required before the country name, so a passing mention ("gear from
+    Japan", "shot in Iceland") does not trip it, and only OUTSIDE names are
+    matched, so an in-zone location ("based in Canada") never fires. It is a
+    heuristic: a location stated only as a city or a flag emoji is missed, but
+    the burden is on excluding, so a miss just means a human might review one.
+    """
+    if not description:
+        return ""
+    match = _DESC_LOCATION_PATTERN.search(description)
+    return KNOWN_OUTSIDE_COUNTRY_NAMES[match.group(1).strip().lower()] if match else ""

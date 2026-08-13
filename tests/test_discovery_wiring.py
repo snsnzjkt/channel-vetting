@@ -145,6 +145,57 @@ def test_process_candidate_skips_a_channel_already_in_the_niche_table(monkeypatc
 
 # --- run_niche: discovery mode ---------------------------------------------
 
+def test_process_candidate_skips_a_renamed_channel_tracked_externally_by_name(monkeypatch):
+    """The 'New Record Day' bug: already in Follow-up Outreach under the old
+    handle @Newrecordday2013, now @newrecordday. The handle no longer matches
+    the external index, but the channel NAME does — so it must be skipped, not
+    re-added to Prospects."""
+    monkeypatch.setattr(
+        main, "get_channel_stats",
+        lambda channel_id=None, *, handle=None: {
+            "channel_id": "UCFnhdh4", "channel_title": "New Record Day",
+            "handle": "newrecordday", "description": "",
+        },
+    )
+    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+
+    external = main.ExternalIndex(
+        handles={"newrecordday2013": "Follow-up Outreach"},   # stale handle
+        names={"new record day": "Follow-up Outreach"},
+    )
+    record, reason = main.process_candidate(
+        {"channel_id": "UCFnhdh4", "channel_title": "New Record Day"}, external,
+        _NullBlocklist(), _niche(), None,
+    )
+    assert record is None and reason == "duplicate"
+
+
+def test_process_candidate_drops_a_fake_usa_channel_by_its_description(monkeypatch):
+    """Declares country US but the About says 'based in the Philippines' — the
+    real location is outside the zones, so it's dropped before the
+    performance-fetch quota is spent."""
+    calls = {"perf": 0}
+    monkeypatch.setattr(
+        main, "get_channel_stats",
+        lambda channel_id=None, *, handle=None: {
+            "channel_id": "UC1", "channel_title": "Budget Home Theater",
+            "handle": "budgetht", "country": "US",
+            "description": "Home theater on a budget. Based in the Philippines.",
+        },
+    )
+    monkeypatch.setattr(main, "get_recent_video_performance",
+                        lambda *a, **k: calls.__setitem__("perf", calls["perf"] + 1))
+    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+
+    record, reason = main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "Budget Home Theater"}, main.ExternalIndex(),
+        _NullBlocklist(), _niche(), None,
+    )
+    assert record is None
+    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+    assert calls["perf"] == 0, "a fake-USA channel must be dropped before the performance fetch"
+
+
 class _FakeDiscovery:
     def __init__(self, batches, enabled=True):
         self._batches = list(batches)

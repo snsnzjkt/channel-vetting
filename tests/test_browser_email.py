@@ -309,6 +309,66 @@ def test_returns_empty_when_the_channel_has_no_links():
     assert scraper.find_email("UCaSf_") == ""
 
 
+# --- find_contact: the link-list-presence signal for the no-social drop ---
+#
+# find_email is just find_contact()[0]; these pin the second element, which
+# main.process_candidate turns into DROP_NO_SOCIAL. The rule is: only a
+# POSITIVELY-empty list is False; anything unread is None (never disqualify
+# on absent data).
+
+
+def test_find_contact_reports_false_for_an_empty_link_list():
+    """The one case that drives the no-social drop: links read, none present."""
+    from browser_email import BrowserEmailScraper
+
+    browser = _FakeBrowser({"youtube.com": _about(links=[])})
+    scraper = BrowserEmailScraper(browser=browser)
+    assert scraper.find_contact("UCaSf_") == ("", False)
+
+
+def test_find_contact_reports_true_when_a_social_only_channel_has_links():
+    """
+    A channel with ONLY a social link (no own-domain site, no email) still
+    HAS a social media page — presence is True, so it must NOT be dropped,
+    even though candidate_links drops the social link for the email scan.
+    """
+    from browser_email import BrowserEmailScraper
+
+    browser = _FakeBrowser({"youtube.com": _about(links=["https://www.instagram.com/creator/"])})
+    scraper = BrowserEmailScraper(browser=browser)
+    assert scraper.find_contact("UC1") == ("", True)
+
+
+def test_find_contact_reports_true_alongside_a_found_email():
+    from browser_email import BrowserEmailScraper
+
+    browser = _FakeBrowser({
+        "youtube.com": _about(links=["https://www.theaterathome.com"]),
+        "theaterathome.com": _page(text="Contact us at support@theaterathome.com"),
+    })
+    scraper = BrowserEmailScraper(browser=browser)
+    assert scraper.find_contact("UCFvcO") == ("support@theaterathome.com", True)
+
+
+def test_find_contact_reports_none_when_the_about_panel_never_loads():
+    """
+    No aboutChannelViewModel at all (evaluate returns None) is UNKNOWN, not
+    empty — presence is None so the channel is kept, not dropped.
+    """
+    from browser_email import BrowserEmailScraper
+
+    browser = _FakeBrowser({})  # nothing keyed on youtube.com -> evaluate returns None
+    scraper = BrowserEmailScraper(browser=browser)
+    assert scraper.find_contact("UC1") == ("", None)
+
+
+def test_null_scraper_find_contact_is_none():
+    """An inert scraper reports None presence, keeping the no-social drop off."""
+    from browser_email import null_scraper
+
+    assert null_scraper().find_contact("UC123") == ("", None)
+
+
 def test_does_not_rescan_the_about_description():
     """
     Chain step 2 already scanned this text via channels.list. Re-finding it

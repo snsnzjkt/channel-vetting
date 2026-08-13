@@ -105,7 +105,9 @@ def backfill_table(
         # stats/performance cannot tell the older-uploads scan, the
         # influencers.club lookup and the browser pass apart, since none of
         # the three is echoed in either dict.
-        email, source = resolve_email_with_source(
+        # The third element (link-list presence) drives the pipeline's
+        # no-social drop; this backfill only fills emails, so it's ignored.
+        email, source, _ = resolve_email_with_source(
             stats, performance, scraper, enricher
         )
         title = (stats.get("channel_title") or "")[:40]

@@ -284,29 +284,53 @@ class BrowserEmailScraper:
                     pass
             return cls(enabled=False)
 
-    def find_email(self, channel_id: str) -> str:
+    def find_contact(self, channel_id: str) -> tuple[str, bool | None]:
         """
-        Return a contact email found by following the channel's public link
-        list, or "". One page serves the whole channel.
+        Follow the channel's public link list ONCE, returning
+        (email, has_external_links):
+
+          - email: an address found on the creator's own site or a probed
+            social /about page, or "".
+          - has_external_links: True when the channel's About panel declares
+            at least one outbound link (a website OR a social profile), False
+            when it declares none, and None when the list couldn't be read at
+            all (this scraper is inert, the page never opened, or the About
+            view-model was absent).
+
+        The flag is what lets the pipeline drop a channel with no web/social
+        presence (main.DROP_NO_SOCIAL) WITHOUT a second page load — it falls
+        out of the same fetch the email step already makes. None (not False)
+        on an unreadable list is deliberate: "no links" is only reported when
+        an empty list was actually SEEN, so the "absent data never
+        disqualifies" rule the rest of the pipeline follows still holds. One
+        page serves the whole channel.
         """
         if not self._enabled:
-            return ""
+            return "", None
 
         page, opened = self._open_page(channel_id)
         if page is None:
-            return ""
+            return "", None
 
         try:
-            links = extract_link_urls(self._read_about_links(page, channel_id))
+            about = self._read_about_links(page, channel_id)
+            if about is None:
+                # The About view-model never loaded — unknown, not empty.
+                return "", None
+            # vm.links is the channel's declared link list; its emptiness is
+            # the "no external presence" signal, independent of whether any
+            # link below turns out to be email-scannable.
+            has_links = bool(about.get("links"))
+            links = extract_link_urls(about)
             if not links:
-                return ""
+                return "", has_links
 
             # The creator's own domain first: it's the better signal, and
             # it's where 3 of the 4 measured hits came from.
             for link in candidate_links(links):
                 email = self._email_from_link(page, link)
                 if email:
-                    return email
+                    return email, True
 
             # Then the social /about pages, which only get loaded for
             # channels every earlier step missed.
@@ -317,14 +341,23 @@ class BrowserEmailScraper:
                     logger.info("Could not read %s: %s", probe, exc)
                     continue
                 if email:
-                    return email
-            return ""
+                    return email, True
+            return "", True
         except Exception as exc:
             logger.info("Playwright email lookup failed for %s: %s", channel_id, exc)
-            return ""
+            return "", None
         finally:
             if opened:
                 self._close_page(page)
+
+    def find_email(self, channel_id: str) -> str:
+        """
+        Contact email found by following the channel's public link list, or
+        "". Thin wrapper over find_contact() for callers that only need the
+        address; the email chain itself calls find_contact() directly (it
+        also needs the link-presence flag).
+        """
+        return self.find_contact(channel_id)[0]
 
     def _open_page(self, channel_id: str):
         """(page, opened) — (None, False) when a page can't be opened."""

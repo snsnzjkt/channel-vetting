@@ -254,3 +254,37 @@ def test_country_code_passes_through_an_unrecognised_two_letter_code():
 
     assert country_code("IN") == "IN"
     assert zone_verdict("IN") is False
+
+
+# --------------------------------------------------------------------------
+# description_location_outside_zone: catch a real non-zone location stated in
+# the About even when snippet.country claims the US
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("description, expected", [
+    ("Home theater reviews. Based in the Philippines 🇵🇭", "PH"),
+    ("📍 India | AV gear on a budget", "IN"),
+    ("Located in Pakistan, reviewing soundbars", "PK"),
+    ("Location: Nigeria", "NG"),
+    ("living in south korea, home cinema builds", "KR"),   # multi-word, longest-first
+    ("based out of Brazil", "BR"),
+])
+def test_description_reveals_an_outside_location(description, expected):
+    from search_zones import description_location_outside_zone
+
+    assert description_location_outside_zone(description) == expected
+
+
+@pytest.mark.parametrize("description", [
+    "",
+    "Home cinema and surround sound reviews",
+    "Based in Los Angeles, USA",                 # in-zone city + country
+    "based in Canada, eh",                       # in-zone country isn't matched
+    "I review gear made in Japan and China",     # passing mention, no location cue
+    "My parents are from India but I live in Chicago",  # 'from' is NOT a cue
+    "Clips shot in Iceland last summer",         # 'shot in' isn't a cue (and IS is in-zone)
+])
+def test_description_does_not_trip_on_mentions_or_in_zone_locations(description):
+    from search_zones import description_location_outside_zone
+
+    assert description_location_outside_zone(description) == ""

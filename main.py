@@ -29,14 +29,19 @@ from enrichment import (
     count_longform_in_older_videos,
 )
 from scoring import calc_fake_follower_risk, calc_overall_score, QUALIFIED, qualify
-from search_zones import country_code, region_from_language_tag, zone_verdict
+from search_zones import (
+    country_code,
+    description_location_outside_zone,
+    region_from_language_tag,
+    zone_verdict,
+)
 from airtable_client import (
     get_existing_channel_ids,
     push_record,
     AirtableReadError,
     count_added_today,
 )
-from external_dedupe import fetch_external_handles
+from external_dedupe import fetch_external_handles, ExternalIndex, match_external
 from prospect_day import today_iso
 from quota_tracker import get_today_spend
 from browser_email import BrowserEmailScraper, null_scraper
@@ -276,6 +281,7 @@ DROP_TOO_FEW_LONGFORM = "too_few_longform_videos"
 DROP_NOT_ENGLISH = "not_english"
 DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
 DROP_EXCLUDED_TOPIC = "excluded_topic"
+DROP_NO_SOCIAL = "no_social_presence"
 
 # Whole categories a brand-partnership run must never surface, however well a
 # channel otherwise fits a niche: political commentary, ASMR, and firearms /
@@ -447,6 +453,17 @@ def resolve_country(stats: dict, performance: dict) -> str:
     There is deliberately no browser step here. See browser_email.py: the
     About panel's country is the same field as snippet.country, so it
     recovered 0 of the 5 live channels that lack one.
+
+    NOTE — this is NOT the whole zone story. process_candidate runs a THIRD,
+    higher-priority signal BEFORE this one: description_location_outside_zone()
+    reads an explicit "based in <outside country>" out of the About text and,
+    unlike step 2 here, it DOES override a declared snippet.country (a creator
+    who set country=US but says "based in the Philippines" is dropped). It is a
+    separate gate rather than a source folded in here because (a) it only ever
+    votes "outside", never "inside", and (b) it must fire before the paid
+    performance/long-form fetch, whereas step 2 above needs content_language
+    from that fetch. Precedence, then, is: description-stated-outside (highest)
+    > declared snippet.country > language region subtag (lowest).
     """
     country = (stats.get("country") or "").strip()
     if country_code(country):
@@ -457,10 +474,11 @@ def resolve_country(stats: dict, performance: dict) -> str:
 
 def resolve_email_with_source(
     stats: dict, performance: dict, scraper=None, enricher=None
-) -> tuple[str, str]:
+) -> tuple[str, str, bool | None]:
     """
     Email fallback chain, cheapest and strongest signal first, returning
-    (email, source_label) — or ("", "") when no step found anything:
+    (email, source_label, has_external_links) — or ("", "", <flag>) when no
+    step found an address:
 
       1. An address repeated across several recent video descriptions.
       2. A single mention in the channel's own About description.
@@ -483,17 +501,25 @@ def resolve_email_with_source(
     the full About description from channels.list, so re-reading it in a
     browser could never add an address. See browser_email.py.
 
+    The third return value, has_external_links, is the "does this channel
+    have any web/social presence" signal for the no-social drop (see
+    DROP_NO_SOCIAL in process_candidate). It is only KNOWN when step 5 runs
+    — i.e. when steps 1-4 found no address AND the browser is enabled — so
+    it is None for every earlier-step hit (their link list was never
+    fetched, so absence isn't established). It rides out of the SAME link-
+    list fetch step 5 already makes; nothing extra is loaded for it.
+
     Reporting the source here is what lets callers attribute a hit to a
     step. Comparing the result back against stats/performance can't: steps
     3, 4 and 5 are indistinguishable that way.
     """
     email = performance.get("repeated_email")
     if email:
-        return email, EMAIL_SOURCE_REPEATED
+        return email, EMAIL_SOURCE_REPEATED, None
 
     email = stats.get("business_email", "")
     if email:
-        return email, EMAIL_SOURCE_ABOUT
+        return email, EMAIL_SOURCE_ABOUT, None
 
     email = scan_older_videos_for_email(
         stats["channel_id"],
@@ -502,7 +528,7 @@ def resolve_email_with_source(
         performance.get("video_descriptions", []),
     )
     if email:
-        return email, EMAIL_SOURCE_OLDER
+        return email, EMAIL_SOURCE_OLDER, None
 
     # Both collaborators ship a null object precisely so "absent" is an
     # object that returns "". Normalising here keeps that as the ONE
@@ -515,13 +541,16 @@ def resolve_email_with_source(
 
     email = enricher.find_email(stats["channel_id"])
     if email:
-        return email, EMAIL_SOURCE_INFLUENCERS
+        return email, EMAIL_SOURCE_INFLUENCERS, None
 
-    email = scraper.find_email(stats["channel_id"])
+    # Step 5, the only step that also reports link-list presence. find_contact
+    # returns (email, has_external_links); an inert scraper yields ("", None),
+    # which correctly leaves the no-social drop dormant.
+    email, has_external_links = scraper.find_contact(stats["channel_id"])
     if email:
-        return email, EMAIL_SOURCE_BROWSER
+        return email, EMAIL_SOURCE_BROWSER, has_external_links
 
-    return "", ""
+    return "", "", has_external_links
 
 
 def resolve_email(stats: dict, performance: dict, scraper=None, enricher=None) -> str:
@@ -631,7 +660,7 @@ def csv_safe(value: str) -> str:
 
 def process_candidate(
     candidate: dict,
-    external_handles: dict[str, str],
+    external_handles: ExternalIndex,
     blocklist,
     niche_config: dict,
     scraper,
@@ -671,14 +700,17 @@ def process_candidate(
         return None, "blocked"
 
     # Skip channels already tracked in the base's other YouTube outreach/
-    # leads/influencer tables (see external_dedupe.py) — checked here
-    # rather than pre-discovery, since we only know a candidate's @handle
-    # once channels.list has already run.
-    handle = stats.get("handle", "")
-    if handle and handle in external_handles:
+    # leads/influencer tables (see external_dedupe.py) — checked here rather
+    # than pre-discovery, since we only know a candidate's @handle once
+    # channels.list has run. Matches on @handle first and channel NAME second,
+    # so a creator who renamed their handle is still caught by name.
+    external_hit = match_external(
+        external_handles, handle=stats.get("handle", ""), name=stats.get("channel_title", ""),
+    )
+    if external_hit:
         logger.info(
-            "Skipping %s — already tracked in '%s' (@%s).",
-            stats.get("channel_title"), external_handles[handle], handle,
+            "Skipping %s — already tracked in '%s'.",
+            stats.get("channel_title"), external_hit,
         )
         return None, "duplicate"
 
@@ -713,6 +745,20 @@ def process_candidate(
             stats.get("channel_title"), DROP_EXCLUDED_TOPIC, topic,
         )
         return None, DROP_EXCLUDED_TOPIC
+
+    # Real-location check: a creator who set snippet.country to the US but
+    # states an outside-the-zone location in their About ("based in the
+    # Philippines") is dropped here. Free (reads the description already
+    # fetched) and placed before the performance fetch; the declared-country
+    # zone check further down still runs for everyone whose description says
+    # nothing about where they live.
+    desc_country = description_location_outside_zone(stats.get("description", ""))
+    if desc_country:
+        logger.info(
+            "Dropping %s before push — %s (description says %s, not the declared country).",
+            stats.get("channel_title"), DROP_OUTSIDE_SEARCH_ZONE, desc_country,
+        )
+        return None, DROP_OUTSIDE_SEARCH_ZONE
 
     performance = get_recent_video_performance(channel_id, stats.get("uploads_playlist_id"))
     time.sleep(API_SLEEP_SECONDS)
@@ -798,7 +844,25 @@ def process_candidate(
         niche_config["min_channel_age_months"],
     )
 
-    email = resolve_email(stats, performance, scraper, enricher)
+    email, _email_source, has_external_links = resolve_email_with_source(
+        stats, performance, scraper, enricher
+    )
+
+    # No-social drop: a channel whose About link list was fetched (step 5 of
+    # the email chain ran, because steps 1-4 found no address) and came back
+    # EMPTY has no website and no social profile — no outreach surface beyond
+    # YouTube, and nothing to vet the creator against. Only a positively-empty
+    # list (False) discards; None means the list was never read (the browser
+    # is off, or an address was already found at an earlier step) and the
+    # channel is KEPT — the same "absent data never disqualifies" rule the
+    # zone check follows. Runs after the email chain because the signal comes
+    # OUT of that chain's own link-list fetch, at no extra cost.
+    if has_external_links is False:
+        logger.info(
+            "Dropping %s before push — %s (no external links and no contact email).",
+            stats.get("channel_title"), DROP_NO_SOCIAL,
+        )
+        return None, DROP_NO_SOCIAL
 
     # Checkpoint 3 — catches agency addresses shared across channels.
     if email:
@@ -908,7 +972,7 @@ def _run_discovery_rounds(
     niche_config: dict,
     discovery,
     globally_tracked_ids: set[str],
-    external_handles: dict[str, str],
+    external_handles: ExternalIndex,
     blocklist,
     scraper,
     enricher,
@@ -1024,7 +1088,7 @@ def run_niche(
     max_results_per_keyword: int,
     days_back: int,
     globally_tracked_ids: set[str],
-    external_handles: dict[str, str],
+    external_handles: ExternalIndex,
     blocklist,
     niche_config: dict,
     scraper,

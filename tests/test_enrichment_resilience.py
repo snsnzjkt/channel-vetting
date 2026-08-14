@@ -359,23 +359,125 @@ def _recent_iso(days_ago):
     return (datetime.now(timezone.utc) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _videos_payload_with_views(view_counts, published_ats=None):
-    """view_counts entries may be None to omit viewCount entirely (an
-    unreported count). published_ats defaults every video to a settled date."""
+def _videos_payload_with_views(view_counts, published_ats=None, durations=None):
+    """
+    view_counts entries may be None to omit viewCount entirely (an unreported
+    count). published_ats defaults every video to a settled date. durations
+    defaults every video to long-form ("PT10M"); pass e.g. "PT30S" for a Short
+    or None to omit the duration entirely (unreadable).
+    """
     if published_ats is None:
         published_ats = [_SETTLED] * len(view_counts)
+    if durations is None:
+        durations = ["PT10M"] * len(view_counts)
     items = []
-    for i, (vc, pa) in enumerate(zip(view_counts, published_ats)):
+    for i, (vc, pa, dur) in enumerate(zip(view_counts, published_ats, durations)):
         stats = {"likeCount": "1", "commentCount": "1"}
         if vc is not None:
             stats["viewCount"] = str(vc)
+        content_details = {} if dur is None else {"duration": dur}
         items.append({
             "id": f"v{i}",
             "snippet": {"description": "", "publishedAt": pa},
             "statistics": stats,
-            "contentDetails": {"duration": "PT10M"},
+            "contentDetails": content_details,
         })
     return {"items": items}
+
+
+# --- the per-video floor judges LONG-FORM only, never Shorts ---------------
+# Shorts view counts live on a different scale entirely, so mixing them into
+# the floor measured the wrong thing in both directions: it dropped solid
+# long-form channels whose Shorts underperformed, and passed Shorts factories
+# whose Shorts happened to do numbers.
+
+
+def test_settled_views_excludes_shorts(monkeypatch):
+    """Two weak Shorts and one strong long-form upload: only the long-form
+    view count reaches the per-video floor."""
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(3)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [200, 300, 45_000],
+            durations=["PT30S", "PT45S", "PT12M"],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["settled_views"] == [45_000]
+    assert result["min_views"] == 45_000   # not 200
+
+
+def test_a_short_at_exactly_the_shorts_boundary_is_excluded(monkeypatch):
+    """SHORTS_MAX_SECONDS is inclusive — 60s is a Short, 61s is not."""
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(2)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [500, 20_000], durations=["PT60S", "PT61S"],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    assert enrichment.get_recent_video_performance("UC1", "PL1")["settled_views"] == [20_000]
+
+
+def test_an_unreadable_duration_is_excluded_from_the_floor(monkeypatch):
+    """The floor is a MINIMUM, so the burden of proof is on the channel —
+    the same lean count_longform() takes. An unclassifiable video is not
+    counted as long-form."""
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(2)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [100, 30_000], durations=[None, "PT8M"],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    assert enrichment.get_recent_video_performance("UC1", "PL1")["settled_views"] == [30_000]
+
+
+def test_the_floor_sample_reaches_past_shorts_for_ten_long_form_videos(monkeypatch):
+    """
+    A channel that posts Shorts between every real upload must still be judged
+    on 10 long-form videos, not on however few fall inside the newest 10 raw
+    uploads. Alternating Short/long-form over 30 videos yields 15 long-form;
+    the sample takes the newest 10 of those.
+    """
+    view_counts, durations = [], []
+    for i in range(30):
+        is_short = i % 2 == 0
+        view_counts.append(100 if is_short else 20_000 + i)
+        durations.append("PT30S" if is_short else "PT10M")
+
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(30)),
+        videos=_Resp(200, _videos_payload_with_views(view_counts, durations=durations)),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    settled = enrichment.get_recent_video_performance("UC1", "PL1")["settled_views"]
+    assert len(settled) == enrichment.PERFORMANCE_SAMPLE_SIZE == 10
+    assert all(v >= 20_000 for v in settled), "a Short leaked into the long-form sample"
+
+
+def test_settled_views_is_empty_when_every_recent_upload_is_a_short(monkeypatch):
+    """
+    Nothing to judge -> unknown, so the per-video floor is skipped rather than
+    failed. Such a channel is caught by the Shorts-only and long-form-count
+    gates instead, which is where that verdict belongs.
+    """
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(3)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [900, 900, 900], durations=["PT30S"] * 3,
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["settled_views"] == []
+    assert result["min_views"] is None
 
 
 def test_min_views_is_the_lowest_video_in_the_performance_window(monkeypatch):

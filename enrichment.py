@@ -637,10 +637,6 @@ def get_recent_video_performance(
     total_views = 0
     total_engagements = 0  # likes + comments
     performance_count = 0
-    # Per-video views across the performance window, kept so the caller can
-    # gate on "every recent video passed a view floor" — a stricter test than
-    # avg_views, which one strong upload can carry over the line on its own.
-    performance_views = []
     video_languages = []
     video_descriptions = []
     durations = []
@@ -674,25 +670,55 @@ def get_recent_video_performance(
         total_views += views
         total_engagements += _as_int(stats.get("likeCount")) + _as_int(stats.get("commentCount"))
         performance_count += 1
-        # The per-video floor (min_views) judges only videos whose count has
-        # SETTLED (public >= PERFORMANCE_MATURITY_DAYS) and is actually
-        # REPORTED. A just-posted upload is still climbing toward 10k, and an
-        # unreported count is unknown, not zero — counting either would sink
-        # the channel on a value that isn't a real underperformer. avg_views
-        # above is unchanged: it still spans the whole window.
-        if raw_views is not None and _view_count_is_settled(snippet.get("publishedAt")):
-            performance_views.append(views)
 
     if not performance_count:
         logger.warning("Channel %s returned no videos in the performance window — skipping.", channel_id)
         return None
 
+    # The per-video view floor judges LONG-FORM uploads only — never Shorts.
+    #
+    # This is the whole point of the gate: "10,000+ views on 70% of their recent
+    # videos" is a statement about the channel's actual content. Shorts view
+    # counts live on a completely different scale (a Short can take 200k or 200
+    # for reasons unrelated to the channel's standing), so mixing them in made
+    # the floor measure the wrong thing in both directions — dropping a solid
+    # long-form channel whose Shorts underperform, and passing a Shorts factory
+    # whose Shorts happened to do numbers.
+    #
+    # Selected newest-first from `video_ids` (playlistItems order, the only
+    # authoritative one) across the WIDE fetched window rather than the newest
+    # 10 raw uploads, then capped at PERFORMANCE_SAMPLE_SIZE. That way a channel
+    # that posts 8 Shorts between every long-form upload is still judged on 10
+    # real videos instead of the 2 that happen to fall inside the newest 10.
+    #
+    # Three exclusions, each for a reason already established elsewhere in this
+    # module: an UNREADABLE duration doesn't count (the burden of proof is on
+    # the channel for a MINIMUM, same as count_longform); an unsettled upload
+    # doesn't count (it is still climbing toward the floor); and an unreported
+    # view count doesn't count (unknown, not zero).
+    videos_by_id = {v.get("id"): v for v in video_items}
+    settled_views = []
+    for video_id in video_ids:
+        if len(settled_views) >= PERFORMANCE_SAMPLE_SIZE:
+            break
+        video = videos_by_id.get(video_id)
+        if video is None:
+            continue
+        seconds = parse_iso8601_duration(video.get("contentDetails", {}).get("duration"))
+        if seconds is None or seconds <= SHORTS_MAX_SECONDS:
+            continue  # a Short, or a duration we can't read
+        raw = video.get("statistics", {}).get("viewCount")
+        if raw is None:
+            continue
+        if not _view_count_is_settled(video.get("snippet", {}).get("publishedAt")):
+            continue
+        settled_views.append(_as_int(raw))
+
     avg_views = total_views / performance_count
-    # The weakest SETTLED, reported video in the window (see the append guard
-    # above). None when no window video qualifies — e.g. a channel that just
-    # posted its whole newest window — so the per-video floor is skipped
-    # (unknown), not failed.
-    min_views = min(performance_views) if performance_views else None
+    # The weakest long-form video in the sample above. None when nothing
+    # qualified — a channel whose recent long-form uploads are all too new, or
+    # that posts none — so the per-video floor is skipped (unknown), not failed.
+    min_views = min(settled_views) if settled_views else None
     avg_engagement_rate = (total_engagements / total_views * 100) if total_views > 0 else 0.0
 
     return {
@@ -701,13 +727,13 @@ def get_recent_video_performance(
         # per-video floor gates on this so a single weak recent upload isn't
         # hidden by a strong average.
         "min_views": min_views,
-        # Every SETTLED, reported per-video view count in the performance
-        # window (same guard as min_views above). main's per-video floor needs
-        # the whole list, not just the minimum: the rule is "at least
+        # Per-video view counts for the newest settled LONG-FORM uploads (see
+        # the selection above — Shorts are excluded). main's per-video floor
+        # needs the whole list, not just the minimum: the rule is "at least
         # MIN_VIEWS_PER_VIDEO_RATIO of them clear the floor", which a single
         # aggregate cannot express. min_views stays because it is what the drop
         # log reports, and because it is the cheaper thing to assert on.
-        "settled_views": list(performance_views),
+        "settled_views": list(settled_views),
         "avg_engagement_rate": avg_engagement_rate,
         "upload_dates": upload_dates,
         # Size of the *performance* window (still 10), not the email scan.

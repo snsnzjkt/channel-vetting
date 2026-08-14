@@ -424,6 +424,50 @@ def test_each_niche_gets_its_own_exclusion_list():
     assert a is not main.EXCLUDED_TOPIC_KEYWORDS
 
 
+def test_each_niche_targets_the_creator_gender_its_brief_asks_for():
+    """
+    Home Theater is a men's-product brief, Lifestyle Sofa a women's one, and the
+    vendor filters CREATOR gender server-side. Pinned because it is config with
+    no other test coverage: a wrong value here silently sources the wrong
+    audience for a whole run, and nothing downstream would flag it.
+    """
+    assert main.NICHES["Home Theater"]["discovery_filters"]["gender"] == "male"
+    assert main.NICHES["Lifestyle Sofa"]["discovery_filters"]["gender"] == "female"
+
+
+def test_the_niche_filters_reach_the_vendor_payload(monkeypatch):
+    """
+    The wiring loop rewrites discovery_filters at import, so this asserts the
+    end-to-end path: whatever NICHES declares is what discover() is handed, with
+    gender, language and the derived subscriber floor all intact.
+    """
+    seen = {}
+
+    class _CapturingDiscovery:
+        enabled = True
+        credits_spent = 0.0
+        creators_billed = 0
+
+        def discover(self, *, filters, target, exclude_handles=(), source_label=""):
+            seen["filters"] = filters
+            return []
+
+    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    monkeypatch.setattr(main, "process_candidate", lambda *a, **k: (None, "skip"))
+
+    niche_config = main.NICHES["Home Theater"]
+    main.run_niche(
+        "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
+        niche_config, None, None, _CapturingDiscovery(),
+    )
+
+    sent = seen["filters"]
+    assert sent["gender"] == "male"
+    assert sent["profile_language"] == ["en"]
+    assert sent["number_of_subscribers"] == {"min": 5000}
+    assert "keywords_not_in_description" in sent
+
+
 def test_the_quota_ceiling_stops_enrichment(monkeypatch):
     """
     can_afford_search() gates search.list only, and the discovery source

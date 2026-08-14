@@ -148,6 +148,55 @@ def get_existing_channel_ids(table_name: str) -> set[str]:
     return existing_ids
 
 
+def get_records(table_name: str, fields: list[str] | None = None) -> list[dict]:
+    """
+    Paginate through `table_name` and return full records as
+    `[{"id": <rec…>, "fields": {…}}, …]`.
+
+    Unlike get_existing_channel_ids()/get_records_missing_email(), which each
+    project down to the one value their caller needs, this returns the record
+    ID alongside the fields — required by anything that has to UPDATE or DELETE
+    a specific row (audit_prospects.py). Pass `fields` to limit what comes back
+    over the wire; omit it for every field.
+
+    Raises AirtableReadError rather than returning a partial list, for the same
+    reason get_existing_channel_ids() does: a caller deciding which rows to
+    DELETE must never act on a set that silently lost a page.
+    """
+    records: list[dict] = []
+    offset = None
+
+    while True:
+        params: dict = {"pageSize": 100}
+        if fields:
+            params["fields[]"] = fields
+        if offset:
+            params["offset"] = offset
+
+        try:
+            resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+        except requests.RequestException as e:
+            raise AirtableReadError(f"get_records({table_name}) request failed: {e}") from e
+
+        if resp.status_code != 200:
+            raise AirtableReadError(
+                f"get_records({table_name}) failed: {resp.status_code} {safe_body(resp)}"
+            )
+
+        data = resp.json()
+        for record in data.get("records", []):
+            if record.get("id"):
+                records.append({"id": record["id"], "fields": record.get("fields", {})})
+
+        offset = data.get("offset")
+        if not offset:
+            break
+        time.sleep(API_SLEEP_SECONDS)
+
+    logger.info("Fetched %d record(s) from Airtable table '%s'.", len(records), table_name)
+    return records
+
+
 def get_records_missing_email(table_name: str) -> list[str]:
     """
     Paginate through `table_name` and collect the Channel ID of every

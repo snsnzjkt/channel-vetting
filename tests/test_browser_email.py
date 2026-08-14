@@ -570,7 +570,11 @@ def test_the_scraper_does_not_do_country_lookups():
 
 
 def test_resolve_email_prefers_free_steps_over_browser():
-    """The browser must only run when the free steps found nothing."""
+    """
+    A free step's address wins, and the browser never FOLLOWS a link once one
+    is in hand — but it does still read the About page for the link list, which
+    is what the no-social drop runs on. One page load, no link navigations.
+    """
     import main
     from browser_email import BrowserEmailScraper
 
@@ -582,8 +586,36 @@ def test_resolve_email_prefers_free_steps_over_browser():
 
     stats = {"business_email": "about@page.com", "channel_id": "UC1"}
     performance = {"repeated_email": ""}
-    assert main.resolve_email(stats, performance, scraper) == "about@page.com"
-    assert browser.pages_created == 0
+    email, source, has_links = main.resolve_email_with_source(stats, performance, scraper)
+
+    assert email == "about@page.com"
+    assert source == main.EMAIL_SOURCE_ABOUT, "the browser must not be credited"
+    # The link list was read, so the no-social signal is KNOWN rather than None
+    # — the whole point of the change. site.com was never visited.
+    assert has_links is True
+    assert browser.pages_created == 1
+
+
+def test_the_link_list_is_read_even_when_an_earlier_step_found_the_address():
+    """
+    The defect this pins: a channel with NO external links whose address sits
+    in its video descriptions was written as a prospect, because step 1
+    short-circuited before the link list was ever fetched. Measured live on
+    "Timber Time" (171k subs, empty link list) on 2026-08-15.
+    """
+    import main
+    from browser_email import BrowserEmailScraper
+
+    browser = _FakeBrowser({"youtube.com": _about(links=[])})
+    scraper = BrowserEmailScraper(browser=browser)
+
+    stats = {"business_email": "", "channel_id": "UC1"}
+    performance = {"repeated_email": "indescription@creator.com"}
+    email, source, has_links = main.resolve_email_with_source(stats, performance, scraper)
+
+    assert email == "indescription@creator.com"
+    assert source == main.EMAIL_SOURCE_REPEATED
+    assert has_links is False, "an empty link list must be reported, not left unknown"
 
 
 def test_resolve_email_falls_through_to_browser():

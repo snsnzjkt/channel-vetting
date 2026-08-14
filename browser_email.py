@@ -283,7 +283,7 @@ class BrowserEmailScraper:
                     pass
             return cls(enabled=False)
 
-    def find_contact(self, channel_id: str) -> tuple[str, bool | None]:
+    def find_contact(self, channel_id: str, need_email: bool = True) -> tuple[str, bool | None]:
         """
         Follow the channel's public link list ONCE, returning
         (email, has_external_links):
@@ -297,12 +297,20 @@ class BrowserEmailScraper:
             view-model was absent).
 
         The flag is what lets the pipeline drop a channel with no web/social
-        presence (main.DROP_NO_SOCIAL) WITHOUT a second page load — it falls
-        out of the same fetch the email step already makes. None (not False)
-        on an unreadable list is deliberate: "no links" is only reported when
-        an empty list was actually SEEN, so the "absent data never
-        disqualifies" rule the rest of the pipeline follows still holds. One
-        page serves the whole channel.
+        presence (main.DROP_NO_SOCIAL). None (not False) on an unreadable list
+        is deliberate: "no links" is only reported when an empty list was
+        actually SEEN, so the "absent data never disqualifies" rule the rest of
+        the pipeline follows still holds.
+
+        `need_email=False` reads the link list and stops there, returning
+        ("", has_links) without following a single link. That is the mode the
+        pipeline uses for a channel whose address an earlier chain step already
+        found, and it is what makes the no-social drop reachable at all: the two
+        questions ("do we have an address" and "does this creator exist
+        anywhere off YouTube") are independent, and answering only the first is
+        how a channel with zero external links but an address in its video
+        descriptions was being written as a prospect. Costs the ONE About page
+        load; the up-to-four link/probe navigations are what it skips.
         """
         if not self._enabled:
             return "", None
@@ -320,6 +328,8 @@ class BrowserEmailScraper:
             # the "no external presence" signal, independent of whether any
             # link below turns out to be email-scannable.
             has_links = bool(about.get("links"))
+            if not need_email:
+                return "", has_links
             links = extract_link_urls(about)
             if not links:
                 return "", has_links

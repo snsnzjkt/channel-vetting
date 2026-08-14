@@ -503,12 +503,18 @@ class StubEmailSource:
         self.calls.append(channel_id)
         return self.email
 
-    def find_contact(self, channel_id):
+    def find_contact(self, channel_id, need_email=True):
         # Used when this stub stands in for the browser scraper (step 5). An
         # address implies the link list wasn't empty; no address leaves
         # presence unknown (None) here — these tests don't exercise the
         # empty-link-list case.
+        #
+        # need_email=False is the link-list-only mode, which the chain also
+        # calls once an EARLIER step found the address — so it must not hand
+        # back an email, or a step-1 hit would be mislabelled as step 5.
         self.calls.append(channel_id)
+        if not need_email:
+            return "", (True if self.email else None)
         return self.email, (True if self.email else None)
 
 
@@ -544,7 +550,11 @@ def test_step_4_runs_before_the_browser(no_deep_scan):
 
     assert email == "api@creator.com"
     assert source == main.EMAIL_SOURCE_INFLUENCERS
-    assert not scraper.calls, "the browser must not run once step 4 has an address"
+    # The browser IS consulted — but only for the link list (need_email=False),
+    # never for an address. Step 4's answer stands, and the source label proves
+    # the browser didn't supply it. See resolve_email_with_source for why the
+    # link list has to be read even when the address is already in hand.
+    assert scraper.calls == ["UC123"]
 
 
 def test_browser_still_runs_when_step_4_misses(no_deep_scan):

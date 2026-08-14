@@ -282,11 +282,19 @@ def test_resolve_email_deep_scans_before_the_browser(monkeypatch):
 
     class _Browser:
         def __init__(self):
-            self.calls = 0
+            self.email_calls = 0
+            self.link_list_calls = 0
+
+        def find_contact(self, channel_id, need_email=True):
+            if need_email:
+                self.email_calls += 1
+                return "browser@found.com", True
+            # Link-list-only mode: no address, just the presence flag.
+            self.link_list_calls += 1
+            return "", True
 
         def find_email(self, channel_id):
-            self.calls += 1
-            return "browser@found.com"
+            return self.find_contact(channel_id)[0]
 
     browser = _Browser()
     monkeypatch.setattr(
@@ -298,7 +306,11 @@ def test_resolve_email_deep_scans_before_the_browser(monkeypatch):
     performance = {"repeated_email": "", "next_page_token": "TOKEN2", "video_descriptions": []}
 
     assert main.resolve_email(stats, performance, browser) == "older@creator.com"
-    assert browser.calls == 0
+    # The expensive part — following links for an address — must not run.
+    assert browser.email_calls == 0
+    # The cheap part — one About page for the link list — still does, because
+    # the no-social drop needs it. See resolve_email_with_source.
+    assert browser.link_list_calls == 1
 
 
 def test_resolve_email_skips_deep_scan_when_a_free_step_answered(monkeypatch):

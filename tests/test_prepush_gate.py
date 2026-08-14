@@ -356,10 +356,11 @@ def test_gate_precedence_is_stable(overrides, expected):
 # LONG-FORM videos clearing MIN_VIEWS_PER_VIDEO; Shorts never enter the sample
 # (see enrichment.get_recent_video_performance).
 #
-# The 0.60 figure is calibrated against the live tables rather than chosen: on
+# The 0.50 figure is calibrated against the live tables rather than chosen: on
 # all 80 tracked rows, Shorts-inflated channels scored 0-3 of 10 while channels
-# a human reviewer had already Approved scored 5-6 of 10. See
-# MIN_VIEWS_PER_VIDEO_RATIO in main.py for the full reasoning.
+# a human reviewer had already Approved scored 5-6 of 10, so the bar must sit in
+# the gap AND admit 5. See MIN_VIEWS_PER_VIDEO_RATIO in main.py for the full
+# reasoning, including why 0.60 looked right and was not.
 
 
 def _views(above: int, below: int) -> list[int]:
@@ -368,19 +369,21 @@ def _views(above: int, below: int) -> list[int]:
 
 
 def test_drops_a_channel_when_too_much_of_the_sample_is_weak():
-    """5 of 10 clearing is under the 60% bar."""
-    assert drop_reason(settled_views=_views(5, 5)) == "video_below_view_minimum"
+    """4 of 10 clearing is under the 50% bar."""
+    assert drop_reason(settled_views=_views(4, 6)) == "video_below_view_minimum"
 
 
-def test_exactly_sixty_percent_of_the_sample_is_kept():
+def test_exactly_fifty_percent_of_the_sample_is_kept():
     from main import MIN_VIEWS_PER_VIDEO, MIN_VIEWS_PER_VIDEO_RATIO
 
     assert MIN_VIEWS_PER_VIDEO == 10_000
-    assert MIN_VIEWS_PER_VIDEO_RATIO == 0.60
-    # 6 of 10 is the boundary and must PASS. This is the live case the
-    # recalibration was for: ETPC (6/10, 22,198 avg) and Adrianne MG (6/10,
-    # 16,883 avg) were both being discarded at 70%, and a reviewer had marked
-    # ETPC Approved.
+    assert MIN_VIEWS_PER_VIDEO_RATIO == 0.50
+    # 5 of 10 is the boundary and must PASS. This is the live case the
+    # recalibration was for: Bane Tech (5/10, 23,914 avg) had been marked
+    # Approved by a reviewer and was still being discarded at 0.60, where
+    # ceil(0.60 * 10) = 6 missed it by exactly one video.
+    assert drop_reason(settled_views=_views(5, 5)) is None
+    # ...and the reviewer-approved channel one notch above it still passes.
     assert drop_reason(settled_views=_views(6, 4)) is None
 
 
@@ -394,7 +397,8 @@ def test_the_per_video_floor_still_catches_a_shorts_inflated_channel():
     The reason this gate exists at all, and the live case that proved it:
     "Explore With Jasir" reported a 140,885-view average with 0 of 10 long-form
     videos over 10k. A 3-of-10 channel (Kat and Sourabh, 57,234 avg) is caught
-    at 60% too — the bar came down without letting these through.
+    at 50% too — the bar came down twice without letting these through, which
+    is the whole reason 0.50 is safe.
     """
     assert drop_reason(avg_views=140_000, settled_views=_views(0, 10)) == "video_below_view_minimum"
     assert drop_reason(avg_views=57_000, settled_views=_views(3, 7)) == "video_below_view_minimum"
@@ -411,22 +415,54 @@ def test_a_single_weak_video_does_not_sink_a_strong_channel():
 
 def test_the_ratio_rounds_up_on_a_partial_video():
     """
-    ceil(0.60 * 3) == 2, so on a 3-video sample two of three must clear.
-    Rounding up keeps a thin sample from being judged more leniently than a
-    full one.
+    ceil(0.50 * 7) == 4, so a 7-video sample needs four, not three. Rounding up
+    keeps a thin sample from being judged more leniently than a full one.
+    Pins the live Adrianne MG case (2 of 7), which must still fail — the
+    small-sample skip below is NOT a way for her to get in.
     """
-    assert drop_reason(settled_views=_views(2, 1)) is None
-    assert drop_reason(settled_views=_views(1, 2)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(4, 3)) is None
+    assert drop_reason(settled_views=_views(3, 4)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(2, 5)) == "video_below_view_minimum"
 
 
-def test_a_nine_video_sample_still_needs_six():
+def test_a_nine_video_sample_still_needs_five():
     """
-    ceil(0.60 * 9) == 6, so a sample short one video does not get an easier
+    ceil(0.50 * 9) == 5, so a sample short one video does not get an easier
     bar. Pins the live Diva Angel case (2 of 9), which must still fail.
     """
-    assert drop_reason(settled_views=_views(6, 3)) is None
-    assert drop_reason(settled_views=_views(5, 4)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(5, 4)) is None
+    assert drop_reason(settled_views=_views(4, 5)) == "video_below_view_minimum"
     assert drop_reason(settled_views=_views(2, 7)) == "video_below_view_minimum"
+
+
+def test_a_sample_too_small_to_judge_is_skipped_not_failed():
+    """
+    Below MIN_SETTLED_SAMPLE_FOR_RATIO judgeable videos the ceil quantises so
+    hard that a single upload decides the channel — a measurement artefact, not
+    a verdict. Pins the live Kaitlyn :) case (1 of 3): at 0.50, ceil(0.50 * 3)
+    is 2, so she would have been discarded on the strength of two videos.
+
+    Unknown is not a failure, the same rule an unreported video_count follows.
+    """
+    from main import MIN_SETTLED_SAMPLE_FOR_RATIO
+
+    assert MIN_SETTLED_SAMPLE_FOR_RATIO == 5
+    assert drop_reason(settled_views=_views(1, 2)) is None
+    assert drop_reason(settled_views=_views(0, 4)) is None
+    # 5 is the first size that IS judged, and 2 of 5 fails it.
+    assert drop_reason(settled_views=_views(2, 3)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(3, 2)) is None
+
+
+def test_the_small_sample_skip_does_not_rescue_a_shorts_factory():
+    """
+    The skip is bounded by every other gate: a channel only reaches the
+    per-video floor having already cleared min_avg_views, the 30-video floor
+    and the 30-long-form floor. So "too few judgeable videos" means their
+    recent long-form is too NEW to score, never that they barely post it.
+    """
+    assert drop_reason(avg_views=9_999, settled_views=_views(0, 3)) == "below_view_minimum"
+    assert drop_reason(video_count=4, settled_views=_views(0, 3)) == "too_few_videos"
 
 
 def test_an_unknown_settled_window_does_not_disqualify():

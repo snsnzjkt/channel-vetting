@@ -3,9 +3,23 @@ name: Channel Vetting Pipeline
 on:
   schedule:
     # 09:00 UTC = 1-2am Pacific, safely after the YouTube quota resets at
-    # midnight Pacific Time. Adjust cadence here (e.g. to a weekly
-    # "0 9 * * 1" for Mondays) if daily discovery is more than you need.
-    - cron: "0 9 * * *"
+    # midnight Pacific Time.
+    #
+    # WEEKDAYS ONLY (1-5 = Mon-Fri). Rows are written for a human review queue,
+    # so discovering on days nobody works just ages the leads and spends
+    # influencers.club credits (~7 per run) against a table that will not be
+    # touched until Monday.
+    #
+    # The day-of-week field is evaluated in UTC, and at 09:00 that lands on the
+    # SAME calendar day in both zones this pipeline cares about — 04:00/05:00 in
+    # America/Toronto (PROSPECT_DAY_TZ, which stamps "Date Added" and drives the
+    # daily caps) and 01:00/02:00 in America/Los_Angeles (the quota reset zone).
+    # So Mon-Fri here really is Mon-Fri for the reviewers, in both DST states.
+    # Moving this cron near either midnight would break that alignment.
+    #
+    # workflow_dispatch below is deliberately NOT restricted: a human choosing
+    # to run on a Saturday is a decision, not a schedule.
+    - cron: "0 9 * * 1-5"
   workflow_dispatch:
     inputs:
       test_mode:

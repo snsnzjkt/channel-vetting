@@ -65,9 +65,59 @@ def test_checks_all_the_texts_passed():
     "I test speakers with everything from the Sex Pistols to Revolver",  # band + album, not firearms
     "I rifle through vintage thrift finds every week",             # 'rifle through' verb, not a firearm
     "Breaking in new speakers with Parliament-Funkadelic",         # funk band, not politics
+    "Logging my progress building a media room",                   # 'logging' verb, not forestry
+    "Daily vlogging from my home cinema",                          # 'vlogging' contains 'logging'
+    "Car and truck reviews — a deliberate Home Theater keyword",   # 'racing' is NOT a term
+    "Solid timber furniture restoration and styling",              # 'timber' deliberately omitted
+    "Power tools review: the best chainsaw for the money",         # 'chainsaw' deliberately omitted
+    "Building a sim racing cockpit in my man cave",                # a rig build IS on-niche
 ])
 def test_legitimate_channels_are_not_flagged(text):
     assert main.excluded_topic_reason(text) is None
+
+
+# --- wrong vertical (2026-08-15) -------------------------------------------
+# Two channels reached the Home Theater table that no gate could stop, because
+# no gate asks about relevance. Both are caught by their own bios. See
+# EXCLUDED_TOPIC_TERMS for the general relevance gate that was measured and
+# rejected before falling back to this blocklist.
+
+
+def test_a_racing_game_channel_is_flagged():
+    """UCZY-IgNxiP2KUM1Ac8knQfg, verbatim from its About text."""
+    assert main.excluded_topic_reason(
+        "Dwight Kovich",
+        "Hey, I'm Dwight - a full-time content creator bringing high-octane "
+        "racing action to life every single day! I specialize in BeamNG.drive "
+        "and Assetto Corsa, streaming daily on Twitch and TikTok",
+    ) == "sim_racing"
+
+
+def test_a_forestry_channel_is_flagged():
+    """UCGpOEUlhFipK0hTeu2AHCMQ, verbatim from its About text."""
+    assert main.excluded_topic_reason(
+        "Timber Time",
+        "If you love the raw power of logging trucks, daring tree-cutting "
+        "skills, and epic battles against mud and rugged terrains, you're in "
+        "the right place! We bring you the most breathtaking moments in "
+        "forestry, from incredible timber transport to cutting-edge machines",
+    ) == "forestry"
+
+
+def test_the_game_title_matches_despite_the_trailing_dot():
+    """'BeamNG.drive' — the word boundary falls at the dot, so the term hits."""
+    assert main.excluded_topic_reason("I play BeamNG.drive") == "sim_racing"
+
+
+def test_the_new_terms_reach_the_server_side_negation_filter():
+    """
+    Each term also goes to the vendor as keywords_not_in_description, so an
+    off-vertical creator is never RETURNED and never billed the 0.01. A term
+    added to the local list but missing from the flattened set would leave the
+    credit leak open while the local gate looked like it was working.
+    """
+    for term in ("beamng", "assetto corsa", "forestry", "logging truck"):
+        assert term in main.EXCLUDED_TOPIC_KEYWORDS
 
 
 def test_empty_and_none_texts_are_safe():

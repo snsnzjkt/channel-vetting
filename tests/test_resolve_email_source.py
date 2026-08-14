@@ -31,9 +31,14 @@ class _Browser:
         self._has_links = has_links if has_links is not None else bool(email) or None
         self.calls = 0
 
-    def find_contact(self, channel_id):
+    def find_contact(self, channel_id, need_email=True):
         self.calls += 1
-        return self._email, self._has_links
+        # need_email=False is the link-list-only mode the chain uses once an
+        # earlier step has the address: the real scraper returns no email in
+        # that mode, and mirroring it here is what stops a stub from making an
+        # earlier-step hit look like a step-5 hit.
+        self.need_email_calls = getattr(self, "need_email_calls", []) + [need_email]
+        return (self._email if need_email else ""), self._has_links
 
     def find_email(self, channel_id):
         return self.find_contact(channel_id)[0]

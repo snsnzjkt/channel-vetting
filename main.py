@@ -127,6 +127,16 @@ NICHES = {
             "homesteading vlog",
         ],
         "table_name": AIRTABLE_TABLE_HOME_THEATER,
+        # Which of the base's EXTERNAL outreach tables belong to this niche,
+        # matched case-insensitively as a substring of the source table name in
+        # external_dedupe.EXTERNAL_TABLES. Spelled "Theatre" because that is how
+        # those tables spell it — the niche key is "Theater", which is exactly
+        # why this is an explicit field and not derived from the key.
+        #
+        # Only used to PRIORITISE the discovery exclude set under the vendor's
+        # 10,000-handle cap (see _external_priority); it never changes which
+        # candidates are deduped, only which exclusions fit in the request.
+        "external_source_hint": "Home Theatre",
         # From the Home Theater brief (Cynthia Lim, 15 April 2024):
         # "Has a Min 10k+ views on YouTube" and "Not a new channel".
         # The 10,000 figure is now the floor BOTH niches run on, so this
@@ -215,6 +225,10 @@ NICHES = {
             "seasonal home decor",
         ],
         "table_name": AIRTABLE_TABLE_LIFESTYLE_SOFA,
+        # See the Home Theater entry for what this does. "Lifestyle" matches
+        # "Lifestyle – Sofa Influencers" (1,949 handles), which fits under the
+        # cap with room to spare — so this niche's external re-bills go to zero.
+        "external_source_hint": "Lifestyle",
         # RAISED from the brief's 2,000 to 10,000 in the 2026-08 criteria
         # change, which put both niches on the same view floor. The brief
         # (Cynthia Lim, 15 April 2024) says "Has min of 2k+ view on YouTube
@@ -417,20 +431,28 @@ MIN_VIEWS_PER_VIDEO = 10_000
 # stays overridden). Shorts are excluded from the sample entirely; see
 # enrichment.get_recent_video_performance.
 #
-# CALIBRATED at 0.60 against the live tables, not guessed. The first cut was
-# 0.70, and re-checking all 80 tracked rows showed it cutting through the middle
-# of the good group rather than separating it from the bad one:
+# CALIBRATED against the live tables, not guessed. Re-checking all 80 tracked
+# rows put the two groups here:
 #
 #   - Shorts-inflated channels scored 0-3 of 10 (Explore With Jasir 0/10 on a
 #     140,885 average, Diva Angel 2/9, Kat and Sourabh 3/10).
 #   - Channels a HUMAN REVIEWER had already marked Approved scored 5-6 of 10
 #     (ETPC 6/10 at 22,198 avg, Bane Tech 5/10 at 23,914 avg).
 #
-# A 70% bar therefore rejected channels the reviewers themselves wanted, which
-# is the definition of a miscalibrated gate. 0.60 keeps every Shorts-inflated
-# channel out and lets the 6-of-10 band through. If this is retuned again, do it
-# the same way — run audit_prospects.py and look at where the reviewers' own
-# Approved/Rejected calls actually fall.
+# The bar has to sit in the gap between 3 and 5, and it must ADMIT 5 — a gate
+# that rejects channels the reviewers themselves approved is miscalibrated by
+# definition. 0.70 failed that (it rejected both). 0.60 failed it too, and less
+# obviously: ceil(0.60 x 10) = 6 admits ETPC and still rejects Bane Tech by one
+# video, so the stated goal of "let the reviewers' band through" was only half
+# met. That is the trap in a ratio — the effective bar is the CEIL, not the
+# percentage, and at n=10 a 0.60 and a 0.51 are five percentage points apart on
+# paper and one whole video apart in practice.
+#
+# 0.50 is the first value that admits the whole approved band (ceil = 5) while
+# still excluding every Shorts-inflated channel measured, the best of which
+# managed 3. If this is retuned again, do it the same way — run
+# audit_prospects.py and look at where the reviewers' own Approved/Rejected
+# calls actually fall, then check the CEIL at the sample sizes you actually see.
 #
 # Why this changed. The gate used to test the window's MINIMUM, i.e. "EVERY
 # recent video passed 10k". Read against the 10,000 AVERAGE floor next to it,
@@ -450,8 +472,33 @@ MIN_VIEWS_PER_VIDEO = 10_000
 # The denominator is the count of SETTLED, REPORTED videos, not a flat 10: an
 # upload still climbing toward 10k, or one with no public view count, is unknown
 # rather than failing, and enrichment already excludes both from
-# `settled_views`. So the rule reads "60% of the videos we can actually judge".
-MIN_VIEWS_PER_VIDEO_RATIO = 0.60
+# `settled_views`. So the rule reads "50% of the videos we can actually judge".
+MIN_VIEWS_PER_VIDEO_RATIO = 0.50
+
+# ...and below this many judgeable videos the ratio is SKIPPED, not applied.
+#
+# A floating denominator makes the gate meaningful at n=10 and arbitrary at
+# n=3, because the ceil quantises hardest exactly where the sample is thinnest.
+# Two live rows showed it: Kaitlyn :) at 1 of 3 needed 2 (a single upload
+# decides the channel) and Adrianne MG at 2 of 7 needed 4. Neither number
+# describes a channel — they describe a sample too small to describe one.
+#
+# So this follows the same rule as an unknown country, an unknown age and an
+# unreported video_count: absent data is not evidence against the channel, and
+# "we could only judge 3 videos" is absent data. A skipped ratio is not a free
+# pass — min_avg_views, the 30-video floor, the 30-long-form floor, the cadence
+# floor and the staleness check all still apply.
+#
+# 5 is the smallest sample where the ceil lands somewhere sane: at n=5 the bar
+# is 3 of 5, which is a real majority, while at n=4 it is 2 of 4 — a coin flip
+# dressed up as a criterion. It does NOT rescue Adrianne MG (7 judgeable videos
+# is enough to judge, and 2 of 7 fails); it does leave Kaitlyn :) unjudged by
+# this particular gate, which is the correct reading of 3 videos.
+#
+# Note this can only ever fire for a channel that ALREADY cleared the 30
+# long-form floor — so it means "their recent long-form is mostly too new to
+# score", not "they barely post long-form".
+MIN_SETTLED_SAMPLE_FOR_RATIO = 5
 
 # A live channel, applied to BOTH niches: at least this many uploads per year,
 # read from the sampled window's cadence (enrichment.calc_upload_frequency,
@@ -549,6 +596,49 @@ EXCLUDED_TOPIC_TERMS = {
         "firearm", "firearms", "handgun", "handguns", "ammo", "ammunition",
         "AR-15", "AK-47", "glock", "concealed carry", "second amendment",
         "gunsmith", "ballistics",
+    ],
+    # --- WRONG VERTICAL (2026-08-15) -------------------------------------
+    # Added after two channels reached the Home Theater table that no gate
+    # could have stopped, because no gate asks about RELEVANCE: fit is
+    # delegated entirely to influencers.club's ai_search, which was widened
+    # 5.9x on 2026-08-14 for pool size and never re-checked for precision.
+    #
+    # This is a BLOCKLIST, and it is honestly whack-a-mole — it catches the
+    # verticals named here and nothing else. A general relevance gate was
+    # built and MEASURED first, and rejected on the numbers:
+    #
+    #   - On BIOS: unusable. Four tracked channels have no vocabulary at all
+    #     ("Hi!", "Collab: <email>", a bare email address), so a
+    #     must-match-a-term rule discards real prospects on an empty bio.
+    #   - On the 50 VIDEO TITLES (free — already fetched for the duplicate
+    #     filter): better, but it does not separate the two groups. Measured
+    #     over all 38 Home Theater rows, the racing channel scored 2/50 and
+    #     WOULD have been caught, but the logging channel scored 25/50 (its
+    #     titles carry "furniture", "home decor", "interior" from woodworking)
+    #     and would NOT, while "Jasper Tran - House Design Ideas" scored 0/50
+    #     and a real prospect would have been discarded. A threshold that
+    #     catches one of the two reported channels costs two false positives
+    #     and still misses the other.
+    #
+    # Both channels ARE caught cleanly by their own bios, which is what these
+    # terms read. Terms are kept narrow on purpose — each one also goes to the
+    # vendor as keywords_not_in_description, so a sloppy term silently shrinks
+    # the discovery pool as well as dropping rows.
+    "sim_racing": [
+        # Game TITLES, not "racing": "car and truck review" is a deliberate
+        # Home Theater keyword, and a creator who builds a sim rig in their
+        # man cave is a legitimate prospect. What is off-niche is gameplay
+        # content, and a gameplay channel names the games in its bio.
+        "beamng", "assetto corsa", "iracing", "gran turismo",
+    ],
+    "forestry": [
+        # "logging truck" and not bare "logging": the word-boundary match
+        # already spares "vlogging", but "logging" alone would still fire on
+        # "logging my progress". "timber"/"chainsaw" are deliberately OMITTED
+        # — "timber furniture" is ordinary AU/UK furniture vocabulary for
+        # Lifestyle Sofa, and "power tools review" is a Home Theater keyword.
+        "logging truck", "logging trucks", "forestry", "sawmill",
+        "tree felling",
     ],
 }
 
@@ -707,13 +797,21 @@ def description_is_non_english(description: str | None) -> bool:
 def _clears_per_video_floor(settled_views: list[int]) -> bool:
     """
     True if at least MIN_VIEWS_PER_VIDEO_RATIO of `settled_views` reach
-    MIN_VIEWS_PER_VIDEO.
+    MIN_VIEWS_PER_VIDEO — or if the sample is too small to judge at all.
 
     `settled_views` holds only videos whose count has settled and is reported
     (see enrichment), so this is a ratio over what can actually be judged, not
-    over a flat window size. math.ceil, so "70% of 10" is 7 and a partial video
+    over a flat window size. math.ceil, so "50% of 5" is 3 and a partial video
     always rounds toward requiring one more rather than one fewer.
+
+    Returns True below MIN_SETTLED_SAMPLE_FOR_RATIO judgeable videos: at that
+    size the ceil quantises so hard that one upload decides the channel, which
+    is a measurement artefact rather than a verdict. Unknown is not a failure —
+    the same rule an unknown country or an unreported video_count follows. See
+    MIN_SETTLED_SAMPLE_FOR_RATIO for why the floor is 5 and what still applies.
     """
+    if len(settled_views) < MIN_SETTLED_SAMPLE_FOR_RATIO:
+        return True
     required = math.ceil(MIN_VIEWS_PER_VIDEO_RATIO * len(settled_views))
     clearing = sum(1 for views in settled_views if views >= MIN_VIEWS_PER_VIDEO)
     return clearing >= required
@@ -782,7 +880,8 @@ def pre_push_drop_reason(
     #
     # An empty/absent list means nothing in the window has settled yet — that is
     # unknown, not a failure, so the floor is skipped (the same rule video_count
-    # follows above).
+    # follows above). A short-but-non-empty list is skipped too, inside
+    # _clears_per_video_floor; see MIN_SETTLED_SAMPLE_FOR_RATIO.
     if settled_views and not _clears_per_video_floor(settled_views):
         return DROP_VIDEO_BELOW_VIEW_MINIMUM
     if uploads_per_year is not None and uploads_per_year < MIN_UPLOADS_PER_YEAR:
@@ -885,33 +984,18 @@ def resolve_email_with_source(
 
     The third return value, has_external_links, is the "does this channel
     have any web/social presence" signal for the no-social drop (see
-    DROP_NO_SOCIAL in process_candidate). It is only KNOWN when step 5 runs
-    — i.e. when steps 1-4 found no address AND the browser is enabled — so
-    it is None for every earlier-step hit (their link list was never
-    fetched, so absence isn't established). It rides out of the SAME link-
-    list fetch step 5 already makes; nothing extra is loaded for it.
+    DROP_NO_SOCIAL in process_candidate). It is known whenever the BROWSER is
+    enabled, not only when step 5 runs: a channel whose address came from an
+    earlier step still gets its link list read (`need_email=False`, one page
+    load, no link-following), because having an address says nothing about
+    whether the creator exists anywhere off YouTube. It is None only when the
+    browser is off or the About panel couldn't be read — absent data, which
+    never disqualifies.
 
     Reporting the source here is what lets callers attribute a hit to a
     step. Comparing the result back against stats/performance can't: steps
     3, 4 and 5 are indistinguishable that way.
     """
-    email = performance.get("repeated_email")
-    if email:
-        return email, EMAIL_SOURCE_REPEATED, None
-
-    email = stats.get("business_email", "")
-    if email:
-        return email, EMAIL_SOURCE_ABOUT, None
-
-    email = scan_older_videos_for_email(
-        stats["channel_id"],
-        stats.get("uploads_playlist_id", ""),
-        performance.get("next_page_token", ""),
-        performance.get("video_descriptions", []),
-    )
-    if email:
-        return email, EMAIL_SOURCE_OLDER, None
-
     # Both collaborators ship a null object precisely so "absent" is an
     # object that returns "". Normalising here keeps that as the ONE
     # soft-disable mechanism — an `if x is not None` guard per step would
@@ -921,13 +1005,49 @@ def resolve_email_with_source(
     if scraper is None:
         scraper = null_scraper()
 
-    email = enricher.find_email(stats["channel_id"])
-    if email:
-        return email, EMAIL_SOURCE_INFLUENCERS, None
+    email = performance.get("repeated_email")
+    source = EMAIL_SOURCE_REPEATED
 
-    # Step 5, the only step that also reports link-list presence. find_contact
-    # returns (email, has_external_links); an inert scraper yields ("", None),
-    # which correctly leaves the no-social drop dormant.
+    if not email:
+        email = stats.get("business_email", "")
+        source = EMAIL_SOURCE_ABOUT
+
+    if not email:
+        email = scan_older_videos_for_email(
+            stats["channel_id"],
+            stats.get("uploads_playlist_id", ""),
+            performance.get("next_page_token", ""),
+            performance.get("video_descriptions", []),
+        )
+        source = EMAIL_SOURCE_OLDER
+
+    if not email:
+        email = enricher.find_email(stats["channel_id"])
+        source = EMAIL_SOURCE_INFLUENCERS
+
+    if email:
+        # The address is settled, but the LINK LIST still has to be read — the
+        # no-social drop asks a different question ("does this creator exist
+        # anywhere off YouTube?") and an earlier step answering the email
+        # question does not answer it.
+        #
+        # This used to short-circuit here with None, which made DROP_NO_SOCIAL
+        # unreachable for any channel steps 1-4 resolved — i.e. nearly all of
+        # them, since a repeated address in the video descriptions is the most
+        # common hit of the five. Measured 2026-08-15: every one of the 20 rows
+        # written that day carried an email, so the gate never once ran, and
+        # "Timber Time" (171k subs, a genuinely EMPTY link list) was written as
+        # a prospect on the strength of an address in its descriptions.
+        #
+        # need_email=False keeps the cost to the single About page load and
+        # skips the up-to-four link/probe navigations, which are the expensive
+        # part and are pointless once an address is in hand.
+        _, has_external_links = scraper.find_contact(stats["channel_id"], need_email=False)
+        return email, source, has_external_links
+
+    # Step 5. find_contact returns (email, has_external_links); an inert
+    # scraper yields ("", None), which correctly leaves the no-social drop
+    # dormant rather than discarding every channel.
     email, has_external_links = scraper.find_contact(stats["channel_id"])
     if email:
         return email, EMAIL_SOURCE_BROWSER, has_external_links
@@ -1443,8 +1563,54 @@ def process_candidate(
     return record, qualification
 
 
+def _external_priority(external_handles, source_hint: str) -> list[str]:
+    """
+    This niche's external handles first, then everyone else's — the order the
+    10k cap is applied in.
+
+    Why this is not just `sorted()`. The vendor caps `exclude_handles` at 10,000
+    (INFLUENCERS_MAX_EXCLUDE_HANDLES) and this base holds 14,337, so ~4,300 are
+    dropped from every request. Sorted alphabetically, that is the SAME
+    alphabetical tail dropped on every run forever — measured 2026-08-15, the
+    cut lands at "pinkkupinsku", and a --test run duly re-bought five creators
+    from the o-v range that were already tracked externally.
+
+    A handle only costs anything if THIS niche's query would return it, and the
+    Home Theatre tables (12,388 handles) are the ones a Home Theater query can
+    re-surface. Ranking them ahead of the 1,949 Lifestyle ones spends the scarce
+    slots where re-bills actually happen. Measured effect: Lifestyle Sofa's own
+    external handles (1,949) now fit entirely, taking it from ~538 uncovered to
+    zero; Home Theater's coverage improves but cannot be complete until the
+    exclusion is split across requests or the vendor's persistent list is wired.
+
+    Ties are broken alphabetically so the set stays deterministic — a run's
+    exclusions should not depend on dict iteration order.
+
+    `source_hint` is matched case-insensitively as a SUBSTRING of the source
+    table name, which is why NICHES carries it explicitly rather than reusing
+    the niche name: the tables spell it "Home Theatre" and the niche is "Home
+    Theater". An empty or unmatched hint degrades to plain alphabetical order,
+    i.e. exactly the old behaviour.
+    """
+    hint = source_hint.casefold()
+
+    def rank(handle: str) -> tuple[int, str]:
+        source = ""
+        try:
+            source = external_handles[handle] or ""
+        except (KeyError, TypeError):
+            # A plain set/list of handles carries no source — every entry ranks
+            # the same, and the sort degrades to alphabetical. Keeps this usable
+            # from tests and from any caller that isn't holding an ExternalIndex.
+            pass
+        return (0 if hint and hint in source.casefold() else 1, handle)
+
+    return sorted(external_handles, key=rank)
+
+
 def _discovery_exclude_handles(
     blocklist, external_handles, seen_handles, tracked_handles=(),
+    external_source_hint: str = "",
 ) -> set[str]:
     """
     Assemble the discovery exclude set, PRIORITISED under the 10k cap.
@@ -1469,10 +1635,12 @@ def _discovery_exclude_handles(
     MIGHT never be returned by this niche's query, a row in this table came out
     of this query.
 
-    External-table handles fill whatever room is left under the cap; the ones
-    that don't fit are still caught after enrichment by process_candidate's
-    external-handle check — at the cost of one channels.list unit each, not a
-    wrong contact.
+    External-table handles fill whatever room is left under the cap, ordered by
+    _external_priority so THIS niche's own outreach tables claim the slots
+    first — the base holds more handles than the cap allows, so which ones get
+    dropped is a real decision and not a tie-break. The ones that don't fit are
+    still caught after enrichment by process_candidate's external-handle check
+    — at the cost of one channels.list unit each, not a wrong contact.
 
     The blocklist screening in process_candidate is unchanged and remains the
     authoritative, fail-closed suppression gate (it also matches on email and
@@ -1481,7 +1649,8 @@ def _discovery_exclude_handles(
     """
     must_keep = set(blocklist.handles) | set(seen_handles) | set(tracked_handles)
     room = max(0, INFLUENCERS_MAX_EXCLUDE_HANDLES - len(must_keep))
-    external = sorted(set(external_handles) - must_keep)[:room]
+    ranked = _external_priority(external_handles, external_source_hint)
+    external = [h for h in ranked if h not in must_keep][:room]
     return must_keep | set(external)
 
 
@@ -1569,7 +1738,8 @@ def _run_discovery_rounds(
                 filters=filters,
                 target=target,
                 exclude_handles=_discovery_exclude_handles(
-                    blocklist, external_handles, seen_handles, tracked_handles
+                    blocklist, external_handles, seen_handles, tracked_handles,
+                    external_source_hint=niche_config.get("external_source_hint", ""),
                 ),
                 source_label=f"influencers.club discovery ({niche_name})",
             )

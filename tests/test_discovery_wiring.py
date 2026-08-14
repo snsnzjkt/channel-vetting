@@ -666,6 +666,59 @@ def test_tracked_handles_rank_with_the_blocklist_not_the_leftover_room():
     assert {"blocked", "seen", "tracked"} <= monkeypatch_free
 
 
+# --- which external handles win the scarce slots under the 10k cap ----------
+# The base holds 14,337 external handles against a 10,000-entry vendor cap, so
+# ~4,300 are dropped from every request. Sorted alphabetically that was the SAME
+# tail every run (measured 2026-08-15: the cut lands at "pinkkupinsku"), and a
+# --test run duly re-bought five already-tracked creators from the o-v range.
+
+
+def test_this_niches_external_handles_claim_the_slots_first(monkeypatch):
+    """
+    A handle only costs anything if THIS niche's query can return it, so the
+    niche's own outreach tables must outrank the other niche's under the cap.
+    """
+    monkeypatch.setattr(main, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 2)
+    external = {
+        "zzz_ours": "Home Theatre – YouTube Outreach",
+        "aaa_theirs": "Lifestyle – Sofa Influencers",
+        "bbb_theirs": "Lifestyle – Sofa Influencers",
+    }
+
+    got = main._discovery_exclude_handles(
+        _Blocklist(set()), external, seen_handles=set(),
+        external_source_hint="Home Theatre",
+    )
+
+    # Alphabetically "zzz_ours" sorts LAST and would have been the one dropped.
+    assert "zzz_ours" in got, "the niche's own external table must win a slot"
+    assert len(got) == 2
+
+
+def test_the_hint_is_matched_case_insensitively_as_a_substring():
+    external = {"ours": "Home Theatre – YouTube Follow-up Outreach"}
+    assert main._external_priority(external, "home theatre") == ["ours"]
+
+
+def test_an_unmatched_or_absent_hint_degrades_to_alphabetical():
+    """
+    The old behaviour, preserved: a niche with no hint (or one naming a table
+    that isn't there) must still produce a deterministic, sorted set rather
+    than depending on dict iteration order.
+    """
+    external = {"c": "T", "a": "T", "b": "T"}
+    assert main._external_priority(external, "") == ["a", "b", "c"]
+    assert main._external_priority(external, "nosuchtable") == ["a", "b", "c"]
+
+
+def test_priority_tolerates_a_plain_set_of_handles():
+    """
+    Callers holding a bare set (tests, and anything not carrying an
+    ExternalIndex) have no source to rank by and must not crash on the lookup.
+    """
+    assert main._external_priority({"b", "a"}, "Home Theatre") == ["a", "b"]
+
+
 def test_the_handle_is_written_only_when_the_column_exists(monkeypatch):
     """
     push_record sends field names as-is and Airtable rejects the WHOLE record

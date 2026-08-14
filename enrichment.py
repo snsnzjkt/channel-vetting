@@ -168,12 +168,44 @@ EMAIL_DOMAIN_BLOCKLIST = THIRD_PARTY_DOMAINS
 # floor, independently.
 #
 # COST, accepted: a genuine 61-180s landscape video is now misread as a Short.
-# Duration is the only signal available — videos.list exposes no aspect ratio,
-# and thumbnails are letterboxed to 16:9 regardless — so the two cannot be told
-# apart. A channel whose "long-form" output is 2-minute clips is not what a
+# A channel whose "long-form" output is 2-minute clips is not what a
 # brand-placement brief is asking for anyway, which is why this direction is the
 # right one to err in now.
 SHORTS_MAX_SECONDS = 180
+
+# ...and duration is NOT the only signal after all. An earlier version of the
+# comment above said videos.list exposes no aspect ratio; that was wrong.
+# Requesting part=player WITH a maxWidth (or maxHeight) returns embedWidth and
+# embedHeight sized to the video's real aspect ratio, and videos.list is a flat
+# 1 unit however many parts are asked for — so orientation is FREE. Verified
+# live 2026-08-15 against UCZY-IgNxiP2KUM1Ac8knQfg, which posts every upload
+# twice, once each way:
+#
+#     MYSTERY DOORS CHALLANGE IN BEAMNG (Portrait)   720 x 1280    8,370 views
+#     MYSTERY DOORS CHALLANGE IN BEAMNG              720 x  405      105 views
+#
+# NOTE the maxWidth is load-bearing: embedWidth/embedHeight are omitted from the
+# response entirely unless one of maxWidth/maxHeight is sent, and their absence
+# reads as "orientation unknown", which never classifies a video as short-form.
+# Drop the parameter and this whole gate silently stops working.
+#
+# A VERTICAL upload is treated as short-form REGARDLESS OF DURATION (user's
+# direction, 2026-08-15). YouTube itself would not call a 3h52m vertical video a
+# Short, but this pipeline's question is "is this the long-form content a brand
+# wants placement in", and vertical video is short-form-feed content whatever
+# its length. The live case: the channel above averaged 16,686 views on paper
+# and passed every gate, because the vertical copy of each video takes 10-60k
+# while the landscape copy of the SAME video takes 100-270.
+#
+# Anything at or below this ratio (width/height) is vertical. 1.0 is square;
+# the threshold sits just under it so a square upload is not called vertical,
+# while 9:16 (0.5625) and 4:5 (0.8) both are.
+MAX_VERTICAL_ASPECT_RATIO = 0.95
+
+# Any value in the vendor's accepted range works — only the RATIO of the
+# returned width to height is read, never the absolute size. 720 is a
+# round number well inside the documented 72-8192 bounds.
+PLAYER_EMBED_MAX_WIDTH = 720
 
 ISO8601_DURATION_PATTERN = re.compile(
     r"^P(?:(?P<days>\d+)D)?T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?$"
@@ -221,40 +253,187 @@ def parse_iso8601_duration(value: str | None) -> int | None:
     return total or None
 
 
+def _as_shape(entry):
+    """
+    Normalise one element of a video sample to (duration, width, height).
+
+    The sample helpers below accept EITHER a bare ISO duration string — which
+    carries no orientation, so the video can only be judged on length — or a
+    (duration, embed_width, embed_height) triple as video_shape() builds from a
+    videos.list item. The bare form is what a caller holding only durations can
+    supply, and it preserves the pre-orientation behaviour exactly: unknown
+    orientation never makes a video short-form on its own.
+    """
+    if entry is None or isinstance(entry, str):
+        return entry, None, None
+    duration, width, height = entry
+    return duration, width, height
+
+
+def video_shape(item) -> tuple:
+    """
+    (duration, embed_width, embed_height) for one videos.list item.
+
+    Width/height come from part=player and are None unless the request sent a
+    maxWidth/maxHeight — see MAX_VERTICAL_ASPECT_RATIO for why that parameter
+    is load-bearing rather than cosmetic.
+    """
+    player = item.get("player", {}) or {}
+    return (
+        item.get("contentDetails", {}).get("duration"),
+        player.get("embedWidth"),
+        player.get("embedHeight"),
+    )
+
+
+def is_vertical(width, height) -> bool | None:
+    """
+    True for a vertical upload, False for landscape/square, None when the
+    embed dimensions are absent or unreadable.
+
+    None is not False: an unmeasured video must not be counted as vertical
+    (that would discard on missing data), and must not be counted as
+    definitely-landscape either, which is why the callers below branch on it.
+    """
+    try:
+        w, h = float(width), float(height)
+    except (TypeError, ValueError):
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return (w / h) <= MAX_VERTICAL_ASPECT_RATIO
+
+
+def is_short_form(entry) -> bool | None:
+    """
+    True if this upload is short-form content, False if it is genuinely
+    long-form, None if it can't be judged.
+
+    Two independent reasons to be short-form, either sufficient:
+      - it is at or under SHORTS_MAX_SECONDS, or
+      - it is VERTICAL, whatever its duration (see MAX_VERTICAL_ASPECT_RATIO).
+
+    None only when the duration is unreadable AND orientation says nothing —
+    an unreadable duration on a video known to be vertical is still short-form,
+    because the orientation alone settles it.
+    """
+    duration, width, height = _as_shape(entry)
+    vertical = is_vertical(width, height)
+    if vertical:
+        return True
+    seconds = parse_iso8601_duration(duration)
+    if seconds is None:
+        return None
+    return seconds <= SHORTS_MAX_SECONDS
+
+
 def is_shorts_only(durations) -> bool:
     """
-    True only when every sampled video is a Short, i.e. no evidence of any
+    True only when every sampled video is short-form, i.e. no evidence of any
     long-form upload.
 
-    Returns False whenever ANY duration is unknown, and False for an empty
+    Returns False whenever ANY video can't be judged, and False for an empty
     sample. This asymmetry is deliberate: the caller discards a
     Shorts-only channel outright, so the burden of proof sits on excluding,
     not on including.
     """
     if not durations:
         return False
-    parsed = [parse_iso8601_duration(d) for d in durations]
-    if any(seconds is None for seconds in parsed):
+    verdicts = [is_short_form(d) for d in durations]
+    if any(v is None for v in verdicts):
         return False
-    return all(seconds <= SHORTS_MAX_SECONDS for seconds in parsed)
+    return all(verdicts)
 
 
 def count_longform(durations) -> int:
     """
-    How many of `durations` are confirmed NOT Shorts, i.e. longer than
-    SHORTS_MAX_SECONDS.
+    How many sampled videos are confirmed long-form — over SHORTS_MAX_SECONDS
+    AND not vertical.
 
-    Counts only durations that actually parse. An unreadable duration is
+    Counts only videos that can actually be judged. An unreadable one is
     unknown, not long-form, so it never counts toward the total — the
     opposite lean from is_shorts_only(), and for the same reason. This number
     feeds a MINIMUM (main.MIN_LONGFORM_VIDEO_COUNT), so counting an unknown
     as long-form would let a channel clear the bar on missing data. Here the
     burden of proof sits on the channel to show a long-form catalogue.
     """
-    return sum(
-        1 for d in durations
-        if (parse_iso8601_duration(d) or 0) > SHORTS_MAX_SECONDS
-    )
+    return sum(1 for d in durations if is_short_form(d) is False)
+
+
+# Two uploads count as the same video when their normalised titles match AND
+# their durations are within this many seconds of each other. Both conditions,
+# never one: a channel posting "Part 1"/"Part 2" has different titles, and two
+# genuinely different videos that happen to run the same length have different
+# titles too. Requiring both is what keeps this from merging real uploads.
+#
+# The tolerance exists because a re-encode is not frame-exact — the live case
+# (UCZY-IgNxiP2KUM1Ac8knQfg) showed the same video at 13974s and 13973s, and
+# 3H26M53S against 3H26M59S.
+DUPLICATE_DURATION_TOLERANCE_SECONDS = 10
+
+# A trailing "(Portrait)", "[4K]", "- Vertical" and friends: the marker a
+# creator appends to distinguish one cut of a video from another. Stripped
+# before titles are compared so the two cuts collapse to one entry.
+_TITLE_SUFFIX_PATTERN = re.compile(r"[\(\[\{][^\(\)\[\]\{\}]{0,30}[\)\]\}]\s*$")
+_TITLE_NOISE_PATTERN = re.compile(r"[^a-z0-9 ]+")
+
+
+def normalize_video_title(title: str) -> str:
+    """
+    A title reduced to what two cuts of the SAME video share.
+
+    Strips one trailing bracketed suffix, drops punctuation and emoji, folds
+    case, and collapses whitespace. Deliberately conservative — it removes
+    decoration, never words — because merging two genuinely different uploads
+    would hide a real video from the sample.
+    """
+    if not title:
+        return ""
+    stripped = _TITLE_SUFFIX_PATTERN.sub("", title.strip())
+    folded = _TITLE_NOISE_PATTERN.sub(" ", stripped.casefold())
+    return " ".join(folded.split())
+
+
+def drop_duplicate_uploads(videos) -> list:
+    """
+    Filter `videos` — an ordered sequence of (key, title, duration_seconds) —
+    down to one entry per distinct video, keeping the FIRST occurrence.
+
+    Why this exists. Some creators publish every video more than once (a
+    landscape cut and a vertical cut, a re-upload, a "director's" edit), and
+    only one of them is watched. Live case, over ten consecutive uploads:
+
+        MYSTERY DOORS CHALLANGE IN BEAMNG (Portrait)   3h52m54s    8,370 views
+        MYSTERY DOORS CHALLANGE IN BEAMNG              3h52m53s      105 views
+
+    Counting both puts the channel's own duplicates into its performance
+    sample, which then reports a distribution no viewer experiences — half the
+    "videos" are copies nobody saw. Every metric built on that sample (the
+    average, the per-video floor, the long-form count) is measuring the upload
+    schedule rather than the audience.
+
+    First-occurrence order matters: the caller feeds these newest-first and has
+    ALREADY dropped short-form cuts, so the survivor is the newest long-form
+    copy rather than whichever copy happened to do better numbers. Keeping the
+    best-performing copy would re-introduce exactly the flattery this removes.
+    """
+    kept = []
+    seen: list[tuple[str, int]] = []
+    for key, title, seconds in videos:
+        norm = normalize_video_title(title)
+        if norm and seconds:
+            duplicate = any(
+                norm == prev_title
+                and abs(seconds - prev_seconds) <= DUPLICATE_DURATION_TOLERANCE_SECONDS
+                for prev_title, prev_seconds in seen
+            )
+            if duplicate:
+                continue
+            seen.append((norm, seconds))
+        # An untitled or undated entry can't be compared, so it is kept — the
+        # same "unknown never excludes" rule the rest of the module follows.
+        kept.append(key)
+    return kept
 
 
 def dominant_language(languages) -> str:
@@ -631,10 +810,15 @@ def get_recent_video_performance(
     # a per-video signal for "Content Language" — channel-level language
     # isn't reliably exposed by the API at all.
     video_params = {
-        # contentDetails adds `duration`, which is the only Shorts signal the
-        # API offers. Free: videos.list is a flat 1 unit regardless of parts.
-        "part": "snippet,statistics,contentDetails",
+        # contentDetails adds `duration`; player adds embedWidth/embedHeight,
+        # i.e. ORIENTATION. Free: videos.list is a flat 1 unit regardless of
+        # how many parts are asked for.
+        "part": "snippet,statistics,contentDetails,player",
         "id": ",".join(video_ids),
+        # Load-bearing, not cosmetic: without a maxWidth (or maxHeight) the
+        # player part omits embedWidth/embedHeight entirely and every video
+        # reads as "orientation unknown". See MAX_VERTICAL_ASPECT_RATIO.
+        "maxWidth": PLAYER_EMBED_MAX_WIDTH,
     }
     try:
         video_resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
@@ -681,7 +865,10 @@ def get_recent_video_performance(
         # window: more videos means more chances to see a long-form upload,
         # which makes a false "Shorts-only" verdict less likely. That matters
         # because that verdict discards the channel outright.
-        durations.append(v.get("contentDetails", {}).get("duration"))
+        # (duration, embed_width, embed_height) rather than the bare duration,
+        # so is_shorts_only/count_longform can see ORIENTATION as well as
+        # length — a vertical upload is short-form at any duration.
+        durations.append(video_shape(v))
         # Collected across the WIDE window and reduced by dominant_language()
         # below, rather than taking the first non-empty tag: the value is now
         # gated on, and one mislabelled upload must not decide the channel.
@@ -729,17 +916,36 @@ def get_recent_video_performance(
     # doesn't count (it is still climbing toward the floor); and an unreported
     # view count doesn't count (unknown, not zero).
     videos_by_id = {v.get("id"): v for v in video_items}
+
+    # Long-form only, newest-first, BEFORE the duplicate filter below. Order
+    # matters: classification first, de-duplication second. A creator who posts
+    # a vertical cut and a landscape cut of the same video has both dropped and
+    # kept for different reasons — the vertical one is not long-form at all, and
+    # of what remains only one copy is a distinct video.
+    longform_ids = [
+        vid for vid in video_ids
+        if vid in videos_by_id and is_short_form(video_shape(videos_by_id[vid])) is False
+    ]
+
+    # Then collapse re-uploads of the same video to one entry (see
+    # drop_duplicate_uploads). Without this a channel's own duplicates enter its
+    # performance sample, and every metric built on that sample describes the
+    # upload schedule instead of the audience.
+    deduped_ids = drop_duplicate_uploads(
+        (
+            vid,
+            videos_by_id[vid].get("snippet", {}).get("title", ""),
+            parse_iso8601_duration(videos_by_id[vid].get("contentDetails", {}).get("duration")),
+        )
+        for vid in longform_ids
+    )
+
     settled_views = []
     settled_engagements = []
-    for video_id in video_ids:
+    for video_id in deduped_ids:
         if len(settled_views) >= PERFORMANCE_SAMPLE_SIZE:
             break
-        video = videos_by_id.get(video_id)
-        if video is None:
-            continue
-        seconds = parse_iso8601_duration(video.get("contentDetails", {}).get("duration"))
-        if seconds is None or seconds <= SHORTS_MAX_SECONDS:
-            continue  # a Short, or a duration we can't read
+        video = videos_by_id[video_id]
         stats = video.get("statistics", {})
         raw = stats.get("viewCount")
         if raw is None:
@@ -1053,9 +1259,16 @@ def count_longform_in_older_videos(
 
         time.sleep(API_SLEEP_SECONDS)
 
-        # contentDetails only — the duration is the sole thing needed here,
-        # and the call is a flat 1 unit regardless of the parts requested.
-        video_params = {"part": "contentDetails", "id": ",".join(video_ids)}
+        # contentDetails for the duration, player (+maxWidth) for ORIENTATION —
+        # a vertical upload is short-form at any length and must not count
+        # toward this floor. Still a flat 1 unit regardless of the parts asked
+        # for. Omitting maxWidth would silently blind the orientation half of
+        # count_longform here while it kept working in the main window.
+        video_params = {
+            "part": "contentDetails,player",
+            "id": ",".join(video_ids),
+            "maxWidth": PLAYER_EMBED_MAX_WIDTH,
+        }
         try:
             video_resp = HTTP.get(f"{YOUTUBE_API_BASE_URL}/videos", params=video_params, timeout=30)
         except requests.RequestException as e:
@@ -1079,8 +1292,7 @@ def count_longform_in_older_videos(
             return total
 
         total += count_longform(
-            v.get("contentDetails", {}).get("duration")
-            for v in video_payload.get("items", [])
+            video_shape(v) for v in video_payload.get("items", [])
         )
         if total >= target:
             return total

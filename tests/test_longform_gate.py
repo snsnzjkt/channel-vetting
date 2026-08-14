@@ -309,9 +309,17 @@ def test_process_candidate_pages_when_the_newest_window_is_short(monkeypatch):
     assert qualification == "Qualified"
 
 
-def test_only_contentdetails_is_requested_for_the_videos_call(monkeypatch, spend):
-    """The duration is all this needs; the call is 1 unit regardless of parts,
-    but asking for snippet+statistics would make the intent unclear."""
+def test_the_videos_call_asks_for_duration_and_orientation(monkeypatch, spend):
+    """
+    Duration AND orientation, because a vertical upload is short-form at any
+    length. The call is 1 unit regardless of parts, so `player` is free — but
+    asking for snippet+statistics as well would make the intent unclear.
+
+    maxWidth is asserted because it is LOAD-BEARING: without it the player part
+    omits embedWidth/embedHeight entirely, every video reads as
+    orientation-unknown, and the vertical half of count_longform silently stops
+    working here while continuing to work in the main window.
+    """
     import enrichment
 
     seen = {}
@@ -319,6 +327,7 @@ def test_only_contentdetails_is_requested_for_the_videos_call(monkeypatch, spend
     def get(url, params=None, timeout=None):
         if "/videos" in url:
             seen["part"] = params.get("part")
+            seen["maxWidth"] = params.get("maxWidth")
             return _Resp(200, _videos_payload([LONG] * 50))
         return _Resp(200, _playlist_payload(50))
 
@@ -327,4 +336,5 @@ def test_only_contentdetails_is_requested_for_the_videos_call(monkeypatch, spend
 
     enrichment.count_longform_in_older_videos("UC1", "PL1", "t", 0, 30)
 
-    assert seen["part"] == "contentDetails"
+    assert seen["part"] == "contentDetails,player"
+    assert seen["maxWidth"] == enrichment.PLAYER_EMBED_MAX_WIDTH

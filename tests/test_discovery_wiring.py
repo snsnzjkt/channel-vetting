@@ -371,6 +371,59 @@ def test_the_discovery_subscriber_floor_tracks_each_niche_view_floor():
         )
 
 
+def test_a_niche_missing_min_avg_views_does_not_break_import():
+    """
+    wire_discovery_filters runs while `import main` is still executing, so a
+    KeyError there kills the run before logging is configured, before the
+    blocklist fetch, before any niche is attempted — strictly worse than the
+    failure this project designed for, where run_niche() checks the same keys
+    against REQUIRED_NICHE_KEYS and skips only the offending niche.
+
+    Calls the REAL function (not a hand-copy of its body) so it still catches a
+    regression if the wiring changes shape.
+    """
+    niches = {"Broken": {"discovery_filters": {"profile_language": ["en"]}}}
+
+    main.wire_discovery_filters(niches)  # must not raise
+
+    filters = niches["Broken"]["discovery_filters"]
+    # The filter it COULD wire is still wired...
+    assert filters["keywords_not_in_description"] == list(main.EXCLUDED_TOPIC_KEYWORDS)
+    # ...and the one it couldn't is simply absent, rather than a crash or a
+    # wrong default sent to the vendor.
+    assert "number_of_subscribers" not in filters
+    # The misconfiguration is still caught — later, and survivably.
+    assert "min_avg_views" in main.REQUIRED_NICHE_KEYS
+
+
+def test_a_search_only_niche_is_left_untouched():
+    """A niche with no discovery_filters (search.list path) gains nothing."""
+    niches = {"Keywords Only": {"min_avg_views": 10_000}}
+
+    main.wire_discovery_filters(niches)
+
+    assert niches == {"Keywords Only": {"min_avg_views": 10_000}}
+
+
+def test_each_niche_gets_its_own_exclusion_list():
+    """
+    Per-niche list() copies, so a future per-niche edit can't mutate the other
+    niche's filter or EXCLUDED_TOPIC_KEYWORDS itself in place.
+    """
+    niches = {
+        "A": {"min_avg_views": 10_000, "discovery_filters": {}},
+        "B": {"min_avg_views": 10_000, "discovery_filters": {}},
+    }
+
+    main.wire_discovery_filters(niches)
+
+    a = niches["A"]["discovery_filters"]["keywords_not_in_description"]
+    b = niches["B"]["discovery_filters"]["keywords_not_in_description"]
+    assert a == b
+    assert a is not b
+    assert a is not main.EXCLUDED_TOPIC_KEYWORDS
+
+
 def test_the_quota_ceiling_stops_enrichment(monkeypatch):
     """
     can_afford_search() gates search.list only, and the discovery source

@@ -462,45 +462,53 @@ EXCLUDED_TOPIC_KEYWORDS = sorted(
     {term for terms in EXCLUDED_TOPIC_TERMS.values() for term in terms}
 )
 
-# Wire that negation into every niche that runs discovery. Done here, after
-# both NICHES and EXCLUDED_TOPIC_TERMS exist, rather than inline in the NICHES
-# literal above — which is defined before EXCLUDED_TOPIC_TERMS. Guarded on
-# presence so a future niche without discovery_filters (search.list only) is
-# left untouched rather than KeyError-ing at import.
-#
-# The local excluded_topic_reason() gate in process_candidate STAYS as the
-# deterministic backstop: it also reads the channel TITLE (not just the bio),
-# and it is the only tier that covers the search.list fallback path this
-# server-side filter never touches.
-for _niche_config in NICHES.values():
-    _discovery_filters = _niche_config.get("discovery_filters")
-    if _discovery_filters is not None:
+def wire_discovery_filters(niches: dict) -> None:
+    """
+    Fill in the server-side discovery filters that can't be written inline in
+    the NICHES literal, because they derive from things defined after it.
+
+    Called at import, immediately below. A named function rather than a
+    top-level for-loop for two reasons: a test can hand it a deliberately
+    misconfigured niche (a bare loop here could only be exercised by
+    re-importing the module), and it needs no `del` of throwaway loop names
+    afterwards.
+
+    Mutates `niches` in place. Every lookup is guarded with `in` rather than
+    indexed, and that is load-bearing rather than defensive noise: this runs
+    while `import main` is still executing, so a KeyError here kills the run
+    before logging is configured, before the blocklist fetch, before any niche
+    is attempted. That is strictly worse than the failure this project
+    deliberately designed for, where run_niche() checks the same keys against
+    REQUIRED_NICHE_KEYS and skips only the offending niche with a logged error.
+    Leaving a filter unset routes a misconfigured niche back to that check.
+    """
+    for niche_config in niches.values():
+        filters = niche_config.get("discovery_filters")
+        if filters is None:
+            continue  # search.list-only niche; nothing to wire
+
         # A per-niche list() copy, not the shared constant itself: each niche
         # owns its own list, so a future per-niche exclusion edit can't mutate
         # the other niche's filter (or EXCLUDED_TOPIC_KEYWORDS) in place. The
         # copies are still all derived from EXCLUDED_TOPIC_TERMS at import, so
         # the no-drift guarantee above is unaffected.
-        _discovery_filters["keywords_not_in_description"] = list(EXCLUDED_TOPIC_KEYWORDS)
+        filters["keywords_not_in_description"] = list(EXCLUDED_TOPIC_KEYWORDS)
+
         # The subscriber floor, derived from THIS niche's own view floor so the
         # two can never drift apart — see DISCOVERY_SUBSCRIBER_FLOOR_RATIO.
         # int(), because the vendor's number_of_subscribers.min is an integer
         # field and a float would be a type error at the API rather than here.
-        #
-        # Guarded with `in` rather than indexing, and this is not defensive
-        # noise: this loop runs at IMPORT. A niche carrying discovery_filters but
-        # missing min_avg_views would raise KeyError while `import main` is still
-        # executing, killing the run before a single line of it does anything —
-        # strictly worse than the failure this project deliberately designed for,
-        # where run_niche() checks the same keys with `in` and skips just that
-        # niche with a logged error (see REQUIRED_NICHE_KEYS). Leaving the filter
-        # unset routes a misconfigured niche to exactly that check instead.
-        if "min_avg_views" in _niche_config:
-            _discovery_filters["number_of_subscribers"] = {
-                "min": int(_niche_config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
+        if "min_avg_views" in niche_config:
+            filters["number_of_subscribers"] = {
+                "min": int(niche_config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
             }
-# Don't leak the loop's throwaway names into the module namespace (this is the
-# file's only top-level for-loop; the comprehensions around it leak nothing).
-del _niche_config, _discovery_filters
+
+
+# The local excluded_topic_reason() gate in process_candidate STAYS as the
+# deterministic backstop to the keywords_not_in_description filter wired above:
+# it also reads the channel TITLE (not just the bio), and it is the only tier
+# that covers the search.list fallback path the server-side filter never sees.
+wire_discovery_filters(NICHES)
 
 
 # One pattern per category, matching any listed term on a word boundary.

@@ -421,6 +421,103 @@ def test_an_unknown_settled_window_does_not_disqualify():
     assert drop_reason(settled_views=[]) is None
 
 
+# --- the channel bio must read as English ---------------------------------
+# is_english() reads the per-video language TAG only, so a creator who tags
+# uploads "en" while writing their bio in another language passed every gate.
+# Live case, 2026-08-14: @LINTAN777 declared country US, tagged its videos "en",
+# cleared the view/video/long-form floors with 10 of 10 over 10k, and had a bio
+# 24% Chinese. Both checks now run; they disagree in exactly this case.
+
+
+def test_a_bilingual_chinese_bio_is_rejected():
+    """The @LINTAN777 bio, verbatim, is the regression case."""
+    from main import description_is_non_english
+
+    bio = (
+        "谭 琳 • 与道同行 | Life is practice. Space is sanctuary. On this channel, "
+        "I share insights on spatial harmony, Feng Shui wisdom, and mindful "
+        "living. 生活即修行，空间即道场。在这里，我分享风水智慧、空间美学与日常修行的片刻体悟。"
+    )
+    assert description_is_non_english(bio) is True
+
+
+def test_a_cyrillic_bio_is_rejected():
+    from main import description_is_non_english
+
+    assert description_is_non_english(
+        "Обзоры домашних кинотеатров, проекторов и акустики. Новые видео каждую неделю."
+    ) is True
+
+
+def test_an_english_bio_with_emoji_and_accents_is_kept():
+    """
+    Emoji and accented Latin are NOT language signals — an English channel uses
+    both routinely, and matching them would discard good prospects on
+    decoration. Deliberately absent from NON_LATIN_SCRIPT_RANGES.
+    """
+    from main import description_is_non_english
+
+    assert description_is_non_english(
+        "Home cinema builds 🎬🔊 weekly reviews! Café, naïve, jalapeño — still English."
+    ) is False
+
+
+def test_a_short_bio_with_a_couple_of_decorative_characters_is_kept():
+    """
+    "new video 日曜日!" is 3 script characters in a 15-char string — over the
+    ratio, under the absolute floor. Both thresholds must trip, or a short bio
+    would be judged on punctuation.
+    """
+    from main import description_is_non_english, MIN_NON_LATIN_DESCRIPTION_CHARS
+
+    assert MIN_NON_LATIN_DESCRIPTION_CHARS == 8
+    assert description_is_non_english("new video 日曜日!") is False
+
+
+def test_an_empty_bio_does_not_disqualify():
+    """Absent data is never evidence — the same rule the zone and age checks use."""
+    from main import description_is_non_english
+
+    assert description_is_non_english("") is False
+    assert description_is_non_english(None) is False
+
+
+def test_process_candidate_drops_a_non_english_bio_before_paying_for_performance(monkeypatch):
+    """
+    The gate must run BEFORE get_recent_video_performance, so a non-English
+    channel costs no performance quota. Placed with the other free
+    description-based checks for that reason.
+    """
+    import main
+
+    monkeypatch.setattr(main, "can_afford_enrichment", lambda: True)
+    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: {
+        "channel_id": "UC1", "channel_title": "LIN TAN", "handle": "@lintan777",
+        "description": "谭琳与道同行 spatial harmony 生活即修行空间即道场在这里我分享风水智慧",
+        "subscriber_count": 316_000, "video_count": 411,
+        "uploads_playlist_id": "PL1", "published_at": "2019-01-01T00:00:00Z",
+        "country": "US",
+    })
+    monkeypatch.setattr(
+        main, "get_recent_video_performance",
+        lambda *a, **k: pytest.fail("paid for performance on a non-English bio"),
+    )
+
+    class _NoBlocklist:
+        handles: set = set()
+
+        def match(self, handle="", email="", name=""):
+            return ""
+
+    record, reason = main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "LIN TAN", "matched_keywords": []},
+        {}, _NoBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+    )
+    assert record is None
+    assert reason == main.DROP_NON_ENGLISH_DESCRIPTION
+
+
 # --- the upload-cadence floor (>= 6 uploads a year) -----------------------
 # Lowered from 10 on 2026-08-14: the audit found the gate's only observed
 # effect was rejecting the two strongest channels in the sample (Ashley

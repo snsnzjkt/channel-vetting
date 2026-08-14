@@ -155,9 +155,38 @@ NICHES = {
         "discovery_filters": {
             "profile_language": ["en"],
             "gender": "male",
+            # WIDENED 2026-08-14 after measuring the addressable pool. The old
+            # query ("home theater and home cinema setups, media rooms, cozy
+            # homebody home entertainment, living room furniture and home
+            # furnishing") matched only 444 creators against Lifestyle Sofa's
+            # 7,647 — a 17x gap, and the reason this table stopped producing new
+            # prospects while the other kept filling. A fixed pool that small is
+            # consumed in a few runs, after which exclude_handles leaves almost
+            # nothing.
+            #
+            # Probed one filter at a time (limit=1, so 0.01 credits each) to find
+            # what was actually binding. Results, all with gender=male and
+            # subs>=5000 held constant:
+            #
+            #   current wording ......................  444
+            #   + projectors / AV receivers / soundbars  445   <- no effect
+            #   + man cave / gaming setup / home audio  2623   <- 5.9x
+            #   broad "home entertainment" wording      1743
+            #
+            # The technical AV vocabulary buys nothing; the LIFESTYLE framing is
+            # what opens the pool, because home-theatre buyers overlap heavily
+            # with man-cave and gaming-setup creators. Gender and the subscriber
+            # floor were the other candidates and are much weaker levers
+            # (dropping gender entirely: 444 -> 1572; subs 5000 -> 2000: 444 ->
+            # 635), so neither was touched — the male-creator preference stands.
+            #
+            # KEEP THIS UNDER 150 CHARACTERS. The vendor documents 3-150, and a
+            # 180-char version measured WORSE (1,039) than this 122-char one,
+            # which reads like silent truncation. Re-probe with the snippet above
+            # after any reword; do not assume more terms means a wider pool.
             "ai_search": (
-                "home theater and home cinema setups, media rooms, cozy homebody "
-                "home entertainment, living room furniture and home furnishing"
+                "home theater and home cinema, media room, man cave, gaming setup, "
+                "home audio, projector and TV setup, living room furniture"
             ),
             # `number_of_subscribers` is wired in below the NICHES dict, derived
             # from this niche's own min_avg_views via
@@ -337,6 +366,42 @@ MIN_LONGFORM_VIDEO_COUNT = 30
 # "en" would silently blind the zone filter for exactly those channels.
 ENGLISH_LANGUAGE_PREFIX = "en"
 
+# Character ranges that mean a channel description is written in a language
+# other than English. Checked because is_english() above reads only the
+# per-video language TAG, and a creator can tag uploads "en" while writing their
+# channel bio in another language entirely — @LINTAN777 (2026-08-14) declared
+# country US, tagged its videos "en", cleared every numeric gate, and had a bio
+# 24% Chinese. The tag said English; the channel did not read as one.
+#
+# Scripts, not "non-ASCII". Emoji, box-drawing, arrows, currency symbols and
+# accented Latin (é, ü, ñ) are all deliberately ABSENT: an English channel
+# routinely uses those, and matching them would drop good prospects on
+# decoration. Only ranges that carry actual language are listed.
+NON_LATIN_SCRIPT_RANGES = (
+    (0x0400, 0x04FF),   # Cyrillic
+    (0x0590, 0x05FF),   # Hebrew
+    (0x0600, 0x06FF),   # Arabic
+    (0x0700, 0x074F),   # Syriac
+    (0x0900, 0x097F),   # Devanagari
+    (0x0980, 0x09FF),   # Bengali
+    (0x0B80, 0x0BFF),   # Tamil
+    (0x0E00, 0x0E7F),   # Thai
+    (0x3040, 0x30FF),   # Hiragana + Katakana
+    (0x3400, 0x4DBF),   # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),   # CJK Unified Ideographs
+    (0xA000, 0xA4CF),   # Yi
+    (0xAC00, 0xD7AF),   # Hangul syllables
+    (0xF900, 0xFAFF),   # CJK compatibility ideographs
+)
+
+# Two thresholds, and both are needed. The RATIO catches a genuinely
+# non-English bio (@LINTAN777 measured 24%). The absolute FLOOR stops a short
+# bio tripping on decoration — "new video 日曜日!" is 2 CJK characters in a
+# 20-character string, which is 10% by ratio but obviously not a language
+# signal. A bilingual bio with a real paragraph in another language clears both.
+MAX_NON_LATIN_DESCRIPTION_RATIO = 0.10
+MIN_NON_LATIN_DESCRIPTION_CHARS = 8
+
 # The per-video view floor, applied to BOTH niches. This is the per-video
 # reading of "min 10k+ views" — stricter than the niche's min_avg_views floor,
 # which one strong upload can carry over the line while other recent videos
@@ -433,6 +498,10 @@ DROP_NO_SOCIAL = "no_social_presence"
 # could look. Named distinctly from the other drop reasons so a run summary
 # showing these is read as "come back tomorrow", not "these channels failed".
 DROP_QUOTA_EXHAUSTED = "quota_exhausted"
+# The channel's own bio isn't in English, whatever its video language tag says.
+# Distinct from DROP_NOT_ENGLISH so a run summary shows which signal fired —
+# they disagree in exactly the case this gate was added for.
+DROP_NON_ENGLISH_DESCRIPTION = "non_english_description"
 
 # Whole categories a brand-partnership run must never surface, however well a
 # channel otherwise fits a niche: political commentary, ASMR, and firearms /
@@ -587,6 +656,42 @@ def is_english(content_language: str | None) -> bool:
     unsets they will be dropped rather than written as Unknown.
     """
     return (content_language or "").strip().lower().startswith(ENGLISH_LANGUAGE_PREFIX)
+
+
+def non_latin_script_chars(text: str | None) -> int:
+    """How many characters of `text` sit in a NON_LATIN_SCRIPT_RANGES block."""
+    return sum(
+        1
+        for char in (text or "")
+        if any(low <= ord(char) <= high for low, high in NON_LATIN_SCRIPT_RANGES)
+    )
+
+
+def description_is_non_english(description: str | None) -> bool:
+    """
+    True if a channel's description is substantially not in English.
+
+    Complements is_english(), which reads the per-video language TAG. The two
+    disagree for a creator who tags uploads "en" but writes their bio in another
+    language, which is the case this exists for (see NON_LATIN_SCRIPT_RANGES).
+
+    Measured on SCRIPT, not on language detection: a dependency-free script
+    check is decisive for Chinese/Japanese/Korean/Cyrillic/Arabic/Devanagari
+    text and needs no model. Its blind spot is a non-English bio written in
+    Latin script (Spanish, German, Indonesian), which this cannot see at all —
+    those still rely on the video language tag. Worth knowing before trusting
+    this as a complete language gate; it is a targeted fix, not a general one.
+
+    An empty description is not evidence of anything and returns False, the same
+    "absent data never disqualifies" rule the zone and age checks follow.
+    """
+    text = (description or "").strip()
+    if not text:
+        return False
+    count = non_latin_script_chars(text)
+    if count < MIN_NON_LATIN_DESCRIPTION_CHARS:
+        return False
+    return (count / len(text)) >= MAX_NON_LATIN_DESCRIPTION_RATIO
 
 
 def _clears_per_video_floor(settled_views: list[int]) -> bool:
@@ -1074,6 +1179,20 @@ def process_candidate(
             stats.get("channel_title"), DROP_EXCLUDED_TOPIC, topic,
         )
         return None, DROP_EXCLUDED_TOPIC
+
+    # The channel's own bio must read as English, whatever its per-video
+    # language tag says. Free (the description is already fetched) and placed
+    # here with the other description checks, so a non-English channel costs no
+    # performance fetch. is_english() further down still runs for everyone: the
+    # two catch different things, and @LINTAN777 passed that one while failing
+    # this.
+    if description_is_non_english(stats.get("description", "")):
+        logger.info(
+            "Dropping %s before push — %s (%d non-Latin script chars in the bio).",
+            stats.get("channel_title"), DROP_NON_ENGLISH_DESCRIPTION,
+            non_latin_script_chars(stats.get("description", "")),
+        )
+        return None, DROP_NON_ENGLISH_DESCRIPTION
 
     # Real-location check: a creator who set snippet.country to the US but
     # states an outside-the-zone location in their About ("based in the

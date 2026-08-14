@@ -410,15 +410,22 @@ def test_settled_views_excludes_shorts(monkeypatch):
 
 
 def test_a_short_at_exactly_the_shorts_boundary_is_excluded(monkeypatch):
-    """SHORTS_MAX_SECONDS is inclusive — 60s is a Short, 61s is not."""
+    """
+    SHORTS_MAX_SECONDS is inclusive and now 180 — YouTube's real cap since late
+    2024. 180s is a Short, 181s is not. The 61-180s band is what the live
+    "Kalakari Couple" channel exploited: 29 of its 30 uploads in that band
+    cleared 10k, and the old 60s cutoff let all of them satisfy the per-video
+    view floor.
+    """
     router = _Router(
-        playlist=_Resp(200, _playlist_payload(2)),
+        playlist=_Resp(200, _playlist_payload(3)),
         videos=_Resp(200, _videos_payload_with_views(
-            [500, 20_000], durations=["PT60S", "PT61S"],
+            [500, 90_000, 20_000], durations=["PT60S", "PT180S", "PT181S"],
         )),
     )
     enrichment = _patch(monkeypatch, router)
 
+    # The 90,000-view 180s Short must NOT reach the floor, however strong it is.
     assert enrichment.get_recent_video_performance("UC1", "PL1")["settled_views"] == [20_000]
 
 

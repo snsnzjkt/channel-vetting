@@ -136,13 +136,44 @@ EMAIL_DOMAIN_BLOCKLIST = THIRD_PARTY_DOMAINS
 
 
 # The API exposes no "is this a Short" flag, so duration is the proxy.
-# 60s is the classic Shorts cap. YouTube raised it to 3 minutes in late
-# 2024, so a 60s cutoff under-detects newer Shorts channels — chosen
-# deliberately: a channel misread as Shorts-only is DISCARDED before it
-# ever reaches Airtable (main.pre_push_drop_reason), so a false positive
-# costs a real prospect with no row left to review, while a false negative
-# only costs one flagged row a human can dismiss.
-SHORTS_MAX_SECONDS = 60
+#
+# RAISED from 60 to 180 (2026-08-15) to match YouTube's actual Shorts cap,
+# which moved to 3 minutes in late 2024.
+#
+# The old value's rationale is worth stating, because it was sound when written
+# and is now backwards. At the time, this constant fed only is_shorts_only(),
+# where a FALSE POSITIVE is the expensive error: a channel misread as
+# Shorts-only is discarded outright, so calling a real video a Short costs a
+# prospect with no row left to review. Under-detecting merely produced a flagged
+# row a human could dismiss. 60 was the cautious choice for that one use.
+#
+# It now feeds two MINIMUM floors as well, and there the asymmetry runs the other
+# way — under-detection is what does the damage:
+#
+#   - count_longform() / MIN_LONGFORM_VIDEO_COUNT: Shorts counted as long-form
+#     inflate the catalogue and satisfy a floor meant to prove real content.
+#   - settled_views / MIN_VIEWS_PER_VIDEO: Shorts' view counts satisfy the
+#     per-video floor, which is precisely what excluding them was meant to stop.
+#
+# Live case that forced this (UC-4DO-29boRYvZpc9oPmAww, "Kalakari Couple"), over
+# its newest 50 uploads:
+#
+#     <= 60s ......  15 videos, 13 over 10k   (code called these Shorts)
+#     61-180s .....  30 videos, 29 over 10k   (YouTube: Shorts. Code: LONG-FORM)
+#     > 180s ......   5 videos,  0 over 10k   (the only real long-form)
+#
+# Every video clearing 10k was a Short; the durations the code was scoring as
+# long-form were 67, 92, 77, 81, 89 seconds. It was tracked as a prospect on the
+# strength of its Shorts. At 180 it fails the long-form count AND the per-video
+# floor, independently.
+#
+# COST, accepted: a genuine 61-180s landscape video is now misread as a Short.
+# Duration is the only signal available — videos.list exposes no aspect ratio,
+# and thumbnails are letterboxed to 16:9 regardless — so the two cannot be told
+# apart. A channel whose "long-form" output is 2-minute clips is not what a
+# brand-placement brief is asking for anyway, which is why this direction is the
+# right one to err in now.
+SHORTS_MAX_SECONDS = 180
 
 ISO8601_DURATION_PATTERN = re.compile(
     r"^P(?:(?P<days>\d+)D)?T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?$"

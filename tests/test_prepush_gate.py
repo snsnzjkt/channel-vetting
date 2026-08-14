@@ -197,10 +197,15 @@ def test_unparseable_duration_is_not_treated_as_a_short():
 
 
 def test_shorts_only_needs_every_sampled_video_under_the_cap():
-    from enrichment import is_shorts_only
+    from enrichment import is_shorts_only, SHORTS_MAX_SECONDS
 
+    # 180s, matching YouTube's real Shorts cap since late 2024. A 61-180s
+    # upload IS a Short and no longer counts as long-form — see
+    # SHORTS_MAX_SECONDS for the live channel that forced this.
+    assert SHORTS_MAX_SECONDS == 180
     assert is_shorts_only(["PT30S", "PT59S", "PT60S"]) is True
-    assert is_shorts_only(["PT30S", "PT61S"]) is False
+    assert is_shorts_only(["PT30S", "PT90S", "PT180S"]) is True   # all Shorts now
+    assert is_shorts_only(["PT30S", "PT181S"]) is False           # 3m01s is real
 
 
 def test_shorts_only_is_false_when_nothing_is_known():
@@ -267,9 +272,23 @@ def test_a_language_merely_containing_en_is_not_english():
 def test_counts_only_confirmed_long_form_videos():
     from enrichment import count_longform
 
-    assert count_longform(["PT30S", "PT61S", "PT12M"]) == 2
+    assert count_longform(["PT30S", "PT181S", "PT12M"]) == 2
     assert count_longform(["PT30S", "PT59S"]) == 0
     assert count_longform([]) == 0
+
+
+def test_a_sub_three_minute_upload_does_not_count_as_long_form():
+    """
+    The 2026-08-15 regression case. "Kalakari Couple" had 30 uploads in the
+    61-180s band — YouTube Shorts — and the old 60s cutoff scored every one of
+    them as long-form, inflating its catalogue past the 30-video floor. Only 5
+    of its newest 50 were genuinely over 3 minutes.
+    """
+    from enrichment import count_longform
+
+    shorts_band = ["PT67S", "PT92S", "PT77S", "PT81S", "PT89S", "PT180S"]
+    assert count_longform(shorts_band) == 0
+    assert count_longform(shorts_band + ["PT4M", "PT12M"]) == 2
 
 
 def test_an_unreadable_duration_never_counts_as_long_form():

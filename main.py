@@ -344,9 +344,26 @@ ENGLISH_LANGUAGE_PREFIX = "en"
 # be given its own average bar.
 MIN_VIEWS_PER_VIDEO = 10_000
 
-# ...but only MIN_VIEWS_PER_VIDEO_RATIO of the window has to clear it, not all
-# of it (changed 2026-08-14, at the user's direction, and applied to BOTH niches
-# — Lifestyle Sofa included; its brief's 2,000 figure stays overridden).
+# ...but only MIN_VIEWS_PER_VIDEO_RATIO of the sampled LONG-FORM videos has to
+# clear it, not all of them (changed 2026-08-14, at the user's direction, and
+# applied to BOTH niches — Lifestyle Sofa included; its brief's 2,000 figure
+# stays overridden). Shorts are excluded from the sample entirely; see
+# enrichment.get_recent_video_performance.
+#
+# CALIBRATED at 0.60 against the live tables, not guessed. The first cut was
+# 0.70, and re-checking all 80 tracked rows showed it cutting through the middle
+# of the good group rather than separating it from the bad one:
+#
+#   - Shorts-inflated channels scored 0-3 of 10 (Explore With Jasir 0/10 on a
+#     140,885 average, Diva Angel 2/9, Kat and Sourabh 3/10).
+#   - Channels a HUMAN REVIEWER had already marked Approved scored 5-6 of 10
+#     (ETPC 6/10 at 22,198 avg, Bane Tech 5/10 at 23,914 avg).
+#
+# A 70% bar therefore rejected channels the reviewers themselves wanted, which
+# is the definition of a miscalibrated gate. 0.60 keeps every Shorts-inflated
+# channel out and lets the 6-of-10 band through. If this is retuned again, do it
+# the same way — run audit_prospects.py and look at where the reviewers' own
+# Approved/Rejected calls actually fall.
 #
 # Why this changed. The gate used to test the window's MINIMUM, i.e. "EVERY
 # recent video passed 10k". Read against the 10,000 AVERAGE floor next to it,
@@ -358,16 +375,16 @@ MIN_VIEWS_PER_VIDEO = 10_000
 # discovery survival rate measured on 2026-08-13 (~97 creators examined for one
 # qualified row).
 #
-# 70% keeps what the floor was actually for — catching a channel whose average
-# is propped up by one viral upload while the rest flopped — without demanding
-# every upload be a hit. At the default PERFORMANCE_SAMPLE_SIZE of 10 that is
-# "at least 7 of the newest 10".
+# The ratio keeps what the floor was actually for — catching a channel whose
+# average is propped up by one viral upload while the rest flopped — without
+# demanding every upload be a hit. At the default PERFORMANCE_SAMPLE_SIZE of 10
+# that is "at least 6 of the newest 10 long-form videos".
 #
 # The denominator is the count of SETTLED, REPORTED videos, not a flat 10: an
 # upload still climbing toward 10k, or one with no public view count, is unknown
 # rather than failing, and enrichment already excludes both from
 # `settled_views`. So the rule reads "70% of the videos we can actually judge".
-MIN_VIEWS_PER_VIDEO_RATIO = 0.70
+MIN_VIEWS_PER_VIDEO_RATIO = 0.60
 
 # A live channel, applied to BOTH niches: at least this many uploads per year,
 # read from the sampled window's cadence (enrichment.calc_upload_frequency,

@@ -658,7 +658,8 @@ def get_recent_video_performance(
             snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or ""
         )
 
-        # ...but only the newest PERFORMANCE_SAMPLE_SIZE feed the metrics.
+        # ...but only the newest PERFORMANCE_SAMPLE_SIZE feed the FALLBACK
+        # metrics (see the long-form sample below, which is what normally wins).
         if v.get("id") not in performance_ids:
             continue
         stats = v.get("statistics", {})
@@ -698,6 +699,7 @@ def get_recent_video_performance(
     # view count doesn't count (unknown, not zero).
     videos_by_id = {v.get("id"): v for v in video_items}
     settled_views = []
+    settled_engagements = []
     for video_id in video_ids:
         if len(settled_views) >= PERFORMANCE_SAMPLE_SIZE:
             break
@@ -707,19 +709,59 @@ def get_recent_video_performance(
         seconds = parse_iso8601_duration(video.get("contentDetails", {}).get("duration"))
         if seconds is None or seconds <= SHORTS_MAX_SECONDS:
             continue  # a Short, or a duration we can't read
-        raw = video.get("statistics", {}).get("viewCount")
+        stats = video.get("statistics", {})
+        raw = stats.get("viewCount")
         if raw is None:
             continue
         if not _view_count_is_settled(video.get("snippet", {}).get("publishedAt")):
             continue
         settled_views.append(_as_int(raw))
+        settled_engagements.append(
+            _as_int(stats.get("likeCount")) + _as_int(stats.get("commentCount"))
+        )
 
-    avg_views = total_views / performance_count
+    # avg_views and the engagement rate are computed over THAT SAME long-form
+    # sample (2026-08-14), not over the newest 10 raw uploads.
+    #
+    # Why this changed: the column reads "Avg Views (last 10 videos)" and a
+    # reviewer takes it at face value, but with Shorts mixed in it was reporting
+    # something else entirely. Live example from the Home Theater table —
+    # "Explore With Jasir" showed a 140,885-view average while 0 of its 10
+    # recent long-form videos cleared 10,000. The average was Shorts. A reviewer
+    # scanning that column was being actively misled, and min_avg_views was
+    # gating on the same inflated number.
+    #
+    # Engagement moves with it deliberately: a ratio built from one window's
+    # views and another's likes describes no real channel.
+    #
+    # KNOWN CONSEQUENCE, accepted at the user's direction: averages and Overall
+    # Scores written before this change are NOT comparable with ones written
+    # after. Rows from before will read higher wherever Shorts carried them.
+    # Don't "fix" an apparent drop in a channel's average by reverting this.
+    #
+    # FALLBACK when the long-form sample is empty (a channel posting only
+    # Shorts, or whose long-form uploads are all too new): use the raw newest-10
+    # figures computed above. That keeps a number defined so the channel is
+    # still judged and DISCARDED BY NAME — is_shorts_only or the long-form-count
+    # floor — instead of being dropped here as "unreachable", which would hide
+    # the real reason from the run summary.
+    if settled_views:
+        avg_views = sum(settled_views) / len(settled_views)
+        longform_total_views = sum(settled_views)
+        avg_engagement_rate = (
+            sum(settled_engagements) / longform_total_views * 100
+            if longform_total_views > 0 else 0.0
+        )
+        sample_size = len(settled_views)
+    else:
+        avg_views = total_views / performance_count
+        avg_engagement_rate = (total_engagements / total_views * 100) if total_views > 0 else 0.0
+        sample_size = performance_count
+
     # The weakest long-form video in the sample above. None when nothing
     # qualified — a channel whose recent long-form uploads are all too new, or
     # that posts none — so the per-video floor is skipped (unknown), not failed.
     min_views = min(settled_views) if settled_views else None
-    avg_engagement_rate = (total_engagements / total_views * 100) if total_views > 0 else 0.0
 
     return {
         "avg_views": avg_views,
@@ -736,8 +778,10 @@ def get_recent_video_performance(
         "settled_views": list(settled_views),
         "avg_engagement_rate": avg_engagement_rate,
         "upload_dates": upload_dates,
-        # Size of the *performance* window (still 10), not the email scan.
-        "sample_size": performance_count,
+        # How many videos avg_views/avg_engagement_rate were actually averaged
+        # over — the long-form sample size, or the raw newest-10 count on the
+        # fallback path. Not the email-scan window.
+        "sample_size": sample_size,
         # Most creators never set this, so it's frequently "" (Unknown) —
         # best-effort only, not a guaranteed signal. The MOST COMMON tag
         # across the wide window, not the newest video's.

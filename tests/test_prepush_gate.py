@@ -329,12 +329,18 @@ def test_gate_precedence_is_stable(overrides, expected):
     assert drop_reason(**overrides) == expected
 
 
-# --- the per-video view floor (>= 70% of the window clears 10k) -----------
+# --- the per-video view floor (>= 60% of the LONG-FORM sample clears 10k) --
 # Stricter than the niche average floor, which one viral upload can carry over
-# the line while the rest of the window flopped — but deliberately NOT "every
+# the line while the rest of the sample flopped — but deliberately NOT "every
 # video", which (measured 2026-08-13) demanded an effective 25-50k average and
-# discarded ~99% of discovered creators. Gates on the RATIO of settled videos
-# clearing MIN_VIEWS_PER_VIDEO. See MIN_VIEWS_PER_VIDEO_RATIO in main.py.
+# discarded ~99% of discovered creators. Gates on the RATIO of settled
+# LONG-FORM videos clearing MIN_VIEWS_PER_VIDEO; Shorts never enter the sample
+# (see enrichment.get_recent_video_performance).
+#
+# The 0.60 figure is calibrated against the live tables rather than chosen: on
+# all 80 tracked rows, Shorts-inflated channels scored 0-3 of 10 while channels
+# a human reviewer had already Approved scored 5-6 of 10. See
+# MIN_VIEWS_PER_VIDEO_RATIO in main.py for the full reasoning.
 
 
 def _views(above: int, below: int) -> list[int]:
@@ -342,18 +348,21 @@ def _views(above: int, below: int) -> list[int]:
     return [50_000] * above + [500] * below
 
 
-def test_drops_a_channel_when_too_much_of_the_window_is_weak():
-    """6 of 10 clearing is under the 70% bar."""
-    assert drop_reason(settled_views=_views(6, 4)) == "video_below_view_minimum"
+def test_drops_a_channel_when_too_much_of_the_sample_is_weak():
+    """5 of 10 clearing is under the 60% bar."""
+    assert drop_reason(settled_views=_views(5, 5)) == "video_below_view_minimum"
 
 
-def test_exactly_seventy_percent_of_the_window_is_kept():
+def test_exactly_sixty_percent_of_the_sample_is_kept():
     from main import MIN_VIEWS_PER_VIDEO, MIN_VIEWS_PER_VIDEO_RATIO
 
     assert MIN_VIEWS_PER_VIDEO == 10_000
-    assert MIN_VIEWS_PER_VIDEO_RATIO == 0.70
-    # 7 of 10 is the boundary and must PASS, not fail.
-    assert drop_reason(settled_views=_views(7, 3)) is None
+    assert MIN_VIEWS_PER_VIDEO_RATIO == 0.60
+    # 6 of 10 is the boundary and must PASS. This is the live case the
+    # recalibration was for: ETPC (6/10, 22,198 avg) and Adrianne MG (6/10,
+    # 16,883 avg) were both being discarded at 70%, and a reviewer had marked
+    # ETPC Approved.
+    assert drop_reason(settled_views=_views(6, 4)) is None
 
 
 def test_a_video_exactly_at_the_floor_counts_as_clearing_it():
@@ -361,32 +370,44 @@ def test_a_video_exactly_at_the_floor_counts_as_clearing_it():
     assert drop_reason(settled_views=[10_000] * 10) is None
 
 
-def test_the_per_video_floor_still_catches_a_one_hit_wonder():
+def test_the_per_video_floor_still_catches_a_shorts_inflated_channel():
     """
-    The reason this gate exists at all: a 50k average that comes from a single
-    viral upload while every other recent video flopped. 1 of 10 clearing is
-    nowhere near 70%.
+    The reason this gate exists at all, and the live case that proved it:
+    "Explore With Jasir" reported a 140,885-view average with 0 of 10 long-form
+    videos over 10k. A 3-of-10 channel (Kat and Sourabh, 57,234 avg) is caught
+    at 60% too — the bar came down without letting these through.
     """
-    assert drop_reason(avg_views=50_000, settled_views=_views(1, 9)) == "video_below_view_minimum"
+    assert drop_reason(avg_views=140_000, settled_views=_views(0, 10)) == "video_below_view_minimum"
+    assert drop_reason(avg_views=57_000, settled_views=_views(3, 7)) == "video_below_view_minimum"
 
 
-def test_a_single_weak_video_no_longer_sinks_a_strong_channel():
+def test_a_single_weak_video_does_not_sink_a_strong_channel():
     """
-    The 2026-08-14 change, stated as a test: 9 of 10 over the floor and one
-    weak upload used to be a discard, which is what made the effective bar a
-    25-50k average rather than the 10k the brief asks for.
+    9 of 10 over the floor and one weak upload used to be a discard, which is
+    what made the effective bar a 25-50k average rather than the 10k the brief
+    asks for.
     """
     assert drop_reason(settled_views=_views(9, 1)) is None
 
 
 def test_the_ratio_rounds_up_on_a_partial_video():
     """
-    ceil(0.70 * 3) == 3, so on a 3-video settled window all three must clear.
-    Rounding up keeps a thin window from being judged more leniently than a
+    ceil(0.60 * 3) == 2, so on a 3-video sample two of three must clear.
+    Rounding up keeps a thin sample from being judged more leniently than a
     full one.
     """
-    assert drop_reason(settled_views=_views(3, 0)) is None
-    assert drop_reason(settled_views=_views(2, 1)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(2, 1)) is None
+    assert drop_reason(settled_views=_views(1, 2)) == "video_below_view_minimum"
+
+
+def test_a_nine_video_sample_still_needs_six():
+    """
+    ceil(0.60 * 9) == 6, so a sample short one video does not get an easier
+    bar. Pins the live Diva Angel case (2 of 9), which must still fail.
+    """
+    assert drop_reason(settled_views=_views(6, 3)) is None
+    assert drop_reason(settled_views=_views(5, 4)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(2, 7)) == "video_below_view_minimum"
 
 
 def test_an_unknown_settled_window_does_not_disqualify():

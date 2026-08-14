@@ -461,6 +461,68 @@ def test_the_floor_sample_reaches_past_shorts_for_ten_long_form_videos(monkeypat
     assert all(v >= 20_000 for v in settled), "a Short leaked into the long-form sample"
 
 
+def test_avg_views_is_computed_over_long_form_only(monkeypatch):
+    """
+    The live bug this fixes: "Explore With Jasir" showed a 140,885-view average
+    in Airtable while none of its long-form videos cleared 10k, because the
+    average was Shorts. Here two 300k Shorts sit beside two 5k long-form videos
+    — the average must report 5,000, not ~152,500.
+    """
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(4)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [300_000, 5_000, 300_000, 5_000],
+            durations=["PT30S", "PT10M", "PT40S", "PT12M"],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["avg_views"] == 5_000
+    assert result["settled_views"] == [5_000, 5_000]
+    assert result["sample_size"] == 2   # averaged over 2 long-form, not 4 videos
+
+
+def test_avg_views_falls_back_when_there_is_no_long_form_sample(monkeypatch):
+    """
+    A Shorts-only channel still needs a defined average, so it gets DISCARDED BY
+    NAME (shorts_only / the long-form-count floor) rather than looking
+    unreachable and hiding the real reason from the run summary.
+    """
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(2)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [8_000, 12_000], durations=["PT30S", "PT45S"],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["settled_views"] == []
+    assert result["avg_views"] == 10_000    # the raw newest-10 mean, as before
+    assert result["sample_size"] == 2
+    assert result["shorts_only"] is True    # ...and this is what discards it
+
+
+def test_engagement_rate_follows_the_same_long_form_sample(monkeypatch):
+    """
+    A ratio built from one window's views and another's likes describes no real
+    channel, so engagement moves with avg_views. Each fixture video carries
+    1 like + 1 comment, so 2 engagements over 5,000 views = 0.04%.
+    """
+    router = _Router(
+        playlist=_Resp(200, _playlist_payload(2)),
+        videos=_Resp(200, _videos_payload_with_views(
+            [300_000, 5_000], durations=["PT30S", "PT10M"],
+        )),
+    )
+    enrichment = _patch(monkeypatch, router)
+
+    result = enrichment.get_recent_video_performance("UC1", "PL1")
+    assert result["avg_views"] == 5_000
+    assert result["avg_engagement_rate"] == pytest.approx(2 / 5_000 * 100)
+
+
 def test_settled_views_is_empty_when_every_recent_upload_is_a_short(monkeypatch):
     """
     Nothing to judge -> unknown, so the per-video floor is skipped rather than

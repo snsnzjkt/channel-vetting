@@ -383,15 +383,32 @@ MIN_VIEWS_PER_VIDEO = 10_000
 # The denominator is the count of SETTLED, REPORTED videos, not a flat 10: an
 # upload still climbing toward 10k, or one with no public view count, is unknown
 # rather than failing, and enrichment already excludes both from
-# `settled_views`. So the rule reads "70% of the videos we can actually judge".
+# `settled_views`. So the rule reads "60% of the videos we can actually judge".
 MIN_VIEWS_PER_VIDEO_RATIO = 0.60
 
 # A live channel, applied to BOTH niches: at least this many uploads per year,
 # read from the sampled window's cadence (enrichment.calc_upload_frequency,
-# videos/month, annualised). A slower channel isn't publishing often enough to
-# be worth a placement. Unknown cadence (fewer than two sampled uploads) is
+# videos/month, annualised). Unknown cadence (fewer than two sampled uploads) is
 # passed as None and never disqualifies, the same rule as an unknown age.
-MIN_UPLOADS_PER_YEAR = 10
+#
+# LOWERED from 10 to 6 (2026-08-14). The 2026-08-14 audit of all 80 tracked rows
+# turned up two channels this gate was the ONLY thing rejecting, and both were
+# strong: Ashley Devonna (94,750 long-form average, 10 of 10 recent videos over
+# 10k) and Karin Bohn (19,530 average, 7 of 10). A rule whose only observed
+# effect is discarding the best channel in the sample is measuring the wrong
+# thing — a brand placement does not need weekly uploads, and a
+# high-production monthly creator is exactly the kind of prospect the briefs
+# describe.
+#
+# MAX_DAYS_SINCE_LAST_UPLOAD below is the real liveness test, and it is the one
+# that catches an abandoned channel. This floor now only excludes the genuinely
+# near-dormant (fewer than one upload every two months).
+#
+# CAVEAT, unlike MIN_VIEWS_PER_VIDEO_RATIO: that ratio was calibrated against 80
+# rows with reviewer verdicts to check it against. This is 2 data points. 6 is a
+# judgement call, not a measurement — revisit it once a few audits have run and
+# there is a real distribution to look at.
+MIN_UPLOADS_PER_YEAR = 6
 
 # Still-active: the most recent sampled upload must be within this many days
 # (a rolling ~12 months from today, NOT the calendar year). A channel that

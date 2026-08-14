@@ -421,18 +421,33 @@ def test_an_unknown_settled_window_does_not_disqualify():
     assert drop_reason(settled_views=[]) is None
 
 
-# --- the upload-cadence floor (>= 10 uploads a year) ----------------------
+# --- the upload-cadence floor (>= 6 uploads a year) -----------------------
+# Lowered from 10 on 2026-08-14: the audit found the gate's only observed
+# effect was rejecting the two strongest channels in the sample (Ashley
+# Devonna, 94,750 avg with 10/10 over 10k; Karin Bohn, 19,530 with 7/10).
+# MAX_DAYS_SINCE_LAST_UPLOAD is the real liveness test.
 
 
 def test_drops_a_channel_that_uploads_too_rarely():
-    assert drop_reason(uploads_per_year=9) == "upload_cadence_too_low"
+    assert drop_reason(uploads_per_year=5) == "upload_cadence_too_low"
 
 
-def test_exactly_ten_uploads_a_year_is_kept():
+def test_exactly_six_uploads_a_year_is_kept():
     from main import MIN_UPLOADS_PER_YEAR
 
-    assert MIN_UPLOADS_PER_YEAR == 10
-    assert drop_reason(uploads_per_year=10) is None
+    assert MIN_UPLOADS_PER_YEAR == 6
+    assert drop_reason(uploads_per_year=6) is None
+
+
+def test_a_monthly_creator_is_no_longer_rejected_on_cadence():
+    """
+    The live case behind the change: a high-production creator posting roughly
+    monthly (~12/yr) or every six weeks (~9/yr) was being discarded at the old
+    floor of 10 despite a 94,750-view average. A brand placement does not need
+    weekly uploads.
+    """
+    assert drop_reason(uploads_per_year=9) is None
+    assert drop_reason(uploads_per_year=12) is None
 
 
 def test_an_unknown_cadence_does_not_disqualify():

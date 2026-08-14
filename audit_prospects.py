@@ -197,9 +197,28 @@ def audit_table(niche_name: str, table_name: str, limit: int | None) -> list[dic
     return results
 
 
-def delete_failures(table_name: str, results: list[dict], yes_delete_many: bool) -> int:
-    """Delete the rows the audit marked deletable, subject to the breaker."""
+def delete_failures(
+    table_name: str,
+    results: list[dict],
+    yes_delete_many: bool,
+    only_names: set[str] | None = None,
+) -> int:
+    """
+    Delete the rows the audit marked deletable, subject to the breaker.
+
+    `only_names` is an explicit ALLOWLIST of Channel Names. When given, a row is
+    deleted only if the audit failed it AND it is named — two independent gates.
+    That matters because deletion is irreversible and the audit re-runs against
+    live YouTube data: a channel's view counts can shift between the report a
+    human approved and the run that deletes, so "whatever fails this time" is
+    not the same set the human signed off on. Naming them removes that gap.
+    """
     targets = [r for r in results if r["deletable"]]
+    if only_names is not None:
+        skipped = [r for r in targets if r["name"] not in only_names]
+        targets = [r for r in targets if r["name"] in only_names]
+        for r in skipped:
+            print(f"SKIP (not in --only) {r['name']} [{r['status']}] {r['verdict']}")
     if not targets:
         print("Nothing to delete.")
         return 0
@@ -244,6 +263,15 @@ def main() -> None:
         action="store_true",
         help=f"Override the circuit breaker (>{MAX_DELETES} rows or >{MAX_DELETE_FRACTION:.0%} of a table).",
     )
+    parser.add_argument(
+        "--only",
+        action="append",
+        metavar="CHANNEL_NAME",
+        help="Repeatable allowlist: delete ONLY these Channel Names, and only if "
+             "the audit also fails them. Use this to act on a report a human "
+             "approved, so a view count that shifted since then can't widen the "
+             "delete set.",
+    )
     args = parser.parse_args()
 
     niches = {args.niche: NICHES[args.niche]} if args.niche else dict(NICHES)
@@ -255,6 +283,11 @@ def main() -> None:
 
     grand_total = 0
     grand_deleted = 0
+    # Names the allowlist matched anywhere. Accumulated across niches and
+    # reported ONCE at the end, not per table: an --only name naturally belongs
+    # to one table, so warning per table cried wolf about every name that simply
+    # lived in the other one — burying a real mismatch in false ones.
+    matched_names: set[str] = set()
     for niche_name, niche_config in niches.items():
         try:
             results = audit_table(niche_name, niche_config.get("table_name"), args.limit)
@@ -285,11 +318,27 @@ def main() -> None:
                 print(f"    - {r['name']} [{r['status']}] {r['verdict']}")
 
         if args.confirm:
+            allowlist = set(args.only) if args.only else None
+            if allowlist is not None:
+                matched_names |= {
+                    r["name"] for r in results if r["deletable"] and r["name"] in allowlist
+                }
             grand_deleted += delete_failures(
-                niche_config["table_name"], results, args.yes_delete_many
+                niche_config["table_name"], results, args.yes_delete_many,
+                only_names=allowlist,
             )
 
     print(f"\n=== {grand_total} row(s) checked, {grand_deleted} deleted ===")
+    if args.confirm and args.only:
+        # Loud, and only now that every table has been seen: an unmatched name
+        # means the allowlist and reality disagree — the row was renamed, is
+        # already gone, or now PASSES. None of those should read as "done".
+        unmatched = set(args.only) - matched_names
+        if unmatched:
+            print(
+                "\nWARNING: --only named these but no table failed them — "
+                f"renamed, already deleted, or now passing: {sorted(unmatched)}"
+            )
     if not args.confirm and grand_total:
         print("Report-only run — nothing was changed. Re-run with --confirm to delete.")
 

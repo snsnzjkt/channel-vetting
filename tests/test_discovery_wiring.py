@@ -261,6 +261,178 @@ def test_run_niche_accumulates_exclude_handles_across_rounds(monkeypatch):
     )
 
 
+# --- the 2026-08-13 credit-waste regression --------------------------------
+# The vendor bills 0.01 per creator RETURNED and its minimum page is 50, so a
+# page costs 0.5 credits however few the caller asked for. The old code trimmed
+# discover()'s return to `target` (4, on a 3-row headroom), examined those 4,
+# dropped the other 46 WITHOUT recording them, and so re-bought the same page
+# every round: 32 rounds, 16.00 credits, one qualified row.
+
+
+def _recording_process_candidate(examined, survives_one_in=999):
+    def process_candidate(candidate, *a, **k):
+        examined.append(candidate["handle"])
+        if len(examined) % survives_one_in:
+            return None, "below_view_minimum"
+        return {"Channel ID": candidate["handle"], "Qualification": "Qualified"}, "Qualified"
+
+    return process_candidate
+
+
+def _run_with_caps(monkeypatch, discovery, examined, qualified_cap, flagged_cap,
+                   survives_one_in=999):
+    monkeypatch.setattr(main, "DAILY_QUALIFIED_CAP", qualified_cap)
+    monkeypatch.setattr(main, "DAILY_FLAGGED_CAP", flagged_cap)
+    monkeypatch.setattr(
+        main, "process_candidate", _recording_process_candidate(examined, survives_one_in))
+    monkeypatch.setattr(main, "push_record", lambda t, r: True)
+    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    return main.run_niche(
+        "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": 12,
+         "discovery_filters": {"profile_language": ["en"]}},
+        None, None, discovery,
+    )
+
+
+def test_a_billed_page_is_fully_spent_before_another_is_bought(monkeypatch):
+    """
+    One page purchased, all 50 of its creators examined. The old code bought
+    the page ~32 times over to examine 4 each time.
+    """
+    examined = []
+    disc = _FakeDiscovery([[f"h{i}" for i in range(50)]])
+
+    _run_with_caps(monkeypatch, disc, examined, qualified_cap=2, flagged_cap=1)
+
+    # The purchase count is what the money bug was about. The trailing call is
+    # the dry check that ends the loop, so at most two.
+    assert len(disc.calls) <= 2, f"re-bought discovery {len(disc.calls)} times"
+    # Every creator we paid for got looked at, and none twice.
+    assert sorted(examined) == sorted(f"h{i}" for i in range(50))
+    assert disc.credits_spent == pytest.approx(0.5)
+
+
+def test_unexamined_but_billed_handles_are_still_excluded_next_round(monkeypatch):
+    """
+    The precise mechanism of the leak. A page of 50 against a 3-row headroom
+    leaves ~46 creators billed but not yet examined. Those MUST still reach the
+    next request's exclude_handles, or the vendor returns and re-bills them.
+    """
+    examined = []
+    # Two pages so there is a second request to inspect.
+    disc = _FakeDiscovery([[f"a{i}" for i in range(50)], [f"b{i}" for i in range(50)]])
+
+    _run_with_caps(monkeypatch, disc, examined, qualified_cap=2, flagged_cap=1)
+
+    assert len(disc.calls) >= 2, "expected a second request once the page was spent"
+    first_page = {f"a{i}" for i in range(50)}
+    assert first_page <= disc.calls[1]["exclude"], (
+        "handles that were billed but not examined fell out of exclude_handles — "
+        "the vendor will return and re-bill them"
+    )
+
+
+def test_only_the_headroom_is_examined_per_round(monkeypatch):
+    """
+    The other half of C1, and the reason returning all 50 is safe: a round
+    examines at most `target` candidates, so buying a bigger page does not
+    multiply YouTube enrichment quota (~3-13 units each). Here the qualified
+    budget fills on the first two candidates, so the remaining ~48 stay
+    backlogged and unexamined rather than being enriched and thrown away.
+    """
+    examined = []
+    disc = _FakeDiscovery([[f"h{i}" for i in range(50)]])
+
+    _run_with_caps(monkeypatch, disc, examined, qualified_cap=2, flagged_cap=0,
+                   survives_one_in=1)
+
+    assert len(examined) < 50, (
+        f"examined {len(examined)} candidates for a 2-row budget — the backlog "
+        "is not bounding enrichment"
+    )
+
+
+def test_the_discovery_subscriber_floor_tracks_each_niche_view_floor():
+    """
+    The subscriber floor sent to the vendor is DERIVED from the niche's own
+    min_avg_views, not hardcoded. Every other qualification lever is per-niche,
+    and these two have diverged before (Lifestyle Sofa's view floor was 2,000
+    until the unification). An absolute floor would silently stop matching the
+    arithmetic that justified it the next time a view floor moves.
+    """
+    for niche_name, config in main.NICHES.items():
+        filters = config.get("discovery_filters")
+        if filters is None:
+            continue
+        expected = int(config["min_avg_views"] * main.DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
+        assert filters["number_of_subscribers"] == {"min": expected}, (
+            f"{niche_name}'s discovery subscriber floor drifted from its view floor"
+        )
+
+
+def test_the_quota_ceiling_stops_enrichment(monkeypatch):
+    """
+    can_afford_search() gates search.list only, and the discovery source
+    REPLACES search.list — so before 2026-08-14 a discovery run consulted
+    QUOTA_CEILING nowhere and enrichment spend was bounded by nothing but the
+    daily row cap, which counts rows WRITTEN rather than candidates EXAMINED.
+    process_candidate now refuses to start a candidate it cannot afford.
+    """
+    import quota_tracker
+
+    monkeypatch.setattr(main, "can_afford_enrichment", lambda: False)
+    # Would spend quota if reached; must not be.
+    monkeypatch.setattr(
+        main, "get_channel_stats",
+        lambda *a, **k: pytest.fail("enrichment ran past an exhausted quota ceiling"))
+
+    record, reason = main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "Anything", "matched_keywords": []},
+        {}, _NullBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+    )
+
+    assert record is None
+    assert reason == main.DROP_QUOTA_EXHAUSTED
+    # Distinct from the criteria-based drop reasons: this says "come back
+    # tomorrow", not "this channel failed".
+    assert reason not in {
+        main.DROP_BELOW_VIEW_MINIMUM, main.DROP_DEAD_CHANNEL, main.DROP_NOT_ENGLISH,
+    }
+    assert quota_tracker.can_afford_enrichment  # the real gate still exists
+
+
+class _NameBlocklist:
+    """Matches on channel NAME, which is checkpoint 1's free pre-enrich key."""
+
+    handles: set = set()
+
+    def __init__(self, name):
+        self._name = name
+
+    def match(self, handle="", email="", name=""):
+        return "name" if name == self._name else ""
+
+
+def test_the_blocklist_is_checked_before_the_quota_gate(monkeypatch):
+    """
+    A blocklist match is free; a quota refusal must not mask it, or a run that
+    hit its ceiling would report DO NOT CONTACT channels as merely deferred and
+    a later run would re-consider them.
+    """
+    monkeypatch.setattr(main, "can_afford_enrichment", lambda: False)
+
+    record, reason = main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "Blocked Co", "matched_keywords": []},
+        {}, _NameBlocklist("Blocked Co"),
+        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+    )
+
+    assert record is None
+    assert reason == "blocked"
+
+
 def test_run_niche_stops_when_discovery_is_dry(monkeypatch):
     # Only one small batch, none survive -> the loop must terminate, not spin.
     disc = _FakeDiscovery([["x0", "x1", "x2"]])

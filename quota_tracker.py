@@ -13,7 +13,12 @@ import time
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 
-from config import QUOTA_LOG_FILE, QUOTA_CEILING, QUOTA_COST_SEARCH_LIST
+from config import (
+    QUOTA_LOG_FILE,
+    QUOTA_CEILING,
+    QUOTA_COST_ENRICHMENT,
+    QUOTA_COST_SEARCH_LIST,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +184,26 @@ def record_spend(units: int, call_name: str = "") -> int:
     return log[today]
 
 
+def _can_afford(cost: int, what: str) -> bool:
+    """
+    Whether spending `cost` more units would exceed QUOTA_CEILING.
+
+    Private on purpose. The two public wrappers below name the call types the
+    pipeline actually gates, so a call site reads as "can I afford a search"
+    rather than "can I afford 100 units" — the cost of a call type belongs in
+    config.py, not at the call site, and a caller that has to know the number
+    is one refactor away from passing the wrong one.
+    """
+    projected = get_today_spend() + cost
+    if projected > QUOTA_CEILING:
+        logger.warning(
+            "Skipping %s: projected spend %d would exceed QUOTA_CEILING %d",
+            what, projected, QUOTA_CEILING,
+        )
+        return False
+    return True
+
+
 def can_afford_search() -> bool:
     """
     Check whether spending another search.list call (100 units) would
@@ -186,11 +211,35 @@ def can_afford_search() -> bool:
     generically) because it is by far the most expensive call type and
     the one most likely to blow the daily budget if run unchecked.
     """
-    projected = get_today_spend() + QUOTA_COST_SEARCH_LIST
-    if projected > QUOTA_CEILING:
-        logger.warning(
-            "Skipping search.list call: projected spend %d would exceed QUOTA_CEILING %d",
-            projected, QUOTA_CEILING,
-        )
-        return False
-    return True
+    return _can_afford(QUOTA_COST_SEARCH_LIST, "search.list call")
+
+
+def can_afford_enrichment() -> bool:
+    """
+    Check whether enriching one more candidate would exceed QUOTA_CEILING.
+
+    Why this exists (2026-08-14). `can_afford_search()` was for a long time the
+    ONLY ceiling check in the pipeline, and it gates `search.list` alone. That
+    was defensible while every run started with a search: enrichment rode along
+    behind a call that was itself gated, so the 100-unit check ran first and
+    the ~3 units per candidate that followed were bounded in practice.
+
+    The influencers.club discovery source removed that coupling. It replaces
+    `search.list` entirely (`run_niche` empties `remaining_keywords`), so a
+    discovery run never reaches `can_afford_search()` and therefore never
+    consults QUOTA_CEILING at all — enrichment spend was recorded by
+    `record_spend()` and bounded by nothing. The only limit was the daily row
+    cap, which bounds rows WRITTEN, not candidates EXAMINED, and those diverge
+    badly at a low gate-survival rate.
+
+    QUOTA_COST_ENRICHMENT is the per-candidate FLOOR (channels.list +
+    playlistItems + videos.list), not its worst case: long-form paging can add
+    up to 2 x LONGFORM_SCAN_MAX_PAGES and the email deep scan up to
+    2 x EMAIL_DEEP_SCAN_PAGES on top. Checking the floor is deliberate — it is
+    the amount we KNOW the next candidate costs, and refusing to start a
+    candidate we cannot even begin is the useful guarantee. The optional extras
+    are themselves the last things a candidate reaches, so the overshoot past
+    the ceiling is bounded and small relative to the DAILY_QUOTA_BUDGET
+    headroom QUOTA_CEILING deliberately leaves.
+    """
+    return _can_afford(QUOTA_COST_ENRICHMENT, "enrichment")

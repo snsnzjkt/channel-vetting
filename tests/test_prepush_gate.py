@@ -329,37 +329,75 @@ def test_gate_precedence_is_stable(overrides, expected):
     assert drop_reason(**overrides) == expected
 
 
-# --- the per-video view floor (each of the last 10 videos > 10k) ----------
-# Stricter than the niche average floor: a channel can average well over
-# 10,000 while one weak video in the window sits below it. Gates on the
-# MINIMUM per-video views across the performance window, not the mean.
+# --- the per-video view floor (>= 70% of the window clears 10k) -----------
+# Stricter than the niche average floor, which one viral upload can carry over
+# the line while the rest of the window flopped — but deliberately NOT "every
+# video", which (measured 2026-08-13) demanded an effective 25-50k average and
+# discarded ~99% of discovered creators. Gates on the RATIO of settled videos
+# clearing MIN_VIEWS_PER_VIDEO. See MIN_VIEWS_PER_VIDEO_RATIO in main.py.
 
 
-def test_drops_a_channel_with_a_video_below_the_per_video_floor():
-    assert drop_reason(min_views=9_999) == "video_below_view_minimum"
+def _views(above: int, below: int) -> list[int]:
+    """A settled-views window: `above` videos over the floor, `below` under."""
+    return [50_000] * above + [500] * below
 
 
-def test_exactly_at_the_per_video_floor_is_kept():
-    from main import MIN_VIEWS_PER_VIDEO
+def test_drops_a_channel_when_too_much_of_the_window_is_weak():
+    """6 of 10 clearing is under the 70% bar."""
+    assert drop_reason(settled_views=_views(6, 4)) == "video_below_view_minimum"
+
+
+def test_exactly_seventy_percent_of_the_window_is_kept():
+    from main import MIN_VIEWS_PER_VIDEO, MIN_VIEWS_PER_VIDEO_RATIO
 
     assert MIN_VIEWS_PER_VIDEO == 10_000
-    assert drop_reason(min_views=10_000) is None
+    assert MIN_VIEWS_PER_VIDEO_RATIO == 0.70
+    # 7 of 10 is the boundary and must PASS, not fail.
+    assert drop_reason(settled_views=_views(7, 3)) is None
 
 
-def test_the_per_video_floor_catches_what_the_average_hides():
-    """A 50k average clears the niche floor, but one 500-view upload in the
-    window means not every recent video passed 10k."""
-    assert drop_reason(avg_views=50_000, min_views=500) == "video_below_view_minimum"
+def test_a_video_exactly_at_the_floor_counts_as_clearing_it():
+    """The comparison is >=, so a video on exactly 10,000 is not a failure."""
+    assert drop_reason(settled_views=[10_000] * 10) is None
 
 
-def test_an_unknown_min_views_does_not_disqualify():
+def test_the_per_video_floor_still_catches_a_one_hit_wonder():
     """
-    None means the caller didn't measure a per-video minimum (an empty
-    performance window is already caught upstream in enrichment), not that a
-    video underperformed. Absent data never disqualifies — same rule as
+    The reason this gate exists at all: a 50k average that comes from a single
+    viral upload while every other recent video flopped. 1 of 10 clearing is
+    nowhere near 70%.
+    """
+    assert drop_reason(avg_views=50_000, settled_views=_views(1, 9)) == "video_below_view_minimum"
+
+
+def test_a_single_weak_video_no_longer_sinks_a_strong_channel():
+    """
+    The 2026-08-14 change, stated as a test: 9 of 10 over the floor and one
+    weak upload used to be a discard, which is what made the effective bar a
+    25-50k average rather than the 10k the brief asks for.
+    """
+    assert drop_reason(settled_views=_views(9, 1)) is None
+
+
+def test_the_ratio_rounds_up_on_a_partial_video():
+    """
+    ceil(0.70 * 3) == 3, so on a 3-video settled window all three must clear.
+    Rounding up keeps a thin window from being judged more leniently than a
+    full one.
+    """
+    assert drop_reason(settled_views=_views(3, 0)) is None
+    assert drop_reason(settled_views=_views(2, 1)) == "video_below_view_minimum"
+
+
+def test_an_unknown_settled_window_does_not_disqualify():
+    """
+    None/empty means nothing in the window has settled yet (an entirely empty
+    performance window is already caught upstream in enrichment), not that
+    videos underperformed. Absent data never disqualifies — same rule as
     video_count.
     """
-    assert drop_reason(min_views=None) is None
+    assert drop_reason(settled_views=None) is None
+    assert drop_reason(settled_views=[]) is None
 
 
 # --- the upload-cadence floor (>= 10 uploads a year) ----------------------
@@ -404,17 +442,19 @@ def test_an_unknown_last_upload_date_does_not_disqualify():
 
 
 def test_a_channel_clearing_the_new_activity_gates_too_is_kept():
-    assert drop_reason(min_views=10_000, uploads_per_year=52, days_since_last_upload=3) is None
+    assert drop_reason(
+        settled_views=[10_000] * 10, uploads_per_year=52, days_since_last_upload=3
+    ) is None
 
 
 @pytest.mark.parametrize(
     "overrides,expected",
     [
         # The niche's own average floor is reported before the per-video one.
-        ({"avg_views": 5_000, "min_views": 5_000}, "below_view_minimum"),
+        ({"avg_views": 5_000, "settled_views": [5_000] * 10}, "below_view_minimum"),
         # Per-video views before the activity gates: it's a numbers criterion
         # the reviewer set, cadence/recency are about the channel's rhythm.
-        ({"min_views": 9_999, "uploads_per_year": 1, "days_since_last_upload": 999},
+        ({"settled_views": [500] * 10, "uploads_per_year": 1, "days_since_last_upload": 999},
          "video_below_view_minimum"),
         # Cadence before recency.
         ({"uploads_per_year": 1, "days_since_last_upload": 999}, "upload_cadence_too_low"),
@@ -425,14 +465,17 @@ def test_new_activity_gate_precedence(overrides, expected):
 
 
 # --- wiring: process_candidate feeds the three signals into the gate -------
-# Unit tests above pin pre_push_drop_reason with scalars; these pin that
-# process_candidate actually maps performance -> the right gate arguments, so
-# a future mis-wire (e.g. min_views swapped with days_since) can't pass unseen.
+# Unit tests above pin pre_push_drop_reason directly; these pin that
+# process_candidate actually maps performance -> the right gate arguments, so a
+# future mis-wire (e.g. settled_views swapped with days_since) can't pass unseen.
 
 
 def _passing_perf(**overrides):
     perf = {
         "avg_views": 50_000, "min_views": 50_000, "avg_engagement_rate": 1.0,
+        # The gate reads settled_views, not min_views — a channel whose whole
+        # settled window clears the floor.
+        "settled_views": [50_000] * 10,
         "shorts_only": False, "content_language": "en",
         # Recent, single date: passes recency; <2 dates -> cadence unknown.
         "upload_dates": ["2026-08-01T00:00:00Z"],
@@ -468,10 +511,21 @@ def _process_candidate(monkeypatch, perf):
     )
 
 
-def test_process_candidate_drops_a_channel_with_a_weak_recent_video(monkeypatch):
-    record, reason = _process_candidate(monkeypatch, _passing_perf(min_views=500))
+def test_process_candidate_drops_a_channel_with_a_mostly_weak_window(monkeypatch):
+    """Wiring test: settled_views must reach the gate. 2 of 10 clearing is
+    under the 70% bar, so this is a discard."""
+    record, reason = _process_candidate(
+        monkeypatch, _passing_perf(settled_views=[50_000] * 2 + [500] * 8))
     assert record is None
     assert reason == "video_below_view_minimum"
+
+
+def test_process_candidate_keeps_a_channel_with_one_weak_video(monkeypatch):
+    """The other half of the wiring test, and the 2026-08-14 behaviour change:
+    9 of 10 clearing is a keep, where the old every-video rule discarded it."""
+    record, reason = _process_candidate(
+        monkeypatch, _passing_perf(settled_views=[50_000] * 9 + [500]))
+    assert record is not None
 
 
 def test_process_candidate_drops_a_stale_channel(monkeypatch):

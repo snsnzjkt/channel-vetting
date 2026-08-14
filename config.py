@@ -38,6 +38,15 @@ QUOTA_COST_CHANNELS_LIST = 1
 QUOTA_COST_PLAYLIST_ITEMS_LIST = 1
 QUOTA_COST_VIDEOS_LIST = 1
 
+# The FLOOR cost of examining one candidate: channels.list to resolve it, then
+# playlistItems + videos.list for the performance window. Optional extras on top
+# (long-form paging, the email deep scan) are not counted here — see
+# quota_tracker.can_afford_enrichment() for why the floor is the right figure to
+# gate on.
+QUOTA_COST_ENRICHMENT = (
+    QUOTA_COST_CHANNELS_LIST + QUOTA_COST_PLAYLIST_ITEMS_LIST + QUOTA_COST_VIDEOS_LIST
+)
+
 # --- File paths (relative to project root) ---
 SEARCH_CACHE_FILE = "search_cache.json"
 QUOTA_LOG_FILE = "quota_log.json"
@@ -196,8 +205,29 @@ INFLUENCERS_DISCOVERY_PATH = "/public/v1/discovery/"
 # way INFLUENCERS_MAX_LOOKUPS_PER_RUN bounds the enrich step — a runaway
 # guard, not a normal-use limit (30 rows/table needs on the order of 1-3
 # credits of discovery once exclude_handles is filtering out the known base).
+#
+# LOWERED from 50 to 6 (2026-08-14). 50 credits is 5,000 creators, and the run
+# was structurally able to reach it: 2 niches x DISCOVERY_MAX_ROUNDS (50) x the
+# 0.5 credits a 50-result page costs = exactly 50. A live run spent 16 credits
+# for ONE qualified row before anyone noticed, because the ceiling was set so
+# far above normal use (1-3 credits) that it could only ever catch a runaway
+# after the money was gone. 6 leaves ~2x headroom over a full two-niche day and
+# turns a silent overspend into a loud warning. Raise it deliberately for a
+# backlog sweep; do not raise it to make a low-yield day fill its cap — that is
+# the pre-2026-08-14 mistake, and the yield problem is upstream (see the
+# per-video view floor in main.py).
 INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN = float(
-    os.getenv("INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN", 50)
+    os.getenv("INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN", 6)
+)
+
+# --test is a smoke test, so give it its own much tighter discovery ceiling.
+# The row caps alone do NOT bound discovery spend — they make it WORSE. A small
+# cap shrinks `target`, and `target` never drops below the vendor's 50-result
+# minimum billable page, so each round buys 50 creators to examine 3 and the
+# waste-per-round grows as the cap shrinks. One page per niche is all a smoke
+# test needs.
+INFLUENCERS_TEST_DISCOVERY_CREDITS = float(
+    os.getenv("INFLUENCERS_TEST_DISCOVERY_CREDITS", 1)
 )
 
 # exclude_handles caps at 10,000 entries per request (vendor limit, verified

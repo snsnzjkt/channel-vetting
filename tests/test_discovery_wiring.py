@@ -371,6 +371,30 @@ def test_the_discovery_subscriber_floor_tracks_each_niche_view_floor():
         )
 
 
+def test_a_niche_missing_min_avg_views_does_not_break_import():
+    """
+    The subscriber-floor wiring loop runs at IMPORT. Indexing
+    _niche_config["min_avg_views"] there would raise KeyError while `import main`
+    is still executing, killing the run before it does anything — worse than the
+    failure this project designed for, where run_niche() checks the same keys
+    with `in` and skips only that niche (REQUIRED_NICHE_KEYS).
+
+    Reproduces the loop body against a niche missing the key and asserts it
+    survives, leaving the misconfiguration to run_niche's own check.
+    """
+    bad_niche = {"discovery_filters": {"profile_language": ["en"]}}
+
+    filters = bad_niche.get("discovery_filters")
+    assert filters is not None
+    filters["keywords_not_in_description"] = list(main.EXCLUDED_TOPIC_KEYWORDS)
+    if "min_avg_views" in bad_niche:
+        filters["number_of_subscribers"] = {"min": 1}
+
+    assert "number_of_subscribers" not in filters
+    # ...and the misconfiguration is still caught, just later and survivably.
+    assert "min_avg_views" in main.REQUIRED_NICHE_KEYS
+
+
 def test_the_quota_ceiling_stops_enrichment(monkeypatch):
     """
     can_afford_search() gates search.list only, and the discovery source

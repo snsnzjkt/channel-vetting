@@ -485,9 +485,19 @@ for _niche_config in NICHES.values():
         # two can never drift apart — see DISCOVERY_SUBSCRIBER_FLOOR_RATIO.
         # int(), because the vendor's number_of_subscribers.min is an integer
         # field and a float would be a type error at the API rather than here.
-        _discovery_filters["number_of_subscribers"] = {
-            "min": int(_niche_config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
-        }
+        #
+        # Guarded with `in` rather than indexing, and this is not defensive
+        # noise: this loop runs at IMPORT. A niche carrying discovery_filters but
+        # missing min_avg_views would raise KeyError while `import main` is still
+        # executing, killing the run before a single line of it does anything —
+        # strictly worse than the failure this project deliberately designed for,
+        # where run_niche() checks the same keys with `in` and skips just that
+        # niche with a logged error (see REQUIRED_NICHE_KEYS). Leaving the filter
+        # unset routes a misconfigured niche to exactly that check instead.
+        if "min_avg_views" in _niche_config:
+            _discovery_filters["number_of_subscribers"] = {
+                "min": int(_niche_config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
+            }
 # Don't leak the loop's throwaway names into the module namespace (this is the
 # file's only top-level for-loop; the comprehensions around it leak nothing).
 del _niche_config, _discovery_filters

@@ -70,14 +70,59 @@ def test_accounts_become_candidates(monkeypatch):
 
     got = _client().discover(filters={"profile_language": ["en"]}, target=5)
 
+    # Exact equality, so a statistic re-added to the candidate fails here.
     assert got == [{
         "handle": "mrbeast",  # normalized: lowercased, '@' stripped
         "channel_title": "MrBeast",
         "influencers_user_id": "u1",
-        "subscriber_count": 512000000,
-        "engagement_percent": 2.2,
         "matched_keywords": ["influencers.club discovery"],
     }]
+
+
+def test_vendor_statistics_never_reach_the_candidate(monkeypatch):
+    """
+    The response carries followers and engagement_percent; the candidate must
+    not. Every number the pipeline gates on, scores with, or writes comes from
+    the YouTube Data API v3 — a vendor figure riding along on the candidate is
+    dead weight that looks authoritative, and would silently become the source
+    of a "Subscriber Count" column the moment someone read it.
+
+    Asserted by KEY ABSENCE as well as by the equality above, so the intent
+    survives someone adding an unrelated identifier field to the dict.
+    """
+    resp = _resp([_account("@Chan", full_name="Chan", followers=999, engagement=9.9)])
+    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: resp)
+
+    got = _client().discover(filters={}, target=5)
+
+    assert got, "expected one candidate"
+    for candidate in got:
+        assert "subscriber_count" not in candidate
+        assert "engagement_percent" not in candidate
+        assert 999 not in candidate.values()
+        assert 9.9 not in candidate.values()
+
+
+def test_creators_billed_counts_what_the_vendor_returned(monkeypatch):
+    """
+    Billed off `accounts` (what the vendor charged for), NOT off the surviving
+    candidates — a handle-less account is dropped by _to_candidate but was still
+    paid for, so counting candidates would under-report the spend. The run
+    summary divides this by rows produced, which is the ratio that made the
+    2026-08-13 waste visible.
+    """
+    resp = _resp([
+        _account("@keep"),
+        _account(""),                                  # billed, unusable
+        _account("youtube.com/c/LegacyName"),          # billed, unusable
+    ])
+    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: resp)
+
+    client = _client()
+    got = client.discover(filters={}, target=10)
+
+    assert [c["handle"] for c in got] == ["keep"]
+    assert client.creators_billed == 3, "billed count must include unusable accounts"
 
 
 def test_accounts_without_a_handle_are_skipped(monkeypatch):
@@ -123,8 +168,15 @@ def test_paginates_until_target_then_stops(monkeypatch):
     monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
 
     got = _client().discover(filters={}, target=3)
-    assert len(got) == 3            # trimmed to the target
-    assert calls["n"] == 2          # stopped after the second page met it
+    # `target` stops the PAGING (2 pages, not 3)...
+    assert calls["n"] == 2
+    # ...but everything the vendor billed for comes back, even though that is
+    # more than was asked for. Trimming to `target` here used to drop paid-for
+    # creators, which then fell out of the caller's seen-set and were re-bought
+    # on the next round (16 credits for one row, 2026-08-13). The caller limits
+    # how many it EXAMINES via its backlog; it never discards what it bought.
+    assert len(got) == 4
+    assert sorted(c["handle"] for c in got) == ["a", "b", "c", "d"]
 
 
 def test_short_page_ends_pagination(monkeypatch):

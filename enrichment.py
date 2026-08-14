@@ -701,6 +701,13 @@ def get_recent_video_performance(
         # per-video floor gates on this so a single weak recent upload isn't
         # hidden by a strong average.
         "min_views": min_views,
+        # Every SETTLED, reported per-video view count in the performance
+        # window (same guard as min_views above). main's per-video floor needs
+        # the whole list, not just the minimum: the rule is "at least
+        # MIN_VIEWS_PER_VIDEO_RATIO of them clear the floor", which a single
+        # aggregate cannot express. min_views stays because it is what the drop
+        # log reports, and because it is the cheaper thing to assert on.
+        "settled_views": list(performance_views),
         "avg_engagement_rate": avg_engagement_rate,
         "upload_dates": upload_dates,
         # Size of the *performance* window (still 10), not the email scan.

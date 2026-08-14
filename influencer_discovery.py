@@ -5,9 +5,29 @@ for discovery.py's YouTube search.list.
 Why switch. search.list returns whatever ranks for a keyword and ranks by
 the matched VIDEO, so the pipeline's CHANNEL-level gates (English, an
 allowed country, a subscriber/view floor, a real long-form catalogue) throw
-most of it away — measured ~15% survival. This endpoint filters on those
-same criteria SERVER-SIDE (profile_language, location, number_of_subscribers,
-topics), so a much larger fraction of what it returns can become a row.
+most of it away — measured ~15% survival. This endpoint can filter on some of
+those criteria SERVER-SIDE, so a larger fraction of what it returns can
+become a row.
+
+Which filters are actually sent, as of 2026-08-14 (see NICHES in main.py):
+
+  - SENT: profile_language, gender, ai_search, number_of_subscribers,
+    keywords_not_in_description.
+  - `location` is supported by the vendor and is NOT sent yet. That is a gap,
+    not a decision: the search-zone check is a hard discard gate, so every
+    out-of-zone creator returned is 0.01 credits spent on a row that can never
+    exist. Wiring it needs a live probe of the field name and country format
+    first, the same bar gender and keywords_not_in_description were held to.
+  - `topics` is NOT sent ON PURPOSE. The yt-topics taxonomy has no leaf for
+    "home" or "furniture", and pinning topics to Movies/Technology (Home
+    Theater) or Fashion/Tourism (Lifestyle Sofa) would EXCLUDE exactly the
+    furniture / homebody / house-tour creators both briefs are aimed at, which
+    YouTube files under Lifestyle. Relevance rides on the ai_search semantic
+    query instead. Do not "fix" this gap; it will narrow the funnel.
+
+An earlier version of this docstring listed location and topics as though both
+were already in use. They were not, and conflating the two is how the
+deliberate omission gets undone by accident.
 
 Cost model, which is the whole reason exclude_handles below is load-bearing
 rather than an optimisation: discovery costs REAL MONEY, not free YouTube
@@ -24,6 +44,11 @@ UC… channel ID the rest of the pipeline is keyed on. The caller bridges
 handle -> channel_id via the YouTube API (channels.list?forHandle), the same
 1-unit call get_channel_stats already makes, so discovery adds no YouTube
 quota beyond what enrichment already spends.
+
+Only the IDENTIFIERS are carried forward. The vendor's `followers` and
+`engagement_percent` are read here and deliberately dropped: statistics come
+from the YouTube Data API v3, which is the only source the gates, the scores
+and the Airtable columns are allowed to reflect. See _to_candidate.
 
 Everything here fails SOFT — a bad key, an outage, a malformed body, a
 tripped credit ceiling all return the candidates gathered so far (often none)
@@ -84,6 +109,12 @@ class InfluencerDiscovery:
         # the authoritative spend figure, accumulated so a run can print what
         # discovery actually cost.
         self._credits_spent = 0.0
+        # Creators the vendor actually RETURNED, i.e. the set it charged for.
+        # Reported next to credits_spent so a run summary shows the ratio that
+        # matters — creators bought against rows produced. The 2026-08-13 waste
+        # bug was only noticed because a credit figure happened to sit next to a
+        # row count in one log line; this makes that comparison deliberate.
+        self._creators_billed = 0
         # The vendor's own remaining-balance figure from the last response, for
         # reporting; None until a response carries one.
         self._credits_left_reported = None
@@ -101,20 +132,31 @@ class InfluencerDiscovery:
         return self._credits_spent
 
     @property
+    def creators_billed(self) -> int:
+        """How many creators the vendor returned (and therefore charged for)."""
+        return self._creators_billed
+
+    @property
     def credits_left_reported(self):
         """The account's remaining balance from the last response, or None."""
         return self._credits_left_reported
 
     @classmethod
-    def from_config(cls) -> "InfluencerDiscovery":
-        """The client run_niche uses, or an inert one when no key is set."""
+    def from_config(cls, max_credits=None) -> "InfluencerDiscovery":
+        """
+        The client run_niche uses, or an inert one when no key is set.
+
+        `max_credits` overrides INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN for
+        this run — main.py passes the much tighter --test ceiling through it.
+        None keeps the configured default (see __init__).
+        """
         if not INFLUENCERS_API_KEY:
             logger.info(
                 "INFLUENCERS_API_KEY is not set — influencers.club discovery is "
                 "disabled for this run."
             )
             return cls(enabled=False)
-        return cls()
+        return cls(max_credits=max_credits)
 
     def discover(
         self,
@@ -128,14 +170,20 @@ class InfluencerDiscovery:
         page_cap: int = 40,
     ) -> list[dict]:
         """
-        Return up to `target` candidate creators matching `filters`, paginating
-        the discovery endpoint and excluding `exclude_handles` server-side.
+        Return candidate creators matching `filters`, paginating the discovery
+        endpoint and excluding `exclude_handles` server-side.
+
+        `target` is a FLOOR that decides whether to fetch another page, not a
+        limit on what comes back: the return includes every creator the vendor
+        billed for, which is usually MORE than `target` (pages are 50). See the
+        comment at the return statement for why trimming here was a money leak.
 
         Each candidate is a dict shaped for the pipeline's downstream steps:
 
             {"handle": <normalized, no '@'>, "channel_title": <full_name>,
-             "influencers_user_id": <vendor id>, "subscriber_count": <int|None>,
-             "engagement_percent": <float|None>, "matched_keywords": [source_label]}
+             "influencers_user_id": <vendor id>, "matched_keywords": [source_label]}
+
+        Identifiers only — no statistics. See _to_candidate for why.
 
         Note there is no "channel_id" — discovery returns the @handle, and the
         caller resolves it to a UC… id via the YouTube API before the rest of
@@ -188,6 +236,11 @@ class InfluencerDiscovery:
             if not accounts:
                 break
 
+            # Counted off `accounts`, the set the vendor returned and billed —
+            # NOT off the candidates that survive _to_candidate below, which
+            # drops handle-less accounts we were still charged for.
+            self._creators_billed += len(accounts)
+
             for account in accounts:
                 candidate = self._to_candidate(account, source_label)
                 if candidate and candidate["handle"] not in candidates:
@@ -201,7 +254,24 @@ class InfluencerDiscovery:
 
             self._sleep(API_SLEEP_SECONDS)
 
-        result = list(candidates.values())[:target]
+        # EVERY candidate the vendor billed for is returned — deliberately NOT
+        # trimmed to `target` (changed 2026-08-14).
+        #
+        # The vendor bills 0.01 per creator RETURNED and its minimum page is 50,
+        # so one page costs 0.5 credits for 50 creators no matter how few the
+        # caller asked for. Trimming to `target` here threw away creators that
+        # were already paid for — and because the caller only ever saw the
+        # trimmed list, the discarded ones never entered its `seen_handles`, so
+        # they were not in the next round's `exclude_handles` and the vendor
+        # returned and BILLED them again. A live run spent 16 credits re-buying
+        # the same page ~32 times to write one row.
+        #
+        # `target` now decides only whether to fetch ANOTHER PAGE (the loop
+        # condition above); it is not a slice on results already bought. The
+        # caller is responsible for examining no more than it has headroom for —
+        # see _run_discovery_rounds' backlog, which is what keeps the extra
+        # candidates from turning a money saving into a YouTube-quota blow-up.
+        result = list(candidates.values())
         logger.info(
             "influencers.club discovery: %d candidate(s) over %d page(s), "
             "%.2f credits spent (%s reported remaining).",
@@ -295,7 +365,30 @@ class InfluencerDiscovery:
         return accounts, total, cost, left
 
     def _to_candidate(self, account, source_label: str):
-        """One account -> a pipeline candidate dict, or None to skip it."""
+        """
+        One account -> a pipeline candidate dict, or None to skip it.
+
+        IDENTIFIERS ONLY — deliberately no statistics (changed 2026-08-14).
+
+        The response also carries `profile.followers` and
+        `profile.engagement_percent`, and this used to copy both onto the
+        candidate. Nothing ever read them: every number the pipeline gates on,
+        scores with, or writes to Airtable comes from the YouTube Data API v3
+        via get_channel_stats() / get_recent_video_performance(). So they were
+        dead fields that LOOKED authoritative while riding along through
+        process_candidate — the same trap as the BLOCKING_STATES constant
+        removed from outreach_ledger.py, where a future reader wiring up
+        `candidate["subscriber_count"]` would land vendor data in a column
+        labelled with a YouTube-verified figure, and no test would fail.
+
+        Statistics are YouTube's to report. The vendor's own follower count is
+        still used for the SERVER-SIDE `number_of_subscribers` discovery filter,
+        which is the right use: it decides what we pay to look at, never what we
+        believe about a channel. test_influencer_discovery pins the absence.
+
+        `channel_title` stays. It is an identifier, not a statistic, and DO NOT
+        CONTACT checkpoint 1 matches on it before any quota is spent.
+        """
         if not isinstance(account, dict):
             return None
         profile = account.get("profile")
@@ -306,16 +399,10 @@ class InfluencerDiscovery:
             # No @handle means we can neither dedupe nor resolve it to a
             # channel ID — drop it rather than carry an unusable candidate.
             return None
-        followers = profile.get("followers")
-        engagement = profile.get("engagement_percent")
         return {
             "handle": handle,
             "channel_title": profile.get("full_name") or "",
             "influencers_user_id": account.get("user_id"),
-            "subscriber_count": followers if isinstance(followers, int) else None,
-            "engagement_percent": (
-                float(engagement) if isinstance(engagement, (int, float)) and not isinstance(engagement, bool) else None
-            ),
             "matched_keywords": [source_label],
         }
 

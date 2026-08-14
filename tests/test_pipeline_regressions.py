@@ -584,16 +584,27 @@ def test_daily_cap_flag_caps_both_budgets(monkeypatch):
     original_flagged = main.DAILY_FLAGGED_CAP
     captured = {}
 
-    def fake_run(niches, max_results_per_keyword, days_back):
+    # **kwargs rather than a fixed signature: this stub stands in for run(),
+    # and pinning its parameter list here means every new run() argument breaks
+    # this test for a reason unrelated to what it checks (which is the caps).
+    def fake_run(niches, max_results_per_keyword, days_back, **kwargs):
         captured["qualified_cap"] = main.DAILY_QUALIFIED_CAP
         captured["flagged_cap"] = main.DAILY_FLAGGED_CAP
+        captured["discovery_credits"] = kwargs.get("max_discovery_credits")
 
     monkeypatch.setattr(main, "run", fake_run)
     monkeypatch.setattr(sys, "argv", ["main.py", "--test", "--daily-cap", "2"])
 
     try:
         main.main()
-        assert captured == {"qualified_cap": 2, "flagged_cap": 2}
+        # The discovery ceiling is asserted alongside the caps because the row
+        # caps do NOT bound discovery spend — a --test run has to be handed its
+        # own credit ceiling explicitly or it buys a 50-creator page per round.
+        assert captured == {
+            "qualified_cap": 2,
+            "flagged_cap": 2,
+            "discovery_credits": main.INFLUENCERS_TEST_DISCOVERY_CREDITS,
+        }
     finally:
         # main() mutates these module globals directly (not via
         # monkeypatch), so they must be restored by hand.

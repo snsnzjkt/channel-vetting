@@ -10,6 +10,7 @@ Run with --test to sanity-check the whole pipeline cheaply (1 keyword,
 """
 import argparse
 import logging
+import math
 import re
 import sys
 import time
@@ -44,7 +45,7 @@ from airtable_client import (
 )
 from external_dedupe import fetch_external_handles, ExternalIndex, match_external
 from prospect_day import today_iso
-from quota_tracker import get_today_spend
+from quota_tracker import can_afford_enrichment, get_today_spend
 from browser_email import BrowserEmailScraper, null_scraper
 from influencers import InfluencersClient, null_client
 from influencer_discovery import InfluencerDiscovery
@@ -62,11 +63,46 @@ from config import (
     DISCOVERY_DAYS_BACK,
     EXPECTED_CANDIDATES_PER_KEYWORD,
     INFLUENCERS_MAX_EXCLUDE_HANDLES,
+    INFLUENCERS_TEST_DISCOVERY_CREDITS,
     USE_PLAYWRIGHT_STEALTH,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+# The subscriber floor sent to influencers.club's SERVER-SIDE
+# `number_of_subscribers` filter, expressed as a FRACTION of the niche's own
+# `min_avg_views` rather than an absolute number. Raised from a flat 2,000 on
+# 2026-08-14 and wired per-niche below the NICHES dict.
+#
+# This is the one legitimate use of a vendor statistic in the pipeline: it
+# decides which creators we PAY to look at, never what we believe about a
+# channel. Every number that gates, scores, or gets written still comes from the
+# YouTube Data API v3 (see influencer_discovery._to_candidate).
+#
+# Why 2,000 was wrong: discovery bills 0.01 per creator returned, and a channel
+# has to clear its niche's average AND have 70% of its recent videos over
+# MIN_VIEWS_PER_VIDEO to become a row. Against a 10,000 average that made 2,000
+# subscribers a 5x view-to-subscriber ratio — rare enough that the old floor
+# screened almost nothing out. We paid for those creators and then discarded
+# them at the view gate.
+#
+# Why a RATIO and not an absolute: every other qualification lever here
+# (min_avg_views, min_channel_age_months) is per-niche, because the two niches'
+# thresholds have already diverged and reconverged once (Lifestyle Sofa's view
+# floor was 2,000 before the unification). An absolute subscriber floor would
+# silently stop matching the arithmetic that justified it the moment a niche's
+# view floor moved, and no test would catch the drift. Deriving it means the
+# floor tracks its own niche automatically.
+#
+# Why 0.5 and not 1.0: the two directions of error are not symmetric. Too high
+# is a FALSE NEGATIVE — a real prospect the vendor never shows us, invisible and
+# unrecoverable. Too low just costs credits, which the run summary now reports
+# per row. A 2x view-to-subscriber ratio is ordinary for an engaged niche
+# audience, so a channel with half the view floor in subscribers is a genuine
+# prospect and must stay reachable. Tune against the drop-reason counts in a run
+# summary, not by intuition.
+DISCOVERY_SUBSCRIBER_FLOOR_RATIO = 0.5
 
 # One entry per niche: its search keywords (drawn directly from the
 # "Types of Content Posting" > Primary section of each influencer
@@ -123,7 +159,10 @@ NICHES = {
                 "home theater and home cinema setups, media rooms, cozy homebody "
                 "home entertainment, living room furniture and home furnishing"
             ),
-            "number_of_subscribers": {"min": 2000},
+            # `number_of_subscribers` is wired in below the NICHES dict, derived
+            # from this niche's own min_avg_views via
+            # DISCOVERY_SUBSCRIBER_FLOOR_RATIO — see that constant.
+            #
             # A server-side "keywords_not_in_description" negation of the
             # off-brand political / ASMR / firearms terms is wired in from
             # EXCLUDED_TOPIC_TERMS after that dict is defined (it lives below
@@ -168,7 +207,11 @@ NICHES = {
             "profile_language": ["en"],
             "gender": "female",
             "ai_search": "fashion and lifestyle vlogs, travel, house tours, home decor and interior styling",
-            "number_of_subscribers": {"min": 2000},
+            # As with Home Theater, `number_of_subscribers` is derived from this
+            # niche's own min_avg_views below the dict — so if this niche's view
+            # floor is ever un-unified back toward the brief's 2,000, its
+            # subscriber floor follows automatically instead of going stale.
+            #
             # As above: the off-brand "keywords_not_in_description" negation is
             # wired in from EXCLUDED_TOPIC_TERMS below — see
             # EXCLUDED_TOPIC_KEYWORDS.
@@ -181,6 +224,19 @@ NICHES = {
 # this only backstops a pathological run where a very low gate-survival rate
 # would otherwise keep asking for more candidates round after round.
 DISCOVERY_MAX_ROUNDS = 50
+
+# How many candidates push_until_full will still enrich after the QUALIFIED
+# budget is full, hunting for a flagged row, before giving up on the batch.
+#
+# The asymmetry is the point. Qualification now turns on channel age alone, so a
+# flagged row requires an under-12-month channel that also cleared every hard
+# gate — uncommon for Home Theater and IMPOSSIBLE for Lifestyle Sofa, whose
+# min_channel_age_months is None (qualify() can only ever return "Qualified"
+# there). Enrichment costs 3-13 YouTube units per candidate and is charged
+# BEFORE qualification is known, so an unbounded hunt spends real quota on rows
+# that cannot exist. 10 is generous next to how rarely a flagged row appears,
+# and the counter resets whenever one does.
+FLAGGED_ONLY_PATIENCE = 10
 
 # Automated topical matching isn't implemented, so every channel is scored
 # with the same niche-match value. 70.0 is a deliberate mild-positive prior,
@@ -281,21 +337,37 @@ MIN_LONGFORM_VIDEO_COUNT = 30
 # "en" would silently blind the zone filter for exactly those channels.
 ENGLISH_LANGUAGE_PREFIX = "en"
 
-# Every video in the newest-10 performance window must clear this, applied to
-# BOTH niches. This is the per-video reading of "min 10k+ views" — STRICTER
-# than the niche's min_avg_views floor, which one strong upload can carry over
-# the line while other recent videos flopped. Gated on the window's MINIMUM
-# (enrichment's "min_views"), so it means "every recent video passed 10k", not
-# "the average did". Kept alongside min_avg_views, not replacing it, so a niche
-# can still be given its own average bar.
-#
-# This mirrors the 10,000 that both niches' per-niche min_avg_views currently
-# sit at. If a niche's min_avg_views is ever un-unified (see the Lifestyle Sofa
-# note in NICHES, which anticipates a return to 2,000), revisit whether this
-# shared per-video floor should track that niche's bar instead of staying a
-# fixed 10,000 — a per-video floor 5x a niche's own average bar would be
-# incoherent.
+# The per-video view floor, applied to BOTH niches. This is the per-video
+# reading of "min 10k+ views" — stricter than the niche's min_avg_views floor,
+# which one strong upload can carry over the line while other recent videos
+# flopped. Kept alongside min_avg_views, not replacing it, so a niche can still
+# be given its own average bar.
 MIN_VIEWS_PER_VIDEO = 10_000
+
+# ...but only MIN_VIEWS_PER_VIDEO_RATIO of the window has to clear it, not all
+# of it (changed 2026-08-14, at the user's direction, and applied to BOTH niches
+# — Lifestyle Sofa included; its brief's 2,000 figure stays overridden).
+#
+# Why this changed. The gate used to test the window's MINIMUM, i.e. "EVERY
+# recent video passed 10k". Read against the 10,000 AVERAGE floor next to it,
+# that is far harsher than it looks: for a channel averaging 10k, roughly half
+# its videos sit below the average, so its weakest recent upload almost
+# certainly misses 10k and the channel is discarded. The effective bar was not
+# "10,000 average" but something nearer a 25,000-50,000 average — well past
+# anything the brief asked for, and the most plausible single cause of the ~1%
+# discovery survival rate measured on 2026-08-13 (~97 creators examined for one
+# qualified row).
+#
+# 70% keeps what the floor was actually for — catching a channel whose average
+# is propped up by one viral upload while the rest flopped — without demanding
+# every upload be a hit. At the default PERFORMANCE_SAMPLE_SIZE of 10 that is
+# "at least 7 of the newest 10".
+#
+# The denominator is the count of SETTLED, REPORTED videos, not a flat 10: an
+# upload still climbing toward 10k, or one with no public view count, is unknown
+# rather than failing, and enrichment already excludes both from
+# `settled_views`. So the rule reads "70% of the videos we can actually judge".
+MIN_VIEWS_PER_VIDEO_RATIO = 0.70
 
 # A live channel, applied to BOTH niches: at least this many uploads per year,
 # read from the sampled window's cadence (enrichment.calc_upload_frequency,
@@ -323,6 +395,10 @@ DROP_EXCLUDED_TOPIC = "excluded_topic"
 DROP_UPLOAD_CADENCE_TOO_LOW = "upload_cadence_too_low"
 DROP_STALE_CHANNEL = "stale_channel"
 DROP_NO_SOCIAL = "no_social_presence"
+# Not a judgement on the channel: the run ran out of YouTube quota before it
+# could look. Named distinctly from the other drop reasons so a run summary
+# showing these is read as "come back tomorrow", not "these channels failed".
+DROP_QUOTA_EXHAUSTED = "quota_exhausted"
 
 # Whole categories a brand-partnership run must never surface, however well a
 # channel otherwise fits a niche: political commentary, ASMR, and firearms /
@@ -405,6 +481,13 @@ for _niche_config in NICHES.values():
         # copies are still all derived from EXCLUDED_TOPIC_TERMS at import, so
         # the no-drift guarantee above is unaffected.
         _discovery_filters["keywords_not_in_description"] = list(EXCLUDED_TOPIC_KEYWORDS)
+        # The subscriber floor, derived from THIS niche's own view floor so the
+        # two can never drift apart — see DISCOVERY_SUBSCRIBER_FLOOR_RATIO.
+        # int(), because the vendor's number_of_subscribers.min is an integer
+        # field and a float would be a type error at the API rather than here.
+        _discovery_filters["number_of_subscribers"] = {
+            "min": int(_niche_config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
+        }
 # Don't leak the loop's throwaway names into the module namespace (this is the
 # file's only top-level for-loop; the comprehensions around it leak nothing).
 del _niche_config, _discovery_filters
@@ -454,6 +537,21 @@ def is_english(content_language: str | None) -> bool:
     return (content_language or "").strip().lower().startswith(ENGLISH_LANGUAGE_PREFIX)
 
 
+def _clears_per_video_floor(settled_views: list[int]) -> bool:
+    """
+    True if at least MIN_VIEWS_PER_VIDEO_RATIO of `settled_views` reach
+    MIN_VIEWS_PER_VIDEO.
+
+    `settled_views` holds only videos whose count has settled and is reported
+    (see enrichment), so this is a ratio over what can actually be judged, not
+    over a flat window size. math.ceil, so "70% of 10" is 7 and a partial video
+    always rounds toward requiring one more rather than one fewer.
+    """
+    required = math.ceil(MIN_VIEWS_PER_VIDEO_RATIO * len(settled_views))
+    clearing = sum(1 for views in settled_views if views >= MIN_VIEWS_PER_VIDEO)
+    return clearing >= required
+
+
 def pre_push_drop_reason(
     subscriber_count: int | None,
     avg_views: float | None,
@@ -461,7 +559,7 @@ def pre_push_drop_reason(
     min_avg_views: float = 0,
     video_count: int | None = None,
     content_language: str | None = None,
-    min_views: int | None = None,
+    settled_views: list[int] | None = None,
     uploads_per_year: float | None = None,
     days_since_last_upload: float | None = None,
 ) -> str | None:
@@ -490,13 +588,18 @@ def pre_push_drop_reason(
     default is deliberate: a caller that forgets to pass it gets a loud
     empty result rather than silently skipping the gate.
 
-    `min_views`, `uploads_per_year` and `days_since_last_upload` are the three
-    activity/quality floors (each of the newest 10 videos over 10k, at least
-    10 uploads a year, a last upload inside a rolling 12 months). They follow
-    the video_count rule, NOT the content_language one: each defaults to None
-    and a None never disqualifies, because "we couldn't measure it" (an empty
-    window, fewer than two dated uploads, no parseable timestamp) is not
-    evidence against the channel. process_candidate supplies real values.
+    `settled_views`, `uploads_per_year` and `days_since_last_upload` are the
+    three activity/quality floors (at least MIN_VIEWS_PER_VIDEO_RATIO of the
+    settled recent videos over 10k, at least 10 uploads a year, a last upload
+    inside a rolling 12 months). They follow the video_count rule, NOT the
+    content_language one: each defaults to None and a None never disqualifies,
+    because "we couldn't measure it" (nothing settled in the window, fewer than
+    two dated uploads, no parseable timestamp) is not evidence against the
+    channel. process_candidate supplies real values.
+
+    `settled_views` is a LIST of per-video view counts, not an aggregate: the
+    per-video floor is a ratio ("70% of them cleared 10k"), which no single
+    number can express. An empty list reads the same as None — unknown.
     """
     if shorts_only:
         return DROP_SHORTS_ONLY
@@ -509,7 +612,11 @@ def pre_push_drop_reason(
     # The per-video floor sits right after the niche's own average floor: both
     # are "views" criteria, and reporting the niche's own bar first keeps the
     # log reading in the reviewer's terms.
-    if min_views is not None and min_views < MIN_VIEWS_PER_VIDEO:
+    #
+    # An empty/absent list means nothing in the window has settled yet — that is
+    # unknown, not a failure, so the floor is skipped (the same rule video_count
+    # follows above).
+    if settled_views and not _clears_per_video_floor(settled_views):
         return DROP_VIDEO_BELOW_VIEW_MINIMUM
     if uploads_per_year is not None and uploads_per_year < MIN_UPLOADS_PER_YEAR:
         return DROP_UPLOAD_CADENCE_TOO_LOW
@@ -672,6 +779,7 @@ def push_until_full(
     table_name: str,
     qualified_headroom: int,
     flagged_headroom: int = 0,
+    flagged_possible: bool = True,
 ) -> dict:
     """
     Push candidates until both daily budgets are exhausted or the
@@ -684,23 +792,71 @@ def push_until_full(
     attempts, so a run of Airtable failures would have burned the day's
     allowance without writing anything.
 
+    `flagged_possible` says whether this niche can produce a flagged row AT
+    ALL — i.e. whether it sets a `min_channel_age_months`. False means
+    scoring.qualify() returns QUALIFIED unconditionally, so once the qualified
+    budget fills there is nothing left to find and the loop stops instead of
+    paying enrichment to prove it. Defaults True so a caller that doesn't know
+    gets the safe (keep looking, bounded by FLAGGED_ONLY_PATIENCE) behaviour.
+
     Returns counts plus "pushed_ids", the Channel IDs actually written —
     matching the original loop, which added to newly_tracked_ids only
     when push_record returned True.
     """
     counts = {"qualified": 0, "flagged": 0, "skipped": 0, "pushed_ids": set()}
+    # Candidates enriched since the qualified budget filled without producing a
+    # flagged row. See FLAGGED_ONLY_PATIENCE.
+    fruitless_flagged_hunt = 0
 
     for candidate in candidates:
         if counts["qualified"] >= qualified_headroom and counts["flagged"] >= flagged_headroom:
             logger.info("Both daily budgets are full — stopping this niche.")
             break
 
+        # Once the qualified budget is full, only a FLAGGED row can still be
+        # written, and a flagged row needs qualify() to return something other
+        # than "Qualified" — which only channel age can cause.
+        hunting_flagged_only = counts["qualified"] >= qualified_headroom
+        if hunting_flagged_only:
+            # For a niche with no age requirement that is not merely unlikely,
+            # it is IMPOSSIBLE: qualify() returns QUALIFIED unconditionally when
+            # min_channel_age_months is None (see scoring.qualify), so no
+            # candidate can ever land in the flagged bucket. Stop immediately
+            # rather than spending FLAGGED_ONLY_PATIENCE enrichments to
+            # rediscover a fact the niche config already states.
+            if not flagged_possible:
+                logger.info(
+                    "Qualified budget is full and this niche has no channel-age "
+                    "requirement, so no flagged row can exist — stopping."
+                )
+                break
+            # Otherwise the hunt is a gamble worth a bounded number of tries.
+            # Enrichment (3-13 YouTube units) is charged by build_record BEFORE
+            # qualification is knowable, so without a brake the loop pays for
+            # every remaining candidate and discards each at the bucket check.
+            if fruitless_flagged_hunt >= FLAGGED_ONLY_PATIENCE:
+                logger.info(
+                    "Qualified budget is full and %d candidates produced no flagged "
+                    "row — stopping rather than enriching the rest of the batch.",
+                    fruitless_flagged_hunt,
+                )
+                break
+
         record, qualification = build_record(candidate)
         if record is None:
             counts["skipped"] += 1
+            # A gate-dropped candidate still cost enrichment, so it counts
+            # against the hunt's patience.
+            fruitless_flagged_hunt += hunting_flagged_only
             continue
 
         bucket = "qualified" if qualification == QUALIFIED else "flagged"
+        # Increment and reset live together: a flagged row means the hunt is
+        # paying off, anything else means it isn't.
+        fruitless_flagged_hunt = 0 if bucket == "flagged" else (
+            fruitless_flagged_hunt + hunting_flagged_only
+        )
+
         headroom = qualified_headroom if bucket == "qualified" else flagged_headroom
         if counts[bucket] >= headroom:
             counts["skipped"] += 1
@@ -789,6 +945,19 @@ def process_candidate(
     if hit:
         logger.info("BLOCKED (pre-enrichment) %s — DO NOT CONTACT (%s).", candidate.get("channel_title"), hit)
         return None, "blocked"
+
+    # Quota ceiling. Checked AFTER the free blocklist match (which costs
+    # nothing, so there is no reason to let a quota refusal hide a blocklist
+    # hit) and BEFORE the first paid call below.
+    #
+    # This is the only ceiling check on the influencers.club discovery path:
+    # that source replaces search.list, so can_afford_search() — for a long
+    # time the pipeline's ONLY QUOTA_CEILING check — is never reached, and
+    # enrichment spend was bounded by nothing but the daily row cap. Row caps
+    # bound rows WRITTEN, not candidates EXAMINED, and at a low gate-survival
+    # rate those diverge by two orders of magnitude.
+    if not can_afford_enrichment():
+        return None, DROP_QUOTA_EXHAUSTED
 
     stats = get_channel_stats(channel_id) if channel_id else get_channel_stats(handle=cand_handle)
     time.sleep(API_SLEEP_SECONDS)
@@ -896,7 +1065,7 @@ def process_candidate(
         min_avg_views=niche_config["min_avg_views"],
         video_count=stats.get("video_count"),
         content_language=performance.get("content_language"),
-        min_views=performance.get("min_views"),
+        settled_views=performance.get("settled_views"),
         uploads_per_year=uploads_per_year,
         days_since_last_upload=days_since,
     )
@@ -1140,21 +1309,24 @@ def _run_discovery_rounds(
     # channel, at the cost of the 1-unit channels.list to resolve it.
     filters = niche_config["discovery_filters"]
     seen_handles: set[str] = set()
-    rounds = 0
+    # Creators the vendor already billed us for but that this niche hasn't had
+    # the headroom to examine yet. Drained before any new request is issued, so
+    # a page bought in round 1 is spent over as many rounds as it takes instead
+    # of being re-bought each round.
+    backlog: list[dict] = []
+    dry = False
+    # Counts VENDOR REQUESTS, not loop iterations. A round that only drains the
+    # backlog costs nothing, so charging it against the cap would let the cap
+    # expire without the niche having spent — the "caps unreachable by
+    # construction" failure CLAUDE.md records for the old single-pass loop.
+    vendor_requests = 0
 
     while True:
         # Same "one opportunistic round for flagged once qualified is full"
         # rule as the keyword loop — the flagged budget is a ceiling, never a
         # target, and for a niche whose min_channel_age_months is None it can
         # never fill, so it must not drive the loop.
-        if rounds and pushed_qualified >= qualified_headroom:
-            break
-        rounds += 1
-        if rounds > DISCOVERY_MAX_ROUNDS:
-            logger.warning(
-                "'%s' hit the discovery round cap (%d) — stopping.",
-                niche_name, DISCOVERY_MAX_ROUNDS,
-            )
+        if (vendor_requests or backlog) and pushed_qualified >= qualified_headroom:
             break
 
         rows_wanted = (qualified_headroom - pushed_qualified) + (flagged_headroom - pushed_flagged)
@@ -1163,24 +1335,51 @@ def _run_discovery_rounds(
         # guarantees the budget fills, so this only affects round count.
         target = max(1, int(rows_wanted * CANDIDATE_OVERSHOOT))
 
-        candidates = discovery.discover(
-            filters=filters,
-            target=target,
-            exclude_handles=_discovery_exclude_handles(blocklist, external_handles, seen_handles),
-            source_label=f"influencers.club discovery ({niche_name})",
-        )
-        new_candidates = [c for c in candidates if c["handle"] not in seen_handles]
-        total_discovered += len(new_candidates)
-        logger.info(
-            "Discovery round for '%s': asked for %d, got %d new candidate(s).",
-            niche_name, target, len(new_candidates),
-        )
-        if not new_candidates:
+        if len(backlog) < target and not dry:
+            if vendor_requests >= DISCOVERY_MAX_ROUNDS:
+                logger.warning(
+                    "'%s' hit the discovery request cap (%d) — stopping.",
+                    niche_name, DISCOVERY_MAX_ROUNDS,
+                )
+                break
+            vendor_requests += 1
+            fetched = discovery.discover(
+                filters=filters,
+                target=target,
+                exclude_handles=_discovery_exclude_handles(
+                    blocklist, external_handles, seen_handles
+                ),
+                source_label=f"influencers.club discovery ({niche_name})",
+            )
+            fresh = [c for c in fetched if c["handle"] not in seen_handles]
+            # EVERY handle the vendor returned is marked seen, not just the ones
+            # this round will examine — the vendor billed for all of them, and
+            # anything left out here comes back in the next request's
+            # exclude_handles gap and gets billed a second time. This line is
+            # the actual fix for the 16-credits-for-one-row run.
+            seen_handles.update(c["handle"] for c in fetched)
+            backlog.extend(fresh)
+            total_discovered += len(fresh)
+            if not fresh:
+                dry = True
+            logger.info(
+                "Discovery request for '%s': asked for %d, got %d new candidate(s) "
+                "(%d now backlogged).",
+                niche_name, target, len(fresh), len(backlog),
+            )
+
+        if not backlog:
             logger.info("Discovery is dry for '%s' — stopping.", niche_name)
             break
 
+        # Examine only what there is headroom for. The rest stays backlogged:
+        # handing all 50 to push_until_full would trade a bounded money leak for
+        # an unbounded YouTube-quota one (~3-13 units per candidate, and
+        # push_until_full only stops early when BOTH budgets are full).
+        batch, backlog = backlog[:target], backlog[target:]
+
         counts = push_until_full(
-            new_candidates,
+            batch,
             lambda c: process_candidate(
                 c, external_handles, blocklist, niche_config, scraper, enricher,
                 known_channel_ids=globally_tracked_ids | pushed_ids,
@@ -1188,17 +1387,19 @@ def _run_discovery_rounds(
             table_name,
             qualified_headroom - pushed_qualified,
             flagged_headroom - pushed_flagged,
+            flagged_possible=niche_config["min_channel_age_months"] is not None,
         )
         pushed_qualified += counts["qualified"]
         pushed_flagged += counts["flagged"]
         total_skipped += counts["skipped"]
         pushed_ids |= counts["pushed_ids"]
-        seen_handles.update(c["handle"] for c in new_candidates)
 
         logger.info(
-            "'%s' so far: %d/%d qualified, %d/%d flagged (%.2f discovery credits spent).",
+            "'%s' so far: %d/%d qualified, %d/%d flagged "
+            "(%.2f discovery credits, %d request(s), %d backlogged).",
             niche_name, pushed_qualified, qualified_headroom,
             pushed_flagged, flagged_headroom, discovery.credits_spent,
+            vendor_requests, len(backlog),
         )
 
     return {
@@ -1417,6 +1618,7 @@ def run_niche(
             table_name,
             qualified_headroom - pushed_qualified,
             flagged_headroom - pushed_flagged,
+            flagged_possible=niche_config["min_channel_age_months"] is not None,
         )
 
         pushed_qualified += counts["qualified"]
@@ -1461,7 +1663,12 @@ def run_niche(
 REQUIRED_NICHE_KEYS = ("table_name", "keywords", "min_avg_views", "min_channel_age_months")
 
 
-def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
+def run(
+    niches: dict,
+    max_results_per_keyword: int,
+    days_back: int,
+    max_discovery_credits=None,
+) -> None:
     try:
         blocklist = fetch_blocklist()
     except BlocklistUnavailable as e:
@@ -1515,7 +1722,7 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
     # Discovery source, one client per run so its credit ceiling is run-scoped.
     # Inert when no API key is set, in which case run_niche falls back to the
     # YouTube search.list keyword loop — so the pipeline still runs without it.
-    discovery = InfluencerDiscovery.from_config()
+    discovery = InfluencerDiscovery.from_config(max_credits=max_discovery_credits)
     if discovery.enabled:
         logger.info("Discovery source: influencers.club creator search (replacing search.list).")
     else:
@@ -1590,8 +1797,23 @@ def run(niches: dict, max_results_per_keyword: int, days_back: int) -> None:
     # Discovery credits are the exact figure the vendor billed (credits_cost),
     # not an upper bound — every returned creator is charged, unlike an enrich
     # miss which is free.
+    #
+    # Reported WITH the creators-billed count and the credits-per-row ratio,
+    # because the absolute figure alone hid a 32x waste bug: 16 credits looked
+    # unremarkable until it sat next to "1 qualified row". A run that starts
+    # buying creators it never examines shows up here as the ratio moving, which
+    # is the number to watch.
     if discovery.credits_spent:
-        print(f"discovery credits: {discovery.credits_spent:g} spent on creator search")
+        # total_processed is rows actually PUSHED (qualified + flagged), which
+        # is the denominator that matters — not candidates examined.
+        per_row = (
+            f"{discovery.credits_spent / total_processed:.3g}"
+            if total_processed else "n/a (no rows)"
+        )
+        print(
+            f"discovery credits: {discovery.credits_spent:g} spent on creator search "
+            f"({discovery.creators_billed} creators billed, {per_row} credits/row)"
+        )
 
     if not any_cap_check_completed:
         logger.error(
@@ -1646,15 +1868,27 @@ def main() -> None:
         if args.daily_cap is None:
             DAILY_QUALIFIED_CAP = 2
             DAILY_FLAGGED_CAP = 1
+        # The row caps do NOT bound discovery spend — they make it worse, so the
+        # credit ceiling has to be passed separately. See
+        # INFLUENCERS_TEST_DISCOVERY_CREDITS in config.py for why (a smaller cap
+        # shrinks `target` below the vendor's 50-result minimum billable page,
+        # so each round buys 50 creators to examine 3). The old version of this
+        # log line claimed the caps "bound discovery spend too"; a live --test
+        # run spent 16 credits for one row, which is the refutation.
         logger.info(
             "Running in --test mode: first niche only, max_results=5, capped to "
-            "%d qualified / %d flagged (bounds discovery spend too).",
-            DAILY_QUALIFIED_CAP, DAILY_FLAGGED_CAP,
+            "%d qualified / %d flagged, discovery ceiling %.2f credits.",
+            DAILY_QUALIFIED_CAP, DAILY_FLAGGED_CAP, INFLUENCERS_TEST_DISCOVERY_CREDITS,
         )
         first_niche_name = next(iter(NICHES))
         first_niche = NICHES[first_niche_name]
         test_niches = {first_niche_name: {**first_niche, "keywords": first_niche["keywords"][:1]}}
-        run(niches=test_niches, max_results_per_keyword=5, days_back=args.days_back)
+        run(
+            niches=test_niches,
+            max_results_per_keyword=5,
+            days_back=args.days_back,
+            max_discovery_credits=INFLUENCERS_TEST_DISCOVERY_CREDITS,
+        )
     else:
         run(niches=NICHES, max_results_per_keyword=50, days_back=args.days_back)
 

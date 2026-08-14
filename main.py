@@ -456,23 +456,31 @@ MIN_VIEWS_PER_VIDEO_RATIO = 0.60
 # videos/month, annualised). Unknown cadence (fewer than two sampled uploads) is
 # passed as None and never disqualifies, the same rule as an unknown age.
 #
-# LOWERED from 10 to 6 (2026-08-14). The 2026-08-14 audit of all 80 tracked rows
-# turned up two channels this gate was the ONLY thing rejecting, and both were
-# strong: Ashley Devonna (94,750 long-form average, 10 of 10 recent videos over
-# 10k) and Karin Bohn (19,530 average, 7 of 10). A rule whose only observed
-# effect is discarding the best channel in the sample is measuring the wrong
-# thing — a brand placement does not need weekly uploads, and a
-# high-production monthly creator is exactly the kind of prospect the briefs
-# describe.
+# LOWERED from 10 to 6 (2026-08-14). The audit of all 80 tracked rows turned up
+# two channels this gate was the ONLY thing rejecting, both strong on every
+# other measure: Ashley Devonna (94,750 long-form average, 10 of 10 recent
+# videos over 10k) and Karin Bohn (19,530 average, 7 of 10). A rule whose only
+# observed effect is discarding the best channel in the sample is worth
+# doubting, and MAX_DAYS_SINCE_LAST_UPLOAD below is the gate that actually
+# catches an abandoned channel.
 #
-# MAX_DAYS_SINCE_LAST_UPLOAD below is the real liveness test, and it is the one
-# that catches an abandoned channel. This floor now only excludes the genuinely
-# near-dormant (fewer than one upload every two months).
+# BUT 6 DOES NOT RESCUE EITHER OF THEM, and the reason is worth recording rather
+# than re-deriving. Ashley Devonna's newest TEN uploads span 2022-06 to 2026-08
+# — 2.4 uploads a year. The channel has 259 videos, so it was prolific once and
+# has nearly stopped; it posted 4 days ago, so it is not dormant either. It is a
+# genuinely low-cadence channel, not the "monthly creator" this comment first
+# claimed. Keeping it would mean a floor near 2, which is the same as deleting
+# the gate.
 #
-# CAVEAT, unlike MIN_VIEWS_PER_VIDEO_RATIO: that ratio was calibrated against 80
-# rows with reviewer verdicts to check it against. This is 2 data points. 6 is a
-# judgement call, not a measurement — revisit it once a few audits have run and
-# there is a real distribution to look at.
+# So 6 is a compromise held on purpose: it stops the floor rejecting an ordinary
+# every-six-weeks creator (~9/yr), while still excluding channels that publish
+# two or three times a year. Whether a 2-3/yr channel with a 94k average is
+# worth contacting is a business call about placement frequency, not something
+# this file can settle — it is flagged to the user rather than decided here.
+#
+# CAVEAT: MIN_VIEWS_PER_VIDEO_RATIO was calibrated against 80 rows with reviewer
+# verdicts to check against. This is 2 data points. Revisit once a few audits
+# have produced a real cadence distribution.
 MIN_UPLOADS_PER_YEAR = 6
 
 # Still-active: the most recent sampled upload must be within this many days

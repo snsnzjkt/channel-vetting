@@ -52,11 +52,14 @@ from main import (
     MIN_LONGFORM_VIDEO_COUNT,
     calc_upload_frequency,
     days_since_last_upload,
+    description_is_non_english,
     excluded_topic_reason,
     longform_drop_reason,
+    non_latin_script_chars,
     pre_push_drop_reason,
     resolve_country,
     DROP_EXCLUDED_TOPIC,
+    DROP_NON_ENGLISH_DESCRIPTION,
     DROP_OUTSIDE_SEARCH_ZONE,
 )
 from config import API_SLEEP_SECONDS
@@ -103,6 +106,12 @@ def evaluate_row(record: dict, niche_config: dict) -> tuple[str, str]:
     topic = excluded_topic_reason(stats.get("channel_title", ""), stats.get("description", ""))
     if topic:
         return DROP_EXCLUDED_TOPIC, topic
+
+    # Same order as process_candidate: the free description checks first.
+    if description_is_non_english(stats.get("description", "")):
+        return DROP_NON_ENGLISH_DESCRIPTION, (
+            f"{non_latin_script_chars(stats.get('description', ''))} non-Latin script chars in the bio"
+        )
 
     desc_country = description_location_outside_zone(stats.get("description", ""))
     if desc_country:

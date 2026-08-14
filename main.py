@@ -39,7 +39,9 @@ from search_zones import (
 )
 from airtable_client import (
     get_existing_channel_ids,
+    get_tracked_handles,
     push_record,
+    table_has_field,
     AirtableReadError,
     count_added_today,
 )
@@ -1412,10 +1414,38 @@ def process_candidate(
         # NOT wrapped: a date value from prospect_day.today_iso(), not text.
         "Date Added": today_iso(),
     }
+
+    # The creator's @handle, written ONLY when the column exists.
+    #
+    # Purpose: discovery's server-side exclude_handles takes handles, not channel
+    # IDs, so without this column every row in this table is returned and BILLED
+    # (0.01 each) on every run, then resolved at one YouTube unit just to be
+    # recognised and discarded. Storing it here is what lets the NEXT run tell
+    # the vendor not to send them.
+    #
+    # Guarded because push_record sends field names as-is and Airtable rejects
+    # the WHOLE record for one unknown field — writing this blind before the
+    # column exists would break every push. table_has_field() probes once per
+    # table per run and caches, so this costs one tiny read and turns "column
+    # not added yet" into a no-op.
+    #
+    # NOT wrapped by csv_safe: handles are matched on EXACTLY (by the vendor's
+    # exclusion and by get_tracked_handles), so a prepended apostrophe would
+    # silently stop every exclusion working — the same reasoning that keeps
+    # Channel ID unwrapped. A YouTube handle cannot carry a formula payload.
+    # table_name off niche_config, since process_candidate isn't given it
+    # directly. Absent in unit-test configs, which correctly skips the probe.
+    handle = (stats.get("handle") or "").strip().lstrip("@")
+    niche_table = niche_config.get("table_name")
+    if handle and niche_table and table_has_field(niche_table, "Handle"):
+        record["Handle"] = handle
+
     return record, qualification
 
 
-def _discovery_exclude_handles(blocklist, external_handles, seen_handles) -> set[str]:
+def _discovery_exclude_handles(
+    blocklist, external_handles, seen_handles, tracked_handles=(),
+) -> set[str]:
     """
     Assemble the discovery exclude set, PRIORITISED under the 10k cap.
 
@@ -1427,17 +1457,29 @@ def _discovery_exclude_handles(blocklist, external_handles, seen_handles) -> set
     So the blocklist's handles are never dropped to make room.
 
     `seen_handles` (creators already examined THIS run) come next, so a later
-    round never re-bills an earlier round's candidates. External-table handles
-    fill whatever room is left under the cap; the ones that don't fit are still
-    caught after enrichment by process_candidate's external-handle check — at
-    the cost of one channels.list unit each, not a wrong contact.
+    round never re-bills an earlier round's candidates.
+
+    `tracked_handles` — this niche's OWN Airtable rows — rank alongside them,
+    and closing that gap is why they exist. The niche tables historically stored
+    only a Channel ID, which `exclude_handles` cannot use, so every tracked
+    creator was returned and BILLED (0.01) every run and then resolved at one
+    YouTube unit just to be recognised and discarded. That waste grew with the
+    table and never stopped. They are in must_keep rather than the leftover room
+    because they are certain re-bills: unlike an external-table handle, which
+    MIGHT never be returned by this niche's query, a row in this table came out
+    of this query.
+
+    External-table handles fill whatever room is left under the cap; the ones
+    that don't fit are still caught after enrichment by process_candidate's
+    external-handle check — at the cost of one channels.list unit each, not a
+    wrong contact.
 
     The blocklist screening in process_candidate is unchanged and remains the
     authoritative, fail-closed suppression gate (it also matches on email and
     name, which a handle-only exclusion can't). This set is a cost-saver layered
     in front of it, never a replacement for it.
     """
-    must_keep = set(blocklist.handles) | set(seen_handles)
+    must_keep = set(blocklist.handles) | set(seen_handles) | set(tracked_handles)
     room = max(0, INFLUENCERS_MAX_EXCLUDE_HANDLES - len(must_keep))
     external = sorted(set(external_handles) - must_keep)[:room]
     return must_keep | set(external)
@@ -1455,6 +1497,7 @@ def _run_discovery_rounds(
     enricher,
     qualified_headroom: int,
     flagged_headroom: int,
+    tracked_handles=(),
 ) -> dict:
     """
     Fill a niche's daily budget from influencers.club discovery instead of
@@ -1526,7 +1569,7 @@ def _run_discovery_rounds(
                 filters=filters,
                 target=target,
                 exclude_handles=_discovery_exclude_handles(
-                    blocklist, external_handles, seen_handles
+                    blocklist, external_handles, seen_handles, tracked_handles
                 ),
                 source_label=f"influencers.club discovery ({niche_name})",
             )
@@ -1707,10 +1750,15 @@ def run_niche(
         discovery is not None and discovery.enabled and "discovery_filters" in niche_config
     )
     if use_discovery:
+        # This niche's own tracked handles, so the vendor never returns — and
+        # never bills for — a creator already in this table. Empty until the
+        # "Handle" column exists (see airtable_client.get_tracked_handles), in
+        # which case behaviour is exactly as before.
         d = _run_discovery_rounds(
             niche_name, table_name, niche_config, discovery,
             globally_tracked_ids, external_handles, blocklist, scraper, enricher,
             qualified_headroom, flagged_headroom,
+            tracked_handles=get_tracked_handles(table_name),
         )
         pushed_qualified = d["qualified"]
         pushed_flagged = d["flagged"]

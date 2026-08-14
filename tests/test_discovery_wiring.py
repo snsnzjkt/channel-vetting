@@ -228,6 +228,10 @@ def _run_niche_discovery(monkeypatch, discovery, survives_one_in=1, blocklist=No
     monkeypatch.setattr(main, "process_candidate", _survives_one_in(survives_one_in))
     monkeypatch.setattr(main, "push_record", lambda t, r: pushed.append(r) or True)
     monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    # run_niche now reads this niche's stored handles so discovery can exclude
+    # them server-side. Stubbed empty: these tests are about the loop, not the
+    # exclusion source, and conftest hard-fails a real Airtable request.
+    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
 
     result = main.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), external_handles or {},
@@ -287,6 +291,10 @@ def _run_with_caps(monkeypatch, discovery, examined, qualified_cap, flagged_cap,
         main, "process_candidate", _recording_process_candidate(examined, survives_one_in))
     monkeypatch.setattr(main, "push_record", lambda t, r: True)
     monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    # run_niche now reads this niche's stored handles so discovery can exclude
+    # them server-side. Stubbed empty: these tests are about the loop, not the
+    # exclusion source, and conftest hard-fails a real Airtable request.
+    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
     return main.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": 12,
@@ -453,6 +461,10 @@ def test_the_niche_filters_reach_the_vendor_payload(monkeypatch):
             return []
 
     monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    # run_niche now reads this niche's stored handles so discovery can exclude
+    # them server-side. Stubbed empty: these tests are about the loop, not the
+    # exclusion source, and conftest hard-fails a real Airtable request.
+    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
     monkeypatch.setattr(main, "process_candidate", lambda *a, **k: (None, "skip"))
 
     niche_config = main.NICHES["Home Theater"]
@@ -557,6 +569,10 @@ def test_run_niche_falls_back_to_search_when_discovery_is_disabled(monkeypatch):
     )
     monkeypatch.setattr(main, "push_record", lambda t, r: True)
     monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    # run_niche now reads this niche's stored handles so discovery can exclude
+    # them server-side. Stubbed empty: these tests are about the loop, not the
+    # exclusion source, and conftest hard-fails a real Airtable request.
+    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
 
     disabled = _FakeDiscovery([], enabled=False)
     main.run_niche(
@@ -607,3 +623,99 @@ def test_exclude_keeps_do_not_contact_and_seen_then_fills_with_external(monkeypa
     assert {"dnc1", "dnc2", "seen1"} <= got   # must-keeps always present
     assert len(got) == 5                       # filled to the cap
     assert len(got & set(external)) == 2       # only the 2 remaining slots
+
+
+# --- the Handle column: stop re-buying rows we already track ----------------
+# exclude_handles takes handles, not channel IDs, so a niche table storing only
+# a Channel ID could not exclude its own rows. Every tracked creator was
+# returned and BILLED (0.01) every run, then resolved at one YouTube unit just
+# to be recognised and discarded — waste that grows with the table forever.
+
+
+def test_tracked_handles_are_excluded_server_side(monkeypatch):
+    """A handle stored on a row must reach the vendor's exclusion set."""
+    disc = _FakeDiscovery([["fresh0", "fresh1"]])
+    monkeypatch.setattr(main, "get_tracked_handles", lambda table: {"alreadytracked", "another"})
+    monkeypatch.setattr(main, "process_candidate", lambda *a, **k: (None, "skip"))
+    monkeypatch.setattr(main, "push_record", lambda t, r: True)
+    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+
+    main.run_niche(
+        "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": 12,
+         "discovery_filters": {"profile_language": ["en"]}},
+        None, None, disc,
+    )
+
+    assert {"alreadytracked", "another"} <= disc.calls[0]["exclude"]
+
+
+def test_tracked_handles_rank_with_the_blocklist_not_the_leftover_room():
+    """
+    They are certain re-bills: a row in THIS table came out of THIS query, so
+    unlike an external-table handle it will definitely be returned again. Under
+    the 10k cap they must survive alongside the blocklist rather than competing
+    for whatever room is left.
+    """
+    monkeypatch_free = main._discovery_exclude_handles(
+        _Blocklist({"blocked"}),
+        {f"ext{i}" for i in range(main.INFLUENCERS_MAX_EXCLUDE_HANDLES)},
+        seen_handles={"seen"},
+        tracked_handles={"tracked"},
+    )
+    assert {"blocked", "seen", "tracked"} <= monkeypatch_free
+
+
+def test_the_handle_is_written_only_when_the_column_exists(monkeypatch):
+    """
+    push_record sends field names as-is and Airtable rejects the WHOLE record
+    for one unknown field, so writing Handle before the column exists would
+    break every push. Probed, not configured — a flag can be forgotten.
+    """
+    stats = {
+        "channel_id": "UC1", "channel_title": "A Channel", "handle": "@SomeCreator",
+        "description": "English home theater reviews", "country": "US",
+        "subscriber_count": 50_000, "video_count": 200,
+        "uploads_playlist_id": "PL1", "published_at": "2019-01-01T00:00:00Z",
+    }
+    perf = {
+        "avg_views": 50_000, "min_views": 50_000, "settled_views": [50_000] * 10,
+        "avg_engagement_rate": 1.0, "shorts_only": False, "content_language": "en",
+        "upload_dates": ["2026-08-01T00:00:00Z"], "longform_count": 40,
+        "duration_sample_size": 50, "next_page_token": "",
+    }
+    monkeypatch.setattr(main, "can_afford_enrichment", lambda: True)
+    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: stats)
+    monkeypatch.setattr(main, "get_recent_video_performance", lambda *a, **k: perf)
+    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("e@x.com", "s", None))
+    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    niche = {"min_avg_views": 10_000, "min_channel_age_months": None, "table_name": "tbl"}
+    candidate = {"channel_id": "UC1", "channel_title": "A Channel", "matched_keywords": []}
+
+    # Column absent -> the field must not be sent at all.
+    monkeypatch.setattr(main, "table_has_field", lambda t, f: False)
+    record, _ = main.process_candidate(candidate, {}, _NullBlocklist(), niche, None)
+    assert record is not None
+    assert "Handle" not in record
+
+    # Column present -> stored bare and lowercased-as-given, no '@'.
+    monkeypatch.setattr(main, "table_has_field", lambda t, f: True)
+    record, _ = main.process_candidate(candidate, {}, _NullBlocklist(), niche, None)
+    assert record["Handle"] == "SomeCreator"
+
+
+def test_no_handle_field_probe_without_a_table_name(monkeypatch):
+    """Unit-test niche configs carry no table_name; that must not probe or crash."""
+    monkeypatch.setattr(main, "can_afford_enrichment", lambda: True)
+    monkeypatch.setattr(
+        main, "table_has_field",
+        lambda t, f: pytest.fail("probed for a field with no table name"),
+    )
+    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: None)
+    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+
+    record, reason = main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "X"}, {}, _NullBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+    )
+    assert record is None and reason == "unreachable"

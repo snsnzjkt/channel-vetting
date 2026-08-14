@@ -148,6 +148,99 @@ def get_existing_channel_ids(table_name: str) -> set[str]:
     return existing_ids
 
 
+# Per-process cache for table_has_field(). A table's schema does not change
+# mid-run, and the probe is only there to decide whether a field is safe to
+# write — asking once per table per run is enough.
+_FIELD_PRESENCE: dict[tuple[str, str], bool] = {}
+
+
+def table_has_field(table_name: str, field_name: str) -> bool:
+    """
+    Whether `table_name` actually has a field called `field_name`.
+
+    Exists because push_record sends field names as-is and Airtable rejects the
+    WHOLE record for one unknown field — so writing an optional column blind
+    would take down every push. Asking first turns "the column isn't there yet"
+    into a no-op instead of an outage.
+
+    Probed rather than configured. A flag in .env would work until someone adds
+    the column and forgets to flip it, at which point the feature silently never
+    runs — the same failure shape as the USE_PLAYWRIGHT_STEALTH CI gotcha in
+    CLAUDE.md. A probe cannot be forgotten and self-heals the moment the column
+    appears.
+
+    Reads at most one record, and asks for only the field in question, so the
+    response is tiny. A 422 UNKNOWN_FIELD_NAME is the "no" answer; any other
+    non-200 is treated as "no" too, because the caller's fallback (skip the
+    optional field) is always safe while guessing "yes" is not.
+    """
+    key = (table_name, field_name)
+    if key in _FIELD_PRESENCE:
+        return _FIELD_PRESENCE[key]
+
+    present = False
+    try:
+        resp = HTTP.get(
+            _base_url(table_name),
+            headers=_headers(),
+            params={"pageSize": 1, "fields[]": field_name},
+            timeout=30,
+        )
+        present = resp.status_code == 200
+        if not present:
+            logger.info(
+                "Field %r is not present in Airtable table '%s' (%s) — features that "
+                "write it will stay off until the column is added.",
+                field_name, table_name, resp.status_code,
+            )
+    except requests.RequestException as e:
+        logger.warning(
+            "Could not probe for field %r in '%s' (%s) — assuming absent.",
+            field_name, table_name, e,
+        )
+
+    _FIELD_PRESENCE[key] = present
+    return present
+
+
+def get_tracked_handles(table_name: str) -> set[str]:
+    """
+    Every non-empty "Handle" value in `table_name`, bare and lowercased.
+
+    Feeds discovery's server-side `exclude_handles` so the vendor never returns
+    — and never BILLS 0.01 for — a creator this niche already tracks. Without
+    it, every tracked row is re-bought and re-resolved (1 YouTube unit) on every
+    single run, caught only by the post-enrichment channel-ID check. That waste
+    grows linearly with the table and never stops.
+
+    Returns an empty set when the column doesn't exist yet, so the caller
+    degrades to exactly the old behaviour rather than failing. Also empty for a
+    read error, which is the safe direction: a missing exclusion costs credits,
+    while a partial set that looked complete could not cause a wrong contact
+    (the blocklist and dedupe gates still run post-enrichment).
+    """
+    if not table_has_field(table_name, "Handle"):
+        return set()
+
+    handles: set[str] = set()
+    try:
+        for record in get_records(table_name, fields=["Handle"]):
+            raw = record["fields"].get("Handle")
+            if isinstance(raw, str) and raw.strip():
+                handles.add(raw.strip().lstrip("@").lower())
+    except AirtableReadError as e:
+        logger.warning(
+            "Could not read tracked handles from '%s' (%s) — discovery will not "
+            "exclude them server-side this run, costing credits but nothing else.",
+            table_name, e,
+        )
+        return set()
+
+    logger.info("Loaded %d tracked handle(s) from '%s' for discovery exclusion.",
+                len(handles), table_name)
+    return handles
+
+
 def get_records(table_name: str, fields: list[str] | None = None) -> list[dict]:
     """
     Paginate through `table_name` and return full records as

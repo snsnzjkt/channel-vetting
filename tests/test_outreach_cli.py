@@ -419,14 +419,19 @@ def _stub_run_deps(monkeypatch, get_queued=None):
 # --- Blocklist name normalisation --------------------------------------------
 
 def _run_send_phase(monkeypatch, row, blocklist, write_preview=None,
-                    demo_mode=True, demo_recipient="demo@example.test"):
+                    demo_mode=True, demo_recipient="demo@example.test",
+                    footer_text="Example Co, 1 Test St, Testville",
+                    unsubscribe_url="https://example.test/unsub"):
     """
     Drive _send_phase over one row in dry-run mode and report what happened.
 
-    EVERYTHING this helper patches is a PARAMETER, deliberately. Three separate
-    bugs came from it patching ambient state unconditionally and silently
-    overriding whatever the caller had set first — a caller cannot patch before
-    the call and win. If you add another patch here, add it as a parameter too.
+    EVERYTHING this helper patches is a PARAMETER, deliberately. FOUR separate
+    bugs came from ambient state here: three from this helper patching
+    unconditionally and silently overriding whatever the caller had set first,
+    and one from NOT patching enough — the footer pair was left reading config,
+    so a developer configuring a mailto: opt-out turned four tests red. If you
+    add another patch here, add it as a parameter; if you find a config value
+    this helper does not pin, pin it.
 
     `demo_mode`/`demo_recipient` are pinned rather than read from config so the
     suite does not depend on the developer's .env: the dry-run path asks
@@ -442,6 +447,13 @@ def _run_send_phase(monkeypatch, row, blocklist, write_preview=None,
                         write_preview or (lambda *a, **k: "preview.eml"))
     monkeypatch.setattr(outreach, "OUTREACH_DEMO_MODE", demo_mode)
     monkeypatch.setattr(outreach, "OUTREACH_DEMO_RECIPIENT", demo_recipient)
+    # The footer pair is pinned for the same reason as the demo pair: read from
+    # config, these tests inherit whatever the developer's .env holds. That bit
+    # concretely — configuring a mailto: opt-out locally made four tests here
+    # fail against a validator that only accepted http(s), which is a fact about
+    # the machine, not about the behaviour under test.
+    monkeypatch.setattr(outreach, "OUTREACH_FOOTER_TEXT", footer_text)
+    monkeypatch.setattr(outreach, "OUTREACH_UNSUBSCRIBE_URL", unsubscribe_url)
     args = outreach.build_parser().parse_args([])
     outreach._send_phase(
         args, ledger="LEDGER", mailer=None, blocklist=blocklist,

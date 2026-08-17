@@ -418,13 +418,20 @@ def _stub_run_deps(monkeypatch, get_queued=None):
 
 # --- Blocklist name normalisation --------------------------------------------
 
-def _run_send_phase(monkeypatch, row, blocklist, write_preview=None):
+def _run_send_phase(monkeypatch, row, blocklist, write_preview=None,
+                    demo_mode=True, demo_recipient="demo@example.test"):
     """
     Drive _send_phase over one row in dry-run mode and report what happened.
 
-    `write_preview` is a parameter rather than something a caller patches first:
-    this helper used to stub it unconditionally, overriding any patch set before
-    the call — the same ordering trap that made an earlier budget helper wrong.
+    EVERYTHING this helper patches is a PARAMETER, deliberately. Three separate
+    bugs came from it patching ambient state unconditionally and silently
+    overriding whatever the caller had set first — a caller cannot patch before
+    the call and win. If you add another patch here, add it as a parameter too.
+
+    `demo_mode`/`demo_recipient` are pinned rather than read from config so the
+    suite does not depend on the developer's .env: the dry-run path asks
+    recipient_for(), which RAISES when demo mode is on with no redirect target,
+    so a clean checkout failed here while a configured machine passed.
     """
     summary = outreach.Summary()
     from outreach_ledger import RunBudget
@@ -433,6 +440,8 @@ def _run_send_phase(monkeypatch, row, blocklist, write_preview=None):
     monkeypatch.setattr(outreach, "get_queued_prospects", lambda *a, **k: [row])
     monkeypatch.setattr(outreach, "write_preview",
                         write_preview or (lambda *a, **k: "preview.eml"))
+    monkeypatch.setattr(outreach, "OUTREACH_DEMO_MODE", demo_mode)
+    monkeypatch.setattr(outreach, "OUTREACH_DEMO_RECIPIENT", demo_recipient)
     args = outreach.build_parser().parse_args([])
     outreach._send_phase(
         args, ledger="LEDGER", mailer=None, blocklist=blocklist,
@@ -519,23 +528,21 @@ def test_the_preview_shows_the_real_address_when_demo_mode_is_off(monkeypatch):
     misrepresenting what --send would do, on the exact artefact a human reads to
     authorise the send. It now asks the same rule the mailer uses.
     """
-    monkeypatch.setattr(outreach, "OUTREACH_DEMO_MODE", False)
-    monkeypatch.setattr(outreach, "OUTREACH_DEMO_RECIPIENT", "demo@mine.test")
     captured = {}
     _run_send_phase(
         monkeypatch, _row(**{"Email": "real@creator.test"}), Blocklist(),
         write_preview=lambda *a, **k: captured.update(to=k["to"]) or "p.eml",
+        demo_mode=False, demo_recipient="demo@mine.test",
     )
     assert captured["to"] == "real@creator.test"
 
 
 def test_the_preview_shows_the_demo_address_when_demo_mode_is_on(monkeypatch):
-    monkeypatch.setattr(outreach, "OUTREACH_DEMO_MODE", True)
-    monkeypatch.setattr(outreach, "OUTREACH_DEMO_RECIPIENT", "demo@mine.test")
     captured = {}
     _run_send_phase(
         monkeypatch, _row(**{"Email": "real@creator.test"}), Blocklist(),
         write_preview=lambda *a, **k: captured.update(to=k["to"]) or "p.eml",
+        demo_mode=True, demo_recipient="demo@mine.test",
     )
     assert captured["to"] == "demo@mine.test"
 

@@ -10,6 +10,28 @@ import sys
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def _fake_tables(monkeypatch):
+    """
+    Pin TABLES to fake table IDs for every test in this file.
+
+    audit_blocklist.TABLES is built from AIRTABLE_TABLE_* at import, so on a
+    machine with no .env it is {"Home Theater": None, "Lifestyle Sofa": None}
+    and main()'s `if not table_name: continue` skips every niche — push_record
+    is never called and the SystemExit paths never run, so four tests here
+    failed for a reason that had nothing to do with the behaviour they pin.
+    A unit test must not need a real table name, and a fresh clone must be able
+    to run the suite.
+    """
+    import audit_blocklist
+
+    monkeypatch.setattr(
+        audit_blocklist, "TABLES",
+        {"Home Theater": "tblFAKE_HOME_THEATER", "Lifestyle Sofa": "tblFAKE_LIFESTYLE"},
+    )
+
+
+
 
 class _AlwaysHitBlocklist:
     def match(self, handle="", email="", name=""):

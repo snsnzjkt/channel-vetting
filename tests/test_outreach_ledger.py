@@ -111,6 +111,9 @@ def _claim(store, **kw):
         campaign="ht-2026-08",
         niche="Home Theater",
         recipient_email="creator@example.com",
+        # Stated explicitly at every call site on purpose — there is no
+        # permissive default for the send-permission gate.
+        qualification="Qualified",
     )
     base.update(kw)
     return L.claim(store, **base)
@@ -277,6 +280,26 @@ def test_retry_patches_the_existing_row_and_never_creates_a_second():
     assert result.record_id == row["record_id"]
     assert store.creates == 0, "retry must PATCH, not POST a second ledger row"
     assert len([r for r in store.rows if r["fields"]["Idempotency Key"] == "UC_a:ht-2026-08"]) == 1
+
+
+def test_retry_reads_the_key_once_for_the_guard_not_twice():
+    """
+    Regression: claim() re-read find_by_key to recover the retry target, which
+    cost a second round trip against Airtable's 5-req/s PER-BASE limit (shared
+    with human editors) and opened a window where a concurrent write could make
+    the row we PATCH a different one from the row we classified.
+
+    Two reads total is correct: one for the guard, one for the post-write
+    verify. A third means the guard read was duplicated.
+    """
+    store = FakeLedgerStore()
+    store.add("UC_a:ht-2026-08", L.STATE_NOT_SENT)
+    reads = []
+    real = store.find_by_key
+    store.find_by_key = lambda k: (reads.append(k), real(k))[1]
+
+    assert _claim(store, allow_retry=True).granted
+    assert len(reads) == 2, f"expected guard + verify, got {len(reads)} reads"
 
 
 def test_retry_patch_failure_never_sends():
@@ -510,6 +533,200 @@ def test_release_does_not_clear_someone_elses_lease():
     store = FakeLeaseStore(holder="run-2", acquired_at="2026-08-14T11:59:00Z")
     assert not L.release_lease(store, holder="run-1", clock=_now())
     assert store.row["fields"]["Holder"] == "run-2"
+
+
+# --- Only "Qualified" may be emailed ----------------------------------------
+
+@pytest.mark.parametrize("qualification", ["New Channel", "Below View Minimum", "", None, "qualified"])
+def test_only_qualified_prospects_can_be_claimed(qualification):
+    """
+    The flagged buckets exist for a human to look at, not for the sender to
+    pick up. Note "qualified" lowercase is also refused — the match is exact,
+    because the live single-select is hand-maintained and has drifted before
+    (the base has both `Canada` and `canada`).
+    """
+    store = FakeLedgerStore()
+    result = _claim(store, qualification=qualification)
+    assert not result.granted
+    assert result.reason == L.REASON_NOT_QUALIFIED
+    assert store.creates == 0, "must refuse before writing a claim row"
+
+
+def test_qualified_prospect_is_claimable():
+    store = FakeLedgerStore()
+    assert _claim(store, qualification="Qualified").granted
+
+
+def test_qualification_has_no_default_so_callers_must_state_it():
+    """A permissive default on a send-permission gate fails open."""
+    store = FakeLedgerStore()
+    with pytest.raises(TypeError):
+        L.claim(
+            store, channel_id="UC_a", campaign="c", niche="n",
+            recipient_email="a@b.com",
+        )
+
+
+# --- Follow-up / "respam" ---------------------------------------------------
+
+def _sent_row(store, channel_id="UC_a", settled_at="2026-05-01T09:00:00Z", campaign="ht-2026-05"):
+    row = store.add(f"{channel_id}:{campaign}", L.STATE_SENT, channel_id=channel_id, campaign=campaign)
+    row["fields"]["Settled At"] = settled_at
+    return row
+
+
+def _followup(store, **kw):
+    base = dict(
+        channel_id="UC_a",
+        qualification="Qualified",
+        reply_state=L.REPLY_NONE,
+        followup_requested=True,
+        campaign_prefix="ht",
+        min_days_since_send=90,
+        max_touches=2,
+        clock=_now_on("2026-08-14"),
+    )
+    base.update(kw)
+    return L.followup_eligibility(store, **base)
+
+
+def _now_on(day):
+    from datetime import datetime, timezone
+    y, m, d = (int(x) for x in day.split("-"))
+    return lambda: datetime(y, m, d, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_followup_is_eligible_after_the_waiting_period():
+    store = FakeLedgerStore()
+    _sent_row(store, settled_at="2026-05-01T09:00:00Z")   # 105 days before 2026-08-14
+    v = _followup(store)
+    assert v.eligible
+    assert v.touch_number == 2
+    assert v.next_campaign == "ht-followup2"
+    assert v.last_sent_at == "2026-05-01T09:00:00Z"
+
+
+def test_followup_requires_a_human_to_ask():
+    """Nothing goes hunting for people to re-email."""
+    store = FakeLedgerStore()
+    _sent_row(store)
+    v = _followup(store, followup_requested=False)
+    assert not v.eligible
+    assert v.reason == L.REASON_NOT_REQUESTED
+
+
+def test_followup_requires_qualified():
+    store = FakeLedgerStore()
+    _sent_row(store)
+    v = _followup(store, qualification="New Channel")
+    assert not v.eligible
+    assert v.reason == L.REASON_NOT_QUALIFIED
+
+
+def test_followup_requires_proof_of_a_first_touch():
+    """Otherwise this is a first touch trying to skip the ever-sent guard."""
+    store = FakeLedgerStore()
+    v = _followup(store)
+    assert not v.eligible
+    assert v.reason == L.REASON_NO_PRIOR_SEND
+
+
+@pytest.mark.parametrize("reply", [L.REPLY_REPLIED, L.REPLY_INTERESTED, L.REPLY_DECLINED])
+def test_followup_never_re_emails_someone_who_replied(reply):
+    store = FakeLedgerStore()
+    _sent_row(store)
+    v = _followup(store, reply_state=reply)
+    assert not v.eligible
+    assert v.reason == L.REASON_REPLIED
+
+
+@pytest.mark.parametrize("reply", ["", None, "no reply", "Unknown", "None"])
+def test_blank_or_unrecognised_reply_state_refuses(reply):
+    """
+    Deliberately inverts "absent data never disqualifies". The action is only
+    defined for a non-replier and a blank cannot establish that.
+    """
+    store = FakeLedgerStore()
+    _sent_row(store)
+    v = _followup(store, reply_state=reply)
+    assert not v.eligible
+    assert v.reason == L.REASON_REPLY_STATE_UNKNOWN
+
+
+def test_followup_refused_before_the_waiting_period():
+    store = FakeLedgerStore()
+    _sent_row(store, settled_at="2026-08-01T09:00:00Z")   # 13 days
+    v = _followup(store)
+    assert not v.eligible
+    assert v.reason == L.REASON_TOO_SOON
+    assert "13d ago" in v.detail
+
+
+def test_followup_ages_from_the_LAST_send_not_the_first():
+    """
+    Otherwise a second follow-up rides out the day after the first, on the
+    strength of touch 1's age.
+    """
+    store = FakeLedgerStore()
+    _sent_row(store, settled_at="2026-01-01T09:00:00Z", campaign="ht-2026-01")
+    _sent_row(store, settled_at="2026-08-10T09:00:00Z", campaign="ht-followup2")
+    v = _followup(store, max_touches=5)
+    assert not v.eligible
+    assert v.reason == L.REASON_TOO_SOON
+
+
+def test_followup_is_bounded_by_max_touches():
+    """Respam with no ceiling is just spam. Prior Sent rows ARE the counter."""
+    store = FakeLedgerStore()
+    _sent_row(store, settled_at="2026-01-01T09:00:00Z", campaign="ht-2026-01")
+    _sent_row(store, settled_at="2026-04-01T09:00:00Z", campaign="ht-followup2")
+    v = _followup(store, max_touches=2)
+    assert not v.eligible
+    assert v.reason == L.REASON_MAX_TOUCHES
+    assert v.touch_number == 2
+
+
+def test_followup_refuses_when_the_prior_send_has_no_readable_timestamp():
+    store = FakeLedgerStore()
+    row = _sent_row(store)
+    row["fields"]["Settled At"] = "not-a-date"
+    row["fields"]["Claimed At"] = "also-not-a-date"
+    v = _followup(store)
+    assert not v.eligible
+    assert v.reason == L.REASON_TOO_SOON
+
+
+def test_followup_falls_back_to_claimed_at_when_settled_at_is_missing():
+    store = FakeLedgerStore()
+    row = _sent_row(store)
+    del row["fields"]["Settled At"]
+    row["fields"]["Claimed At"] = "2026-05-01T09:00:00Z"
+    assert _followup(store).eligible
+
+
+def test_an_eligible_followup_claims_under_a_new_key():
+    """
+    The follow-up gets its own campaign, so its idempotency key differs and it
+    lands as a SECOND ledger row — the audit trail shows both touches.
+    """
+    store = FakeLedgerStore()
+    _sent_row(store, settled_at="2026-05-01T09:00:00Z")
+    v = _followup(store)
+    assert v.eligible
+
+    # Without the verdict's bypass, the ever-sent guard correctly refuses.
+    blocked = _claim(store, campaign=v.next_campaign)
+    assert not blocked.granted
+    assert blocked.reason == L.REASON_ALREADY_SENT
+
+    granted = _claim(store, campaign=v.next_campaign, allow_recontact=True)
+    assert granted.granted
+    assert granted.key == "UC_a:ht-followup2"
+    assert granted.key != "UC_a:ht-2026-05"
+
+
+def test_reply_states_vocabulary_is_exactly_four():
+    assert L.REPLY_STATES == {"No Reply", "Replied", "Interested", "Declined"}
 
 
 # --- State vocabulary -------------------------------------------------------

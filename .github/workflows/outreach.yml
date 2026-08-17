@@ -1,0 +1,161 @@
+name: Outreach
+
+# MANUAL ONLY, ON PURPOSE.
+#
+# There is deliberately NO `schedule:` here, unlike channel-vetting.yml.
+# Discovery writes rows into a table a human reviews; this workflow sends
+# email to third parties, and that is not an action to put on a cron before
+# anyone has agreed the copy, the sending domain, and the legal footer. Add a
+# cron only after the blocking prerequisites in OUTREACH_PLAN.md are signed
+# off — and when you do, read the day-of-week note in channel-vetting.yml
+# first, because the same UTC-vs-prospect-day alignment applies.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run renders and reports without sending. send actually delivers (and still obeys OUTREACH_DEMO_MODE)."
+        type: choice
+        options: [dry-run, send]
+        default: dry-run
+      niche:
+        description: "Limit to one niche, e.g. 'Home Theater'. Blank = all niches."
+        type: string
+        required: false
+        default: ""
+      limit:
+        description: "Max sends this run. Blank = OUTREACH_MAX_PER_RUN. Digits only."
+        type: string
+        required: false
+        default: ""
+
+# Only ever ONE outreach run at a time, repo-wide.
+#
+# This is the PRIMARY serialisation for outreach, and the Outreach Lock table
+# is explicitly the weaker half of the pair. Airtable has no conditional
+# writes, so `acquire_lease()` is itself read-then-write and two runs can both
+# read the lock as free; claim-verify-send narrows the duplicate window but
+# provably does not close it (there is a test named for that limitation). This
+# group is the only mechanism here that genuinely prevents two CI runs
+# overlapping, so do not remove it on the grounds that the ledger "handles it".
+#
+# What it does NOT cover: a hand-run `python outreach.py` on a laptop. That is
+# the gap the Outreach Lock row exists to make visible.
+#
+# cancel-in-progress is FALSE for a stronger reason than in channel-vetting:
+# cancelling mid-flight would SIGKILL the run between a claim write and its
+# settle, stranding a row in `Claimed` — which means "this email MAY have been
+# delivered" and requires a human to check a sent-mail folder to resolve.
+# Queueing costs wall-clock; cancelling costs someone's afternoon.
+concurrency:
+  group: outreach
+  cancel-in-progress: false
+
+# Same reasoning as channel-vetting.yml: this job needs no repo access at all,
+# and it holds AIRTABLE_TOKEN and the mail credential in env for its whole life.
+permissions: {}
+
+jobs:
+  outreach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+      AIRTABLE_BASE_ID: ${{ secrets.AIRTABLE_BASE_ID }}
+      AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.AIRTABLE_TABLE_HOME_THEATER }}
+      AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.AIRTABLE_TABLE_LIFESTYLE_SOFA }}
+      # Pinned so the runner (UTC) agrees with head office about which day a
+      # send counts against — the daily cap is denominated in prospect days.
+      PROSPECT_DAY_TZ: America/Toronto
+
+      # DEMO MODE. Defaults to "true" here rather than inheriting config.py's
+      # default, so the safe value is visible in the workflow file itself and
+      # anyone reading this can see what it would take to contact a real
+      # creator: someone has to add an OUTREACH_DEMO_MODE secret set to
+      # "false". That is a deliberate, auditable act, not a forgotten flag.
+      #
+      # `secrets.X || 'true'` falls back to the safe value when the secret is
+      # absent OR empty, so a half-configured repo stays in demo mode.
+      OUTREACH_DEMO_MODE: ${{ secrets.OUTREACH_DEMO_MODE || 'true' }}
+      # Where demo mail is redirected. Unset means demo mode refuses to send
+      # at all — resolve_recipient() raises rather than falling back to the
+      # prospect's real address, which is the bug this exists to prevent.
+      OUTREACH_DEMO_RECIPIENT: ${{ secrets.OUTREACH_DEMO_RECIPIENT }}
+
+      # Mail transport. Absent means --send refuses to start (a mailer is NOT
+      # a soft-disable optional step, unlike the influencers.club lookup).
+      GMAIL_SENDER_EMAIL: ${{ secrets.GMAIL_SENDER_EMAIL }}
+      GMAIL_CREDENTIALS_B64: ${{ secrets.GMAIL_CREDENTIALS_B64 }}
+      # CAN-SPAM / PECR. No defaults anywhere: --send refuses to start without
+      # both, which turns a legal exposure into a startup failure nobody can
+      # skip by forgetting.
+      OUTREACH_FOOTER_TEXT: ${{ secrets.OUTREACH_FOOTER_TEXT }}
+      OUTREACH_UNSUBSCRIBE_URL: ${{ secrets.OUTREACH_UNSUBSCRIBE_URL }}
+
+    steps:
+      # Pinned to full commit SHAs for the same reason as channel-vetting.yml:
+      # a tag is a mutable ref, and this job has credentials in env.
+      - name: Check out repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --require-hashes -r requirements.txt
+
+      # Argument injection guard, duplicated from channel-vetting.yml on
+      # purpose: routing an input through env: stops SHELL injection, but an
+      # unquoted expansion still word-splits, so "10 --send" would smuggle an
+      # extra argv entry into a dry run. Validated in its own step so no
+      # later `if:` can skip it.
+      - name: Validate inputs
+        env:
+          LIMIT: ${{ inputs.limit }}
+          NICHE: ${{ inputs.niche }}
+        run: |
+          case "$LIMIT" in ""|*[!0-9]*) LIMIT_BAD=1 ;; *) LIMIT_BAD=0 ;; esac
+          if [ -n "$LIMIT" ] && [ "$LIMIT_BAD" = "1" ]; then
+            echo "limit must be digits only, got: $LIMIT" >&2
+            exit 1
+          fi
+          if [ -n "$NICHE" ] && ! printf '%s' "$NICHE" | grep -Eq '^[A-Za-z ]+$'; then
+            echo "niche must be letters and spaces only, got: $NICHE" >&2
+            exit 1
+          fi
+
+      # Fails fast on a misconfigured base BEFORE anything is claimed: asserts
+      # every field name exists, that Send State has exactly the four expected
+      # options, that the lock row is present, and that the mail credentials
+      # authenticate. Cheaper to fail here than to strand claims mid-run.
+      - name: Preflight
+        run: python outreach.py --check-setup
+
+      - name: Run outreach
+        env:
+          MODE: ${{ inputs.mode }}
+          LIMIT: ${{ inputs.limit }}
+          NICHE: ${{ inputs.niche }}
+        run: |
+          ARGS=""
+          if [ "$MODE" = "send" ]; then ARGS="$ARGS --send"; else ARGS="$ARGS --dry-run"; fi
+          if [ -n "$LIMIT" ]; then ARGS="$ARGS --limit $LIMIT"; fi
+          if [ -n "$NICHE" ]; then ARGS="$ARGS --niche $NICHE"; fi
+          python outreach.py $ARGS
+
+      # The rendered .eml files are the only way to see what a dry run WOULD
+      # have sent. Uploaded so a human can read them before anyone authorises
+      # a real send. if: always() so they survive a non-zero exit — a run that
+      # aborted part-way is exactly when you want to see what it produced.
+      - name: Upload rendered previews
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: outreach-previews
+          path: outreach_preview/
+          if-no-files-found: ignore
+          retention-days: 7

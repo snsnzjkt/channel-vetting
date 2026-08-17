@@ -55,11 +55,25 @@ EXTERNAL_CACHE_MAX_AGE_HOURS = 24
 # RENAMED their @handle is still caught by name — the exact miss that let a
 # channel already in "Follow-up Outreach" (old handle @Newrecordday2013) get
 # re-added to Prospects after it became @newrecordday.
+# The two "Prospect Outreach" entries (2026-08-14) are the tables THIS pipeline
+# writes when it sends. Registering them here is what stops a channel we
+# emailed from being re-discovered and re-enriched later — without it a
+# pipeline send is invisible to this check, which is the same waste the handle
+# backfill was written to stop.
+#
+# They deliberately reuse `link_field: "Link"` / `name_field: "Channel Name"`,
+# matching the legacy tables, so there is one convention rather than two. The
+# `Link` column MUST carry the https://www.youtube.com/@handle form: this
+# module keys on normalize_handle(), which requires a literal "@" and returns
+# "" for a /channel/UC... URL — so a wrong URL shape here does not error, it
+# silently contributes ZERO handles and the name index carries the whole load.
 EXTERNAL_TABLES = [
     {"table_id": "tblFDvQiElfy7sER7", "name": "Home Theatre – YouTube Outreach", "link_field": "Link", "name_field": "Channel Name"},
     {"table_id": "tbllgU6ITa4vkI6dG", "name": "Home Theatre – YouTube Leads", "link_field": "Link", "name_field": "Channel Name"},
     {"table_id": "tblWJm5pRazEtBVqb", "name": "Home Theatre – YouTube Follow-up Outreach", "link_field": "Link", "name_field": "Channel Name"},
     {"table_id": "tbl9OOxhwR5ujGZtF", "name": "Lifestyle – Sofa Influencers", "link_field": "YouTube URL", "name_field": "Name"},
+    {"table_id": "tblOChqk6iVlRxwkp", "name": "Home Theatre – Prospect Outreach", "link_field": "Link", "name_field": "Channel Name"},
+    {"table_id": "tblk6Tml6PO90wLZz", "name": "Lifestyle – Sofa Prospect Outreach", "link_field": "Link", "name_field": "Channel Name"},
 ]
 
 

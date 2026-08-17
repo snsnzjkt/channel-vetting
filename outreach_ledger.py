@@ -82,6 +82,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
+from scoring import QUALIFIED
+
 logger = logging.getLogger(__name__)
 
 
@@ -121,6 +123,50 @@ REASON_LOST_VERIFY = "lost_verify"
 # Written to the losing claim's `Verify Result` so a human reading the ledger
 # can tell a tiebreak loss from a genuine send failure.
 VERIFY_LOST_TIEBREAK = "lost-tiebreak"
+
+# --- Who may be emailed at all -----------------------------------------------
+# Only the pipeline's own "Qualified" verdict is emailable. `New Channel` and
+# the legacy `Below View Minimum` are flagged for a HUMAN to look at, not for
+# the sender to pick up — that is the whole point of the separate flagged
+# budget. A reviewer who wants to approach a flagged channel does it through
+# the base's existing manual outreach tables.
+#
+# The primary gate is the server-side filter in `get_queued_prospects()`; this
+# constant is the defence-in-depth check, because that filter is a hand-built
+# `filterByFormula` on a hand-maintained view and a typo there fails OPEN.
+# Imported, NOT re-spelled: this is the exact string scoring.qualify() writes
+# into the Airtable single-select, and main.py already imports the constant
+# rather than typing it. Two copies of an option name on a hand-maintained
+# schema is how you get `Canada` and `canada` — and the copy that would fail
+# open is this one, since the gate here is the defence-in-depth behind a
+# hand-built filterByFormula. scoring.py imports only `math`, so no cycle.
+SENDABLE_QUALIFICATION = QUALIFIED
+REASON_NOT_QUALIFIED = "not_qualified"
+
+# --- Demo mode lives in mailer.py --------------------------------------------
+# `resolve_recipient()` and `DemoModeError` were here, and that was the wrong
+# layer: this module never touches the mailer, so the gate was only safe by
+# CONVENTION — nothing stopped a caller doing `mailer.send(to=row["Email"])`
+# and skipping it. `Mailer.send()` now takes the prospect's real address and
+# applies the redirect itself, so a caller that forgets the gate cannot be
+# written. The ledger still records the REAL address, which is why the two
+# concerns are separable at all.
+
+# --- Follow-up ("respam") refusal reasons ------------------------------------
+REASON_NO_PRIOR_SEND = "no_prior_send"
+REASON_REPLIED = "replied"
+REASON_REPLY_STATE_UNKNOWN = "reply_state_unknown"
+REASON_TOO_SOON = "too_soon"
+REASON_MAX_TOUCHES = "max_touches_reached"
+REASON_NOT_REQUESTED = "followup_not_requested"
+
+# `Reply State` values. A follow-up is only ever sent to a NON-replier, so this
+# vocabulary is load-bearing rather than reporting.
+REPLY_NONE = "No Reply"
+REPLY_REPLIED = "Replied"
+REPLY_INTERESTED = "Interested"
+REPLY_DECLINED = "Declined"
+REPLY_STATES = frozenset({REPLY_NONE, REPLY_REPLIED, REPLY_INTERESTED, REPLY_DECLINED})
 
 
 class LedgerUnavailable(RuntimeError):
@@ -183,6 +229,23 @@ def _utc_now_iso(clock=None) -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _parse_utc(value: str):
+    """
+    Parse one of our own `%Y-%m-%dT%H:%M:%SZ` stamps, or return None.
+
+    Returns None rather than raising, and every caller treats None as "cannot
+    prove anything from this" — which for a lease means "assume it is live" and
+    for a follow-up means "assume not enough time has passed". Both lean away
+    from acting.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
 def build_key(channel_id: str, campaign: str) -> str:
     """
     The idempotency key.
@@ -227,6 +290,142 @@ def classify_existing(rows: list[dict]) -> tuple[bool, str, str]:
         return True, REASON_IN_FLIGHT, ""
     # Everything left is NotSent.
     return True, REASON_PREVIOUSLY_NOT_SENT, ""
+
+
+@dataclass(frozen=True)
+class FollowUpVerdict:
+    """
+    Whether a channel may receive a FOLLOW-UP (the "respam" button).
+
+    This is the only sanctioned way past the ever-sent guard. `claim()` will
+    accept `allow_recontact=True` from anywhere, which is a footgun, so the
+    rule is: **a scheduled run may only pass `allow_recontact=True` when it is
+    holding an `eligible` verdict from this function.** An operator using
+    `--allow-recontact` by hand is overriding on purpose and owns the result.
+    """
+    eligible: bool
+    reason: str
+    touch_number: int = 0
+    last_sent_at: str = ""
+    next_campaign: str = ""
+    detail: str = ""
+
+    def __bool__(self) -> bool:  # pragma: no cover - convenience only
+        return self.eligible
+
+
+def followup_eligibility(
+    store: LedgerStore,
+    *,
+    channel_id: str,
+    qualification: str,
+    reply_state: str,
+    followup_requested: bool,
+    campaign_prefix: str,
+    min_days_since_send: int,
+    max_touches: int,
+    clock=None,
+) -> FollowUpVerdict:
+    """
+    Decide whether a non-replier may be emailed a second time.
+
+    Every precondition below must hold. They are checked in order of how badly
+    it reads to get them wrong, and none of them is inferred:
+
+      1. `followup_requested` — a human pressed the button. Follow-ups are
+         never automatic; nothing here goes hunting for people to re-email.
+      2. `Qualification == "Qualified"` — same rule as a first touch.
+      3. A prior `Sent` row exists. Without proof of touch 1 this is not a
+         follow-up, it is a first touch trying to skip the ever-sent guard.
+      4. `Reply State == "No Reply"` — EXACTLY that. A blank, an unrecognised
+         value, or anything else refuses. This deliberately inverts the
+         pipeline's usual "absent data never disqualifies" rule, for the same
+         reason the English-language gate does: the action is only defined for
+         a non-replier, and a blank cannot establish that. Emailing someone who
+         already replied is worse than not emailing them at all.
+      5. Enough time has passed since the LAST send (`min_days_since_send`).
+      6. Touch count is under `max_touches`. Prior `Sent` rows ARE the touch
+         count, so this is bounded by evidence rather than by a counter someone
+         can reset. Without it "respam" has no natural end, and a follow-up
+         cadence with no ceiling is indistinguishable from spam — which the
+         name of the button says out loud.
+
+    Returns a verdict carrying `next_campaign`, a NEW label, so the follow-up
+    gets its own idempotency key and its own ledger row. That is what campaign
+    labels are for; the ever-sent guard stays keyed on the channel.
+
+    NOTE this function cannot see the suppression list. DO NOT CONTACT is
+    re-checked at send time on handle+email+name, as for a first touch, and a
+    creator who asked to be left alone must never reach this path.
+    """
+    if not followup_requested:
+        return FollowUpVerdict(False, REASON_NOT_REQUESTED)
+
+    if qualification != SENDABLE_QUALIFICATION:
+        return FollowUpVerdict(
+            False, REASON_NOT_QUALIFIED,
+            detail=f"Qualification is {qualification!r}, not {SENDABLE_QUALIFICATION!r}",
+        )
+
+    prior = store.find_sent_for_channel(channel_id)
+    if not prior:
+        return FollowUpVerdict(
+            False, REASON_NO_PRIOR_SEND,
+            detail="no Sent row — a follow-up requires a completed first touch",
+        )
+
+    if reply_state not in REPLY_STATES:
+        return FollowUpVerdict(
+            False, REASON_REPLY_STATE_UNKNOWN,
+            detail=f"Reply State {reply_state!r} is blank or unrecognised — "
+                   "triage the inbox before following up",
+        )
+    if reply_state != REPLY_NONE:
+        return FollowUpVerdict(
+            False, REASON_REPLIED,
+            detail=f"Reply State is {reply_state!r} — do not re-email a responder",
+        )
+
+    touches = len(prior)
+    if touches >= max_touches:
+        return FollowUpVerdict(
+            False, REASON_MAX_TOUCHES, touch_number=touches,
+            detail=f"{touches} send(s) already, ceiling is {max_touches}",
+        )
+
+    # The LAST send, not the first — otherwise a second follow-up could go out
+    # the day after the first one on the strength of touch 1's age.
+    # max(), not sorted()[-1]: `prior` is already known non-empty (the
+    # no-prior-send guard returned above), so there is no empty case, and a
+    # reader does not have to check the sort direction to see which end wins.
+    last_sent_at = max(
+        (r.get("fields", {}) or {}).get("Settled At")
+        or (r.get("fields", {}) or {}).get("Claimed At")
+        or ""
+        for r in prior
+    )
+    last_sent = _parse_utc(last_sent_at)
+    if last_sent is None:
+        return FollowUpVerdict(
+            False, REASON_TOO_SOON, touch_number=touches, last_sent_at=last_sent_at,
+            detail="prior send has no readable timestamp — cannot prove enough time passed",
+        )
+
+    now = (clock or (lambda: datetime.now(timezone.utc)))()
+    age_days = (now - last_sent).days
+    if age_days < min_days_since_send:
+        return FollowUpVerdict(
+            False, REASON_TOO_SOON, touch_number=touches, last_sent_at=last_sent_at,
+            detail=f"last send was {age_days}d ago, minimum is {min_days_since_send}d",
+        )
+
+    return FollowUpVerdict(
+        True, REASON_GRANTED,
+        touch_number=touches + 1,
+        last_sent_at=last_sent_at,
+        next_campaign=f"{campaign_prefix}-followup{touches + 1}",
+        detail=f"{age_days}d since touch {touches}",
+    )
 
 
 @dataclass
@@ -281,6 +480,7 @@ def claim(
     campaign: str,
     niche: str,
     recipient_email: str,
+    qualification: str,
     channel_name: str = "",
     template_version: str = "",
     budget: RunBudget | None = None,
@@ -307,7 +507,15 @@ def claim(
         # would be skipped as "already sent".
         return ClaimResult(False, REASON_NO_CHANNEL_ID, key="", detail="empty Channel ID")
 
+    # Defence in depth behind the server-side filter. `qualification` is passed
+    # in rather than defaulted, so every call site has to state it and a new
+    # caller cannot inherit a permissive default.
     key = build_key(channel_id, campaign)
+    if qualification != SENDABLE_QUALIFICATION:
+        return ClaimResult(
+            False, REASON_NOT_QUALIFIED, key,
+            detail=f"Qualification is {qualification!r}, not {SENDABLE_QUALIFICATION!r}",
+        )
 
     # --- Guard 1: ever sent, any campaign. Campaign-independent on purpose. ---
     if not allow_recontact:
@@ -322,16 +530,22 @@ def claim(
             )
 
     # --- Guard 2: existing rows for this exact key. ---
-    blocked, reason, detail = classify_existing(store.find_by_key(key))
+    # Read ONCE and reuse. Re-reading to recover the retry target cost a second
+    # round trip against Airtable's 5-req/s PER-BASE limit (shared with human
+    # editors and other automations), and opened a window in which a concurrent
+    # write could make the row we PATCH a different one from the row we
+    # classified.
+    existing = store.find_by_key(key)
+    blocked, reason, detail = classify_existing(existing)
     if blocked and not (reason == REASON_PREVIOUSLY_NOT_SENT and allow_retry):
         return ClaimResult(False, reason, key, detail=detail)
-    retrying_record_id = None
-    if blocked and reason == REASON_PREVIOUSLY_NOT_SENT:
-        # Retry PATCHes the existing row back to Claimed. It must never POST a
-        # second row under the same key — that is how a ledger grows two
-        # histories for one prospect.
-        existing = store.find_by_key(key)
-        retrying_record_id = existing[0].get("record_id") if existing else None
+    # Past the early return, `blocked` already implies the retry case, and
+    # classify_existing() returns not-blocked for an empty list — so `blocked`
+    # also implies `existing` is non-empty. Restating either would be dead.
+    # Retry PATCHes the existing row back to Claimed; it must never POST a
+    # second row under the same key, which is how a ledger grows two histories
+    # for one prospect.
+    retrying_record_id = existing[0].get("record_id") if blocked else None
 
     # --- Guard 3: budget and per-run address dedupe. Both free. ---
     if budget is not None:
@@ -543,14 +757,13 @@ def release_lease(store: LeaseStore, *, holder: str, clock=None) -> bool:
 
 
 def _lease_is_stale(since_iso: str, stale_after_minutes: int, clock=None) -> bool:
-    if not since_iso:
-        # A holder with no timestamp cannot be aged out on evidence. Treat it as
-        # live: refusing to start is recoverable, double-sending is not.
-        return False
-    try:
-        since = datetime.strptime(since_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        logger.warning("Unparseable lease timestamp %r — treating the lease as live.", since_iso)
+    since = _parse_utc(since_iso)
+    if since is None:
+        # A holder with no readable timestamp cannot be aged out on evidence.
+        # Treat it as live: refusing to start is recoverable, double-sending is
+        # not.
+        if since_iso:
+            logger.warning("Unparseable lease timestamp %r — treating the lease as live.", since_iso)
         return False
     now = (clock or (lambda: datetime.now(timezone.utc)))()
     return now - since > timedelta(minutes=stale_after_minutes)

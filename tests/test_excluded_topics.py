@@ -11,6 +11,7 @@ contain a landmine word (a shotgun MICROPHONE, a nail/glue gun, a
 import pytest
 
 import main
+import niches
 
 
 class _NullBlocklist:
@@ -117,7 +118,7 @@ def test_the_new_terms_reach_the_server_side_negation_filter():
     credit leak open while the local gate looked like it was working.
     """
     for term in ("beamng", "assetto corsa", "forestry", "logging truck"):
-        assert term in main.EXCLUDED_TOPIC_KEYWORDS
+        assert term in niches.EXCLUDED_TOPIC_KEYWORDS
 
 
 def test_empty_and_none_texts_are_safe():
@@ -167,17 +168,17 @@ def test_both_niches_carry_the_discovery_negation_filter():
     # gate_terms_verbatim below is what pins that constant to EXCLUDED_TOPIC_TERMS.
     for niche_name, cfg in main.NICHES.items():
         filters = cfg["discovery_filters"]
-        assert filters.get("keywords_not_in_description") == main.EXCLUDED_TOPIC_KEYWORDS, niche_name
+        assert filters.get("keywords_not_in_description") == niches.EXCLUDED_TOPIC_KEYWORDS, niche_name
 
 
 def test_discovery_negation_reuses_the_gate_terms_verbatim():
     """Derived FROM EXCLUDED_TOPIC_TERMS, not a hand-kept copy, so the server
     pre-filter and the local backstop can't drift — every wired term is one the
     local gate also recognises."""
-    assert main.EXCLUDED_TOPIC_KEYWORDS == sorted(
-        {t for terms in main.EXCLUDED_TOPIC_TERMS.values() for t in terms}
+    assert niches.EXCLUDED_TOPIC_KEYWORDS == sorted(
+        {t for terms in niches.EXCLUDED_TOPIC_TERMS.values() for t in terms}
     )
-    for term in main.EXCLUDED_TOPIC_KEYWORDS:
+    for term in niches.EXCLUDED_TOPIC_KEYWORDS:
         assert main.excluded_topic_reason(term) is not None, term
 
 
@@ -187,4 +188,4 @@ def test_discovery_negation_omits_the_same_landmines_the_gate_omits():
     (a shotgun MIC, a nail gun, a 'conservative palette') must not sneak into
     the discovery list either."""
     for landmine in ("gun", "shotgun", "rifle", "pistol", "conservative", "liberal", "parliament"):
-        assert landmine not in main.EXCLUDED_TOPIC_KEYWORDS
+        assert landmine not in niches.EXCLUDED_TOPIC_KEYWORDS

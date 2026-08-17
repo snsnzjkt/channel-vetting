@@ -368,15 +368,30 @@ def test_the_lease_is_actually_acquired_and_released(monkeypatch):
 
 
 def test_a_held_lease_aborts_before_any_send(monkeypatch):
+    """
+    A held lease aborts, and nothing is sent.
+
+    This used to also assert the queue was NEVER read, because the lease was
+    acquired first. The order is now deliberately reversed: the queue read comes
+    first so that an IDLE run can stop before the blocklist, the budget and the
+    lease entirely. The trade is explicit — a run that loses the lease pays 2
+    extra queue GETs, while an idle run saves ~19. With a cron firing 16 times a
+    weekday and `concurrency: outreach` keeping CI runs from overlapping, idle
+    runs vastly outnumber contended ones, so this is the right way round.
+
+    What must NOT change is the invariant the old assertion stood in for: a held
+    lease means nothing is sent.
+    """
     monkeypatch.setattr(outreach, "AirtableLeaseStore", lambda: "LEASE_STORE")
     monkeypatch.setattr(outreach, "acquire_lease",
                         lambda store, **k: LeaseResult(False, holder="other-run"))
     monkeypatch.setattr(outreach, "release_lease", lambda store, **k: True)
 
-    def forbidden(*a, **k):
-        raise AssertionError("must not read the queue when the lease is held")
+    def forbidden_send(*a, **k):
+        raise AssertionError("must not send when the lease is held")
 
-    _stub_run_deps(monkeypatch, get_queued=forbidden)
+    monkeypatch.setattr(outreach, "_send_phase", forbidden_send)
+    _stub_run_deps(monkeypatch)
     assert outreach.run(outreach.build_parser().parse_args([])) == outreach.EXIT_ABORTED
 
 
@@ -405,13 +420,51 @@ def test_summary_and_release_survive_an_unhandled_exception(monkeypatch, caplog)
     assert "Outreach run summary" in caplog.text, "the summary must survive an exception"
 
 
+def _pin_outreach_config(monkeypatch, *, demo_mode=True,
+                         demo_recipient="demo@example.test",
+                         footer_text="Example Co, 1 Test St, Testville",
+                         unsubscribe_url="https://example.test/unsub"):
+    """
+    Pin every ambient config value the send path reads. ONE place, on purpose.
+
+    This is the fifth bug in this file from ambient state, and the previous four
+    were each fixed by teaching one helper to pin one more value — which is how
+    you get two helpers that both nearly remember. The send path reads exactly
+    these four, so both `_stub_run_deps` and `_run_send_phase` call this rather
+    than keeping their own lists.
+
+    Why it matters concretely: `recipient_for()` RAISES when demo mode is on with
+    no redirect target, and `safe_unsubscribe_url()` refuses a scheme it does not
+    know. So a developer's .env — or the absence of one — decided whether tests
+    passed, which is a fact about the machine and not about the behaviour.
+    """
+    monkeypatch.setattr(outreach, "OUTREACH_DEMO_MODE", demo_mode)
+    monkeypatch.setattr(outreach, "OUTREACH_DEMO_RECIPIENT", demo_recipient)
+    monkeypatch.setattr(outreach, "OUTREACH_FOOTER_TEXT", footer_text)
+    monkeypatch.setattr(outreach, "OUTREACH_UNSUBSCRIBE_URL", unsubscribe_url)
+
+
 def _stub_run_deps(monkeypatch, get_queued=None):
-    """Neutralise every network dependency of run() so the wiring can be tested."""
+    """
+    Neutralise every network dependency of run() so the wiring can be tested.
+
+    The queue DEFAULTS TO ONE ROW, not to empty. run() short-circuits before the
+    blocklist, the budget and the lease when nothing is queued — which is the
+    whole point of that optimisation — so an empty default meant every test of
+    that wiring silently exercised the early exit instead. A test about the lease
+    needs work for the lease to be worth taking.
+
+    Pass `get_queued=lambda *a, **k: []` to test the empty-queue path itself.
+    """
     monkeypatch.setattr(outreach, "AirtableLedgerStore", lambda: "LEDGER")
     monkeypatch.setattr(outreach, "fetch_blocklist", lambda: Blocklist())
     monkeypatch.setattr(outreach, "remaining_daily_budget", lambda *a, **k: 10)
     monkeypatch.setattr(outreach, "find_stranded_claims", lambda *a, **k: [])
-    monkeypatch.setattr(outreach, "get_queued_prospects", get_queued or (lambda *a, **k: []))
+    monkeypatch.setattr(outreach, "get_queued_prospects",
+                        get_queued or (lambda *a, **k: [_row()]))
+    # The queue now defaults to a row, so run() reaches the REAL _send_phase,
+    # which reads config. Pin it here too or the developer's .env decides.
+    _pin_outreach_config(monkeypatch)
 
 
 
@@ -445,15 +498,10 @@ def _run_send_phase(monkeypatch, row, blocklist, write_preview=None,
     monkeypatch.setattr(outreach, "get_queued_prospects", lambda *a, **k: [row])
     monkeypatch.setattr(outreach, "write_preview",
                         write_preview or (lambda *a, **k: "preview.eml"))
-    monkeypatch.setattr(outreach, "OUTREACH_DEMO_MODE", demo_mode)
-    monkeypatch.setattr(outreach, "OUTREACH_DEMO_RECIPIENT", demo_recipient)
-    # The footer pair is pinned for the same reason as the demo pair: read from
-    # config, these tests inherit whatever the developer's .env holds. That bit
-    # concretely — configuring a mailto: opt-out locally made four tests here
-    # fail against a validator that only accepted http(s), which is a fact about
-    # the machine, not about the behaviour under test.
-    monkeypatch.setattr(outreach, "OUTREACH_FOOTER_TEXT", footer_text)
-    monkeypatch.setattr(outreach, "OUTREACH_UNSUBSCRIBE_URL", unsubscribe_url)
+    _pin_outreach_config(
+        monkeypatch, demo_mode=demo_mode, demo_recipient=demo_recipient,
+        footer_text=footer_text, unsubscribe_url=unsubscribe_url,
+    )
     args = outreach.build_parser().parse_args([])
     outreach._send_phase(
         args, ledger="LEDGER", mailer=None, blocklist=blocklist,
@@ -516,7 +564,7 @@ def test_an_empty_queue_exits_zero_not_two(monkeypatch):
     monkeypatch.setattr(outreach, "AirtableLeaseStore", lambda: "LEASE_STORE")
     monkeypatch.setattr(outreach, "acquire_lease", lambda store, **k: LeaseResult(True))
     monkeypatch.setattr(outreach, "release_lease", lambda store, **k: True)
-    _stub_run_deps(monkeypatch)
+    _stub_run_deps(monkeypatch, get_queued=lambda *a, **k: [])
     assert outreach.run(outreach.build_parser().parse_args([])) == outreach.EXIT_OK
 
 
@@ -597,3 +645,80 @@ def test_status_literals_come_from_config_not_string_duplicates():
     assert "STATUS_CONTACTED" in inspect.getsource(OA.mark_contacted)
     assert config.STATUS_APPROVED == "Approved"
     assert config.STATUS_CONTACTED == "Contacted"
+
+
+# --- Idle-run short circuit (added with the cron) -----------------------------
+
+def _idle_run(monkeypatch, queued=None, stranded=0):
+    """Drive run() with a controllable queue, recording which reads happened."""
+    seen = []
+    monkeypatch.setattr(outreach, "preflight", lambda send_mode: [])
+    monkeypatch.setattr(outreach, "NICHES", {"Home Theater": {"table_name": "tblX"}})
+    monkeypatch.setattr(outreach, "get_queued_prospects",
+                        lambda *a, **k: seen.append("queue") or (queued or []))
+    monkeypatch.setattr(outreach, "find_stranded_claims",
+                        lambda *a, **k: seen.append("stranded") or ["rec"] * stranded)
+
+    def forbidden(name):
+        def _f(*a, **k):
+            seen.append(name)
+            raise AssertionError(f"{name} must not run when nothing is queued")
+        return _f
+
+    monkeypatch.setattr(outreach, "fetch_blocklist", forbidden("blocklist"))
+    monkeypatch.setattr(outreach, "acquire_lease", forbidden("lease"))
+    monkeypatch.setattr(outreach, "remaining_daily_budget", forbidden("budget"))
+    monkeypatch.setattr(outreach, "AirtableLedgerStore", lambda: "LEDGER")
+    monkeypatch.setattr(outreach, "AirtableLeaseStore", lambda: "LEASE")
+    rc = outreach.run(outreach.build_parser().parse_args([]))
+    return rc, seen
+
+
+def test_an_empty_queue_skips_the_blocklist_lease_and_budget(monkeypatch):
+    """
+    A cron makes idle runs the common case. Before this, an idle run cost ~22
+    Airtable requests to discover there was nothing to do — 14 of them the
+    blocklist, which is uncached by design. Reading the queue first costs 2.
+    """
+    rc, seen = _idle_run(monkeypatch)
+    assert rc == outreach.EXIT_OK
+    assert "blocklist" not in seen
+    assert "lease" not in seen
+    assert "budget" not in seen
+
+
+def test_the_stranded_scan_still_runs_when_nothing_is_queued(monkeypatch):
+    """
+    A claim left behind by a run that died must be surfaced even on a day nobody
+    queues anything, or it stays invisible for as long as the queue stays empty.
+    """
+    rc, seen = _idle_run(monkeypatch, stranded=2)
+    assert rc == outreach.EXIT_OK
+    assert "stranded" in seen
+
+
+def test_skipping_the_blocklist_only_happens_when_there_is_nothing_to_send(monkeypatch):
+    """
+    The fail-closed contract is unchanged: the blocklist exists to prevent
+    SENDS, and it must still be fetched whenever there is one to prevent.
+    """
+    reached = []
+    monkeypatch.setattr(outreach, "preflight", lambda send_mode: [])
+    monkeypatch.setattr(outreach, "NICHES", {"Home Theater": {"table_name": "tblX"}})
+    monkeypatch.setattr(outreach, "get_queued_prospects", lambda *a, **k: [_row()])
+    monkeypatch.setattr(outreach, "AirtableLedgerStore", lambda: "LEDGER")
+    monkeypatch.setattr(outreach, "AirtableLeaseStore", lambda: "LEASE")
+    monkeypatch.setattr(outreach, "remaining_daily_budget", lambda *a, **k: 5)
+    monkeypatch.setattr(outreach, "find_stranded_claims", lambda *a, **k: [])
+    monkeypatch.setattr(outreach, "acquire_lease",
+                        lambda *a, **k: LeaseResult(True))
+    monkeypatch.setattr(outreach, "release_lease", lambda *a, **k: True)
+    monkeypatch.setattr(outreach, "_send_phase", lambda *a, **k: False)
+
+    def spy_blocklist():
+        reached.append("blocklist")
+        return Blocklist()
+
+    monkeypatch.setattr(outreach, "fetch_blocklist", spy_blocklist)
+    outreach.run(outreach.build_parser().parse_args([]))
+    assert reached == ["blocklist"], "a queued row must still fetch the suppression list"

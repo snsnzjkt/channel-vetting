@@ -115,6 +115,34 @@ def _make_session(
 AIRTABLE = _make_session()
 YOUTUBE = _make_session()
 
+# Gmail send. The retry policy here is the STRICTEST in this module, because a
+# repeated request costs a duplicate EMAIL — the one failure in this pipeline
+# that cannot be deleted, refunded, or apologised away after the fact.
+#
+#   - POST is excluded (IDEMPOTENT_METHODS), like AIRTABLE. Sending is the only
+#     thing this session does, so in practice nothing retries at all. That is
+#     intended: `outreach_ledger` classifies an ambiguous outcome as MaybeSent
+#     and hands it to a human, which is strictly better than a machine deciding
+#     to try again.
+#   - `read_retries=0`, like INFLUENCERS and for a sharper version of the same
+#     reason: a read retry means the request WAS sent and the response was lost,
+#     so repeating it may deliver a second copy. INFLUENCERS avoids buying a
+#     second credit; here it avoids emailing a creator twice.
+#   - `respect_retry_after_header=False`, like INFLUENCERS: urllib3 sleeps the
+#     header verbatim with no ceiling, which would park a run inside the adapter
+#     where neither the daily cap nor the claim lease can see it.
+#
+# Deliberately NOT `google-api-python-client`: that uses httplib2, which the
+# autouse guard in tests/conftest.py (patched at `HTTPAdapter.send`, the
+# `requests` chokepoint) cannot see. A missed mock would have emailed a real
+# creator from a test run. Going through a requests Session means the existing
+# guard covers the mailer for free, and `safe_body()` applies to its errors.
+GMAIL = _make_session(
+    allowed_methods=IDEMPOTENT_METHODS,
+    respect_retry_after=False,
+    read_retries=0,
+)
+
 # 429 is deliberately ABSENT from this session's retry set.
 #
 # influencers.club overloads one status onto two conditions that need

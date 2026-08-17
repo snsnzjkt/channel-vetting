@@ -51,6 +51,29 @@ QUOTA_COST_ENRICHMENT = (
 SEARCH_CACHE_FILE = "search_cache.json"
 QUOTA_LOG_FILE = "quota_log.json"
 
+def env_flag(name: str, *, default: bool) -> bool:
+    """
+    Read a boolean env var so that a HALF-CONFIGURED environment fails in the
+    direction the caller nominates.
+
+    `default` is not just the value when unset — it decides which literal is
+    load-bearing. With `default=False` only "true" enables; with `default=True`
+    only "false" disables. Everything else — unset, empty, "0", "no", "off", a
+    typo like "fasle" — leaves the flag at its default.
+
+    That asymmetry is the point, and the two current callers want it pointed
+    opposite ways for the same reason: each defaults toward the harmless
+    outcome FOR ITS OWN FEATURE. A browser step that fails to start costs some
+    email coverage; a demo gate that fails to start emails real creators.
+    Making the safe direction an argument means the next flag has to state
+    which way it fails instead of copying whichever neighbour it saw.
+    """
+    raw = (os.getenv(name) or "").strip().lower()
+    if default:
+        return raw != "false"
+    return raw == "true"
+
+
 # --- Pipeline behavior ---
 # Seconds to sleep between individual API calls, to stay well under
 # per-second rate limits and be a good API citizen.
@@ -58,6 +81,19 @@ API_SLEEP_SECONDS = float(os.getenv("API_SLEEP_SECONDS", 0.5))
 
 # Airtable "Status" single-select default for newly discovered channels.
 DEFAULT_STATUS = "New"
+# The other two members of that same hand-maintained single-select, named here
+# rather than spelled at each use site. Same reasoning that made
+# outreach_ledger import scoring.QUALIFIED instead of re-typing "Qualified":
+# two copies of an option name on a schema humans edit is how you end up with
+# `Canada` AND `canada`.
+#
+# The QUERY side is the urgent half of this. A typo in the WRITE
+# ("Contacted") sends typecast=False and 422s loudly. A typo in the filter
+# ("Aproved") returns HTTP 200 with ZERO rows and no error at all — measured
+# live 2026-08-14 — so the run reports an empty queue and silently sends
+# nothing, forever.
+STATUS_APPROVED = "Approved"
+STATUS_CONTACTED = "Contacted"
 SOURCE_LABEL = "YouTube Discovery Pipeline"
 
 # --- Daily prospect caps ---
@@ -238,3 +274,75 @@ INFLUENCERS_TEST_DISCOVERY_CREDITS = float(
 # persistent server-side exclusion list (not yet wired — see the discovery
 # module).
 INFLUENCERS_MAX_EXCLUDE_HANDLES = 10_000
+
+
+# --- Outreach: review-to-send system ---
+# Tables created 2026-08-14 in the same base as the niche tables. IDs are the
+# defaults so a fresh clone works without a full .env; override per environment.
+AIRTABLE_TABLE_OUTREACH_LOG = os.getenv("AIRTABLE_TABLE_OUTREACH_LOG", "tblcKnLKAbdjUCH68")
+AIRTABLE_TABLE_AUDIT_TRAIL = os.getenv("AIRTABLE_TABLE_AUDIT_TRAIL", "tblTjGTRHCAEnq2qq")
+AIRTABLE_TABLE_OUTREACH_LOCK = os.getenv("AIRTABLE_TABLE_OUTREACH_LOCK", "tbldWjtDW8EOCT0V2")
+AIRTABLE_TABLE_HOME_THEATER_OUTREACH = os.getenv("AIRTABLE_TABLE_HOME_THEATER_OUTREACH", "tblOChqk6iVlRxwkp")
+AIRTABLE_TABLE_LIFESTYLE_SOFA_OUTREACH = os.getenv("AIRTABLE_TABLE_LIFESTYLE_SOFA_OUTREACH", "tblk6Tml6PO90wLZz")
+
+# DEMO MODE — the project is pre-launch and must not email real creators.
+#
+# Defaults to TRUE, and that direction is the whole point. Every other guard in
+# this system (--dry-run being the default, the daily cap, the claim ledger)
+# protects against a MISTAKE. This one protects against the system working
+# exactly as designed at a time when nobody has agreed it should run: a cold
+# email to a real creator cannot be recalled, apologised away, or deleted from
+# their inbox.
+#
+# It is deliberately a separate switch from --dry-run rather than a stricter
+# default on it. --dry-run lives on the command line, where it is one typo or
+# one copied-from-the-README command away from being overridden; this lives in
+# the environment, so leaving demo mode requires a deliberate edit to .env or a
+# CI secret that someone has to justify. Two independent gates, and the send
+# path must clear BOTH.
+#
+# Flipping this to "false" is the moment this project starts contacting real
+# people. Do not do it to make a test pass, and do not do it before the
+# blocking prerequisites in OUTREACH_PLAN.md are signed off: a dedicated warmed
+# sending domain, the CAN-SPAM/PECR footer, and confirmed Gmail auth.
+OUTREACH_DEMO_MODE = env_flag("OUTREACH_DEMO_MODE", default=True)
+
+# In demo mode every message is REDIRECTED here regardless of the prospect's
+# real address, so an end-to-end rehearsal exercises the true send path —
+# rendering, MIME assembly, transport, the ledger write — without a creator
+# ever receiving anything. Unset means demo mode cannot send at all, which is
+# the safe failure: a missing test address must never fall back to the real one.
+OUTREACH_DEMO_RECIPIENT = os.getenv("OUTREACH_DEMO_RECIPIENT", "")
+
+# Per prospect day, counted from the Outreach Log's Claimed At, NOT per run.
+# A per-run cap is not a cap: five runs before lunch at 50 each is 250 emails.
+OUTREACH_DAILY_CAP = int(os.getenv("OUTREACH_DAILY_CAP", 10))
+OUTREACH_MAX_PER_RUN = int(os.getenv("OUTREACH_MAX_PER_RUN", 10))
+# Pacing between sends. 60 identical cold emails fired in seconds from one
+# mailbox is a spam-filter signal in its own right.
+OUTREACH_SLEEP_SECONDS = float(os.getenv("OUTREACH_SLEEP_SECONDS", 2))
+# A claim still unsettled after this long MAY have been delivered. Surfaced by
+# --reconcile for a human to settle; never auto-retried.
+OUTREACH_STRANDED_AFTER_MINUTES = int(os.getenv("OUTREACH_STRANDED_AFTER_MINUTES", 60))
+# Advisory lease take-over threshold. See the Outreach Lock table description:
+# that row is NOT a mutex, and the real serialisation is the CI concurrency
+# group. Without a take-over threshold one killed run locks outreach forever.
+OUTREACH_LEASE_STALE_MINUTES = int(os.getenv("OUTREACH_LEASE_STALE_MINUTES", 60))
+
+# Follow-up ("respam"): re-contact a NON-replier months later. Bounded by both
+# a minimum age and a hard ceiling on total touches — prior Sent rows are the
+# counter, so it cannot be reset by editing a field. A follow-up cadence with
+# no ceiling is indistinguishable from spam.
+OUTREACH_RESPAM_MIN_DAYS = int(os.getenv("OUTREACH_RESPAM_MIN_DAYS", 90))
+OUTREACH_MAX_TOUCHES = int(os.getenv("OUTREACH_MAX_TOUCHES", 2))
+
+# --- Outreach mail transport ---
+# No defaults: --send refuses to start without these, which turns "we forgot
+# the unsubscribe link" from a legal exposure into a startup failure.
+GMAIL_SENDER_EMAIL = os.getenv("GMAIL_SENDER_EMAIL", "")
+# Base64 rather than a path: CI cannot supply a file, and a service-account
+# private key should not be written to a runner's disk where a later step
+# can read it.
+GMAIL_CREDENTIALS_B64 = os.getenv("GMAIL_CREDENTIALS_B64", "")
+OUTREACH_FOOTER_TEXT = os.getenv("OUTREACH_FOOTER_TEXT", "")
+OUTREACH_UNSUBSCRIBE_URL = os.getenv("OUTREACH_UNSUBSCRIBE_URL", "")

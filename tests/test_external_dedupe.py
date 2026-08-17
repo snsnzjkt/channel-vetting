@@ -46,10 +46,19 @@ def cache_path(tmp_path, monkeypatch):
 
 def _stub_fetch(monkeypatch, handles_by_table):
     """Replace the per-table Airtable pagination with canned handle sets
-    (names left empty — the cache/index tests below only exercise handles)."""
+    (names left empty — the cache/index tests below only exercise handles).
+
+    Padded to len(EXTERNAL_TABLES) with empty sets. These tests are about
+    atomic cache WRITES, not about how many tables exist, so they must not
+    break every time a table is registered — which is exactly what happened
+    when the two "Prospect Outreach" tables were added and the fixed-length
+    iterator raised StopIteration mid-fetch.
+    """
     import external_dedupe
 
-    calls = iter(handles_by_table)
+    padded = list(handles_by_table)
+    padded += [set()] * max(0, len(external_dedupe.EXTERNAL_TABLES) - len(padded))
+    calls = iter(padded)
     monkeypatch.setattr(
         external_dedupe, "_fetch_table_entries",
         lambda table_id, link_field, name_field: (set(next(calls)), set()),

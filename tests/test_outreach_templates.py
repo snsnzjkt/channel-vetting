@@ -225,12 +225,42 @@ def test_unsubscribe_is_a_working_link_in_the_html_part():
 
 @pytest.mark.parametrize(
     "hostile",
-    ["javascript:alert(1)", "data:text/html,<script>x</script>", "/relative/path", "ftp://x/y"],
+    [
+        "javascript:alert(1)",
+        "data:text/html,<script>x</script>",
+        "/relative/path",
+        "ftp://x/y",
+        # mailto: is accepted as a SCHEME, so the payload must still be an
+        # address — otherwise widening it would have smuggled script back in.
+        "mailto:javascript:alert(1)",
+        "mailto:not-an-address",
+    ],
 )
 def test_hostile_unsubscribe_url_raises_rather_than_being_linked(hostile):
     """This value is config, but config is human-edited and lands in an href."""
     with pytest.raises(T.TemplateError):
         _render(unsubscribe_url=hostile)
+
+
+@pytest.mark.parametrize(
+    "opt_out",
+    [
+        "mailto:james@valenciatheaterseating.com",
+        "mailto:james@valenciatheaterseating.com?subject=Unsubscribe",
+        "https://airtable.com/shrABC123",
+        "http://example.com/unsub",
+    ],
+)
+def test_both_can_spam_opt_out_mechanisms_are_accepted(opt_out):
+    """
+    CAN-SPAM accepts an EMAIL-based opt-out as well as a web one. mailto: is the
+    one that needs no form, no hosting and nobody else's permission, which is
+    decisive when the sending domain belongs to a different organisation than
+    whoever is configuring this.
+    """
+    out = _render(unsubscribe_url=opt_out)
+    assert f'href="{opt_out}"' in out["html"] or opt_out.replace("&", "&amp;") in out["html"]
+    assert opt_out in out["text"]
 
 
 def test_footer_is_escaped_and_control_stripped():

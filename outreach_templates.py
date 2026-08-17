@@ -53,6 +53,11 @@ _CONTROL_CHARS = re.compile(r"[\r\n\x00]")
 # the process rather than a guarantee.
 _CHANNEL_ID_RE = re.compile(r"UC[A-Za-z0-9_-]{22}")
 _HTTP_URL_RE = re.compile(r"^https?://[^\s<>\"']+$")
+# CAN-SPAM accepts an EMAIL-based opt-out as well as a web one, and a mailto:
+# needs no form, no hosting and nobody's permission — which matters when the
+# sending domain belongs to someone else. Deliberately narrow: an address with
+# an optional ?subject=/?body= query, and nothing that could carry script.
+_MAILTO_RE = re.compile(r"^mailto:[^\s<>\"'@]+@[^\s<>\"'?]+(?:\?[^\s<>\"']*)?$")
 
 _SAFE_CHANNEL_URL = re.compile(
     r"^https://www\.youtube\.com/(?:channel/UC[A-Za-z0-9_-]{22}|@[A-Za-z0-9._-]+)$"
@@ -94,20 +99,30 @@ def safe_channel_url(url: str, channel_id: str = "") -> str:
 
 def safe_unsubscribe_url(url: str) -> str:
     """
-    Return an opt-out URL safe to put in an href, or raise.
+    Return an opt-out link safe to put in an href, or raise.
 
-    Only http(s) is accepted. `javascript:` and `data:` in a link inside mail
-    DKIM-signed by the brand's own domain is the worst place to be lax, and
-    this value reaches here from config — which a human edits, and which the
-    send path refuses to start without, so it is guaranteed to be present and
-    therefore guaranteed to be rendered.
+    Accepts http(s) OR mailto:. Both are valid CAN-SPAM opt-out mechanisms, and
+    mailto: is the one that needs no form, no hosting and nobody else's
+    permission — which is decisive when the sending domain belongs to a
+    different organisation than the person configuring this.
+
+    Everything else is refused, `javascript:` and `data:` above all: a link
+    inside mail DKIM-signed by the brand's own domain is the worst place in the
+    system to be lax about a scheme. This value comes from config, which a human
+    edits, and the send path refuses to start without it — so it is guaranteed
+    to be present and therefore guaranteed to be rendered.
+
+    NOTE the operational difference, which this function cannot enforce. A web
+    form pointed at the DO NOT CONTACT table suppresses the address by itself. A
+    mailto: only produces an email in someone's inbox, and a human still has to
+    act on it — an opt-out you receive and ignore is worse than not offering one.
     """
     candidate = strip_control_chars(url).strip()
-    if _HTTP_URL_RE.match(candidate):
+    if _HTTP_URL_RE.match(candidate) or _MAILTO_RE.match(candidate):
         return candidate
     raise TemplateError(
-        f"unsubscribe URL {url!r} is not a plain http(s) URL; refusing to put "
-        f"it in a link"
+        f"unsubscribe URL {url!r} is neither an http(s) URL nor a mailto: "
+        f"address; refusing to put it in a link"
     )
 
 

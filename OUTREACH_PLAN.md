@@ -656,8 +656,26 @@ these two can email a creator:
 
 | Automation | Trigger | Does |
 |---|---|---|
-| `HT · SEND step 1 of 2` (`wfly5pft8ELxoWI3L`) | `Qualified` + `Approved` + `Send Requested At` set + `Last Send State` empty | DNC check → claim row. **Stops there.** |
-| `LS · SEND step 1 of 2` (`wflAjlxnKuNzL2oJa`) | same, Lifestyle field IDs | same, writes the `Lifestyle Prospect` link |
+| `HT · SEND (demo)` (`wfly5pft8ELxoWI3L`) | `Qualified` + `Approved` + `Send Requested At` set + `Last Send State` empty | DNC → claim → **send** → settle → contacted. Complete. |
+| `LS · SEND` (`wflAjlxnKuNzL2oJa`) | same, Lifestyle field IDs | DNC → claim → settle → contacted. **No send step yet.** |
+
+Both are OFF, and **LS must stay off**: its chain currently runs claim → settle →
+contacted with nothing between them, so enabling it would write `Send State = Sent`
+and `Status = Contacted` having sent nothing — and the ever-sent guard, being
+campaign-independent and keyed on Channel ID, would then suppress those creators
+permanently on the strength of an email nobody received. The Gmail step goes
+**between claim and settle**.
+
+That half-built shape is a deliberate, temporary exception to the rule stated
+below, taken only once HT was already working: hand-wiring four steps blind is its
+own correctness risk, and LS's settle step now serves as a reference to copy from.
+It is the one place in this system where a lie is one toggle away, which is why the
+automation's own name reads `DO NOT TURN ON YET`.
+
+HT's `To` is the demo address and its sending account is a Henderson one, not
+James's. Both are deliberate for the demo phase and both must change before a real
+creator is contacted — see the ownership note below for what the account switch
+costs.
 
 **Why this exists at all, when `outreach.py` already sends.** The Gmail mailbox
 belongs to Valencia, not to us. `mailer.py` needs a refresh token, and asking a
@@ -668,23 +686,34 @@ token never leaves Airtable. The user's constraint was explicit: *"I do not want
 to ask him for any tokens."* That is the right call, and it is what these two
 automations serve.
 
-**They are deliberately HALF an automation, and that is the interesting part.**
-Each ends at the claim. Neither sends, and neither marks anything `Sent` or
-`Contacted`. The `gmailSendEmail` node **cannot be authored through the API at
-all**, which was established by trying both ways rather than assumed:
+**The `gmailSendEmail` node can only be authored for an account the API
+connection's own owner controls.** This took three attempts to pin down, and the
+first conclusion drawn from it was wrong:
 
 - Omitting the account → `missingRequiredInput (inputKey: externalAccountId)`.
   The field is not optional; a node with an empty picker cannot be created.
-- Supplying the only account `list_external_accounts` returns (the base's Google
-  Sheets connection, `eac9i3wt9FxkSKRmG`) as a stand-in →
-  `INVALID_PERMISSIONS: You are not permitted to perform this operation`. An
-  external account cannot be attached to a node by a connection that doesn't own
-  it.
+- Supplying the base's Google Sheets connection (`eac9i3wt9FxkSKRmG`) as a
+  stand-in → `INVALID_PERMISSIONS`.
+- Supplying **James's** Gmail connection (`eacpkrBxF8KcAl5cw`), read straight out
+  of a node he had just configured → `INVALID_PERMISSIONS` as well.
+- Supplying the **Henderson** Gmail connection (`eacwOEr3G3sf0x1lN`), owned by
+  the same person who authorised the API connection → **accepted**.
 
-James's connected Gmail is scoped to **his** Airtable login and is invisible
-here, so the send step has to be added in the UI by a human who can see it.
+So the rule is ownership, not "the API cannot do Gmail steps". The intermediate
+conclusion — recorded here in PR #19 as *"cannot be authored through the API at
+all"* — was an over-generalisation from two failures that happened to share a
+cause. **The operational consequence is the part that matters: switching the send
+back to James's account for real sends makes that automation un-writable by the
+API again**, because `update_automation` is a full replacement and every payload
+must carry the account id. Plan any further structural edits *before* that
+switch, or expect to make them by hand.
+
 `AIRTABLE_SEND_STEPS.md` carries the body text for both niches, generated from
-`outreach_templates.py` so the transcription cannot drift on the way in.
+`outreach_templates.py` so the transcription cannot drift on the way in. It
+earned its place: the hand-pasted HT body came back with the `Channel Name` token
+inserted **twice** (`Hey Bane TechBane Tech,`) and `To` left empty entirely —
+both invisible until the chain was read back through `get_automation`, and
+neither the kind of thing a glance at the UI catches.
 
 The choice was therefore between two incomplete shapes, and they fail in opposite
 directions:

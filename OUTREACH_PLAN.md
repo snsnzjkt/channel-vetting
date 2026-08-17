@@ -640,6 +640,86 @@ and copy it across — that field type cannot be created through the API.
 **Queueing writes no audit row.** `Send Requested At` IS the timestamped record
 of the queueing action; a second row would duplicate it.
 
+### The Airtable send path (2026-08-18) — a SECOND sender, and what it costs
+
+Two more automations bring the count to **ten**, and unlike the eight above
+these two can email a creator:
+
+| Automation | Trigger | Does |
+|---|---|---|
+| `HT · SEND step 1 of 2` (`wfly5pft8ELxoWI3L`) | `Qualified` + `Approved` + `Send Requested At` set + `Last Send State` empty | DNC check → claim row. **Stops there.** |
+| `LS · SEND step 1 of 2` (`wflAjlxnKuNzL2oJa`) | same, Lifestyle field IDs | same, writes the `Lifestyle Prospect` link |
+
+**Why this exists at all, when `outreach.py` already sends.** The Gmail mailbox
+belongs to Valencia, not to us. `mailer.py` needs a refresh token, and asking a
+client's staff to generate and hand over a credential for their own mailbox is a
+request that should not be made when there is an alternative — James connects his
+Google account to Airtable himself, through Google's own consent screen, and the
+token never leaves Airtable. The user's constraint was explicit: *"I do not want
+to ask him for any tokens."* That is the right call, and it is what these two
+automations serve.
+
+**They are deliberately HALF an automation, and that is the interesting part.**
+Each ends at the claim. Neither sends, and neither marks anything `Sent` or
+`Contacted`. The `gmailSendEmail` action requires an `externalAccountId`, and
+James's connected Gmail is scoped to **his** Airtable login — `list_external_accounts`
+on the API connection that built these returns only a Google Sheets account, so
+the node cannot be authored from here at all.
+
+The choice was therefore between two incomplete shapes, and they fail in opposite
+directions:
+
+- **Full chain with a placeholder where the send goes.** Turning it on early
+  writes `Send State = Sent` and `Status = Contacted` having sent nothing. The
+  ledger then *lies*, and the ever-sent guard suppresses that creator forever on
+  the strength of an email they never received. `noOp` turned out not to be a
+  creatable node type anyway — a useful accident.
+- **Stop at the claim.** Turning it on early writes `Send State = Claimed` and
+  nothing else, which `outreach_ledger` reads as MAYBE-SENT and which surfaces in
+  the **STRANDED** column of the Send ledger page. Visible, recoverable, and never
+  a false `Sent`.
+
+The second is the shape that was built. **A half-built sender must fail toward
+"we don't know" and never toward "we sent it."**
+
+**What the node ORDER preserves.** The trigger gates on `Qualification =
+Qualified` AND `Status = Approved` AND a human-stamped `Send Requested At` AND no
+prior send — so a flagged or unreviewed row cannot reach a send. DO NOT CONTACT is
+checked **before** the send, and a hit writes `Outreach Ineligible Reason` and
+stops. The claim is written **before** the send. Adding the Gmail action *after*
+the claim keeps all three; adding it before the claim throws away the last one.
+
+**What it gives up against `python outreach.py` — state this to anyone who asks
+whether the two are equivalent, because they are not:**
+
+- **The claim-verify tiebreak.** Airtable cannot re-read its own write and stand
+  down, so two near-simultaneous triggers can both claim and both send. The
+  human ticking one checkbox at a time is the only thing preventing it.
+- **The prospect-day send cap.** No `count_claimed_on` equivalent.
+- **Per-address dedupe.** An agency address shared across several channels gets
+  one email per channel.
+- **Two of the three DNC keys.** `do_not_contact.py` matches handle, email *and*
+  name (any hit blocks); `findRecords` here matches **email only** — and email is
+  the weakest of the three, blank for a large share of that table. This is a
+  backstop, not a port.
+- **`csv_unsafe()` on the way out.** A stored `'+promo@studio.com` is sent
+  verbatim rather than being repaired or rejected.
+
+At roughly ten sends a month with a human ticking each row, the human is the cap
+and these gaps are tolerable. **They stop being tolerable at volume**, and the
+migration back is not a rewrite: `outreach.py` is already the complete sender, so
+the Airtable path can be switched off the day a service mailbox exists that we
+can hold a token for.
+
+**Both stay in DEMO until someone decides otherwise.** The `To` field is
+`edrine.e@hendersonassociates.ca`, not the prospect's `Email`. That is the
+Airtable-side equivalent of `OUTREACH_DEMO_MODE`, and it is weaker than the code
+gate in exactly one way worth naming: `recipient_for()` **raises** when the demo
+recipient is unset, whereas an Airtable field can simply be re-pointed at
+`Email` by anyone with edit access and no one is told. There is no structural fix
+for that inside Airtable — the mitigation is that step 2 is documented in the
+automation's own description, where the person editing it will read it.
+
 ## Requirement 3c — The follow-up ("respam") button
 
 Resend the same email months later to someone who never replied. Implemented in

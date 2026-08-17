@@ -657,25 +657,16 @@ these two can email a creator:
 | Automation | Trigger | Does |
 |---|---|---|
 | `HT · SEND (demo)` (`wfly5pft8ELxoWI3L`) | `Qualified` + `Approved` + `Send Requested At` set + `Last Send State` empty | DNC → claim → **send** → settle → contacted. Complete. |
-| `LS · SEND` (`wflAjlxnKuNzL2oJa`) | same, Lifestyle field IDs | DNC → claim → settle → contacted. **No send step yet.** |
+| `LS · SEND (demo)` (`wflAjlxnKuNzL2oJa`) | same, Lifestyle field IDs | same, Lifestyle copy, writes the `Lifestyle Prospect` link |
 
-Both are OFF, and **LS must stay off**: its chain currently runs claim → settle →
-contacted with nothing between them, so enabling it would write `Send State = Sent`
-and `Status = Contacted` having sent nothing — and the ever-sent guard, being
-campaign-independent and keyed on Channel ID, would then suppress those creators
-permanently on the strength of an email nobody received. The Gmail step goes
-**between claim and settle**.
+Both chains are complete and both are **OFF**. LS passed through a half-built
+`claim → settle → contacted` state for one step of the build — a shape that would
+have written `Sent` having sent nothing if enabled — and it no longer exists; the
+send step now sits between the claim and the settle on both niches.
 
-That half-built shape is a deliberate, temporary exception to the rule stated
-below, taken only once HT was already working: hand-wiring four steps blind is its
-own correctness risk, and LS's settle step now serves as a reference to copy from.
-It is the one place in this system where a lie is one toggle away, which is why the
-automation's own name reads `DO NOT TURN ON YET`.
-
-HT's `To` is the demo address and its sending account is a Henderson one, not
-James's. Both are deliberate for the demo phase and both must change before a real
-creator is contacted — see the ownership note below for what the account switch
-costs.
+For both: `To` is the demo address and the sending account is a Henderson one, not
+James's. Deliberate for the demo phase, and both must change before a real creator
+is contacted — see the ownership note below for what the account switch costs.
 
 **Why this exists at all, when `outreach.py` already sends.** The Gmail mailbox
 belongs to Valencia, not to us. `mailer.py` needs a refresh token, and asking a

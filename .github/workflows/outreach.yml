@@ -1,14 +1,38 @@
 name: Outreach
 
-# SCHEDULED, as of 2026-08-18 — read this before touching the cron.
+# DISPATCH-ONLY, as of 2026-08-18. The cron is parked — see "WHY THE CRON IS
+# PARKED" below before restoring it.
 #
 # WHAT MAKES THIS SAFE TODAY IS NOT THE SCHEDULE, IT IS THAT SENDING IS
 # BLOCKED. OUTREACH_DEMO_MODE defaults true (so every message is redirected)
 # and GMAIL_CREDENTIALS_B64 is unset (so --send refuses to start at all). The
-# moment BOTH change, this cron starts emailing real creators with nobody
+# moment BOTH change, a restored cron starts emailing real creators with nobody
 # dispatching anything. That is the intent, and it is worth saying out loud:
 # setting the credential is the act that arms a scheduled sender, not a
 # configuration detail.
+#
+# WHY THE CRON IS PARKED. It ran once (2026-08-17 19:33Z) and failed, and it
+# would have failed every half hour thereafter, because NONE of the outreach
+# secrets exist in this repo — OUTREACH_FOOTER_TEXT, OUTREACH_UNSUBSCRIBE_URL,
+# OUTREACH_DEMO_RECIPIENT, GMAIL_SENDER_EMAIL and GMAIL_CREDENTIALS_B64 are all
+# empty in CI and live only in a local `.env`. The three abort messages were
+# exactly the ones the guards exist to produce, so this is the design working:
+# it refused to send rather than emailing a real prospect with no footer and no
+# opt-out.
+#
+# But a workflow that fails 16 times a day teaches people to ignore red CI, and
+# red CI is where the NEXT real failure will be reported. Meanwhile the sending
+# path in use is a pair of Airtable automations (HT · SEND / LS · SEND) driving
+# James's connected Google account, precisely so nobody has to hand over a
+# refresh token — so there is currently no Python sender to schedule.
+#
+# TO RESTORE: add the five secrets above, run once via workflow_dispatch with
+# mode=dry-run, read the uploaded previews, then re-add
+#   schedule:
+#     - cron: "*/30 13-21 * * 1-5"
+# and read the WEEKDAYS AND BUSINESS HOURS note below, which still applies.
+# Do not restore it merely to "turn outreach back on" — that cron plus a
+# credential is an armed sender.
 #
 # The guards that remain once it IS armed, and none of them are the schedule:
 #   - only Qualification = Qualified AND Status = Approved AND a human-stamped
@@ -28,8 +52,6 @@ name: Outreach
 # inside a working day) and is NOT acceptable for channel-vetting.yml, whose
 # 09:00 UTC slot has to keep landing on the same calendar day in two zones.
 on:
-  schedule:
-    - cron: "*/30 13-21 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -178,6 +200,11 @@ jobs:
           # previews nobody reads and never clear the queue, which is the
           # opposite of the point. Sending stays blocked by demo mode and the
           # missing credential, not by the mode flag — see the header.
+          #
+          # The schedule branch is INERT while the cron is parked (event_name
+          # can only be workflow_dispatch), and is kept deliberately so that
+          # restoring the cron is a one-line change rather than a re-derivation
+          # of the null-inputs trap above. Do not "clean it up".
           MODE: ${{ github.event_name == 'schedule' && 'send' || inputs.mode }}
           LIMIT: ${{ inputs.limit }}
           NICHE: ${{ inputs.niche }}

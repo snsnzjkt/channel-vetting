@@ -1,15 +1,35 @@
 name: Outreach
 
-# MANUAL ONLY, ON PURPOSE.
+# SCHEDULED, as of 2026-08-18 — read this before touching the cron.
 #
-# There is deliberately NO `schedule:` here, unlike channel-vetting.yml.
-# Discovery writes rows into a table a human reviews; this workflow sends
-# email to third parties, and that is not an action to put on a cron before
-# anyone has agreed the copy, the sending domain, and the legal footer. Add a
-# cron only after the blocking prerequisites in OUTREACH_PLAN.md are signed
-# off — and when you do, read the day-of-week note in channel-vetting.yml
-# first, because the same UTC-vs-prospect-day alignment applies.
+# WHAT MAKES THIS SAFE TODAY IS NOT THE SCHEDULE, IT IS THAT SENDING IS
+# BLOCKED. OUTREACH_DEMO_MODE defaults true (so every message is redirected)
+# and GMAIL_CREDENTIALS_B64 is unset (so --send refuses to start at all). The
+# moment BOTH change, this cron starts emailing real creators with nobody
+# dispatching anything. That is the intent, and it is worth saying out loud:
+# setting the credential is the act that arms a scheduled sender, not a
+# configuration detail.
+#
+# The guards that remain once it IS armed, and none of them are the schedule:
+#   - only Qualification = Qualified AND Status = Approved AND a human-stamped
+#     `Send Requested At` is eligible, so a cron with an empty queue sends
+#     nothing no matter how often it runs;
+#   - OUTREACH_DAILY_CAP is counted from the Outreach Log per PROSPECT DAY, not
+#     per run — which is exactly why running 16 times a day is safe. Ten runs
+#     and one run see the same ten-send ceiling;
+#   - claim-verify-send, the lease, and the `concurrency` group below.
+#
+# WEEKDAYS AND BUSINESS HOURS, for a different reason than channel-vetting.yml.
+# There the point was not ageing leads over a weekend. Here it is that a send
+# is irreversible: run it when somebody is awake to notice a bad batch and stop
+# it. `*/30 13-21 * * 1-5` is 09:00-17:00 America/Toronto during EDT and
+# 08:00-16:00 during EST — the cron field is UTC and cannot follow DST, so the
+# window drifts by an hour twice a year. That is acceptable here (both spans sit
+# inside a working day) and is NOT acceptable for channel-vetting.yml, whose
+# 09:00 UTC slot has to keep landing on the same calendar day in two zones.
 on:
+  schedule:
+    - cron: "*/30 13-21 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -149,7 +169,16 @@ jobs:
 
       - name: Run outreach
         env:
-          MODE: ${{ inputs.mode }}
+          # `inputs` is NULL on a schedule event — a workflow_dispatch input's
+          # `default:` applies to dispatch only. channel-vetting.yml documents
+          # this trap and got it wrong once already, so resolve on event_name
+          # rather than on the input.
+          #
+          # A SCHEDULED run means --send. A dry run on a cron would render
+          # previews nobody reads and never clear the queue, which is the
+          # opposite of the point. Sending stays blocked by demo mode and the
+          # missing credential, not by the mode flag — see the header.
+          MODE: ${{ github.event_name == 'schedule' && 'send' || inputs.mode }}
           LIMIT: ${{ inputs.limit }}
           NICHE: ${{ inputs.niche }}
         run: |

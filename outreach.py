@@ -335,6 +335,40 @@ def run(args) -> int:
             logger.error("ABORTING: %s", e)
             return EXIT_ABORTED
 
+    # --- Nothing queued? Stop here, cheaply. ------------------------------------
+    # A cron makes IDLE runs the common case, and an idle run used to cost ~22
+    # Airtable requests before discovering there was nothing to do — 14 of them
+    # the blocklist, which is uncached by design and re-fetched every run.
+    # Reading the queue first costs 2 and answers the question.
+    #
+    # Skipping the blocklist here does NOT weaken the fail-closed contract: it
+    # exists to prevent SENDS, and with an empty queue there are none. It is
+    # still fetched before any send below. Same for the lease — an idle run that
+    # never sends has no reason to contend for it, which also stops a frequent
+    # cron from competing with a real run for the base's 5 req/s.
+    #
+    # The stranded scan still runs. A claim left behind by a run that died must
+    # be surfaced even on a day nobody queues anything, or it is invisible for
+    # exactly as long as the queue stays empty.
+    try:
+        queued_total = sum(
+            len(get_queued_prospects(cfg["table_name"]))
+            for niche, cfg in NICHES.items()
+            if not args.niche or niche in args.niche
+        )
+    except LedgerUnavailable as e:
+        logger.error("ABORTING: could not read the outreach queue: %s", e)
+        return EXIT_ABORTED
+
+    if queued_total == 0:
+        stranded = len(find_stranded_claims(ledger, OUTREACH_STRANDED_AFTER_MINUTES))
+        logger.info(
+            "Nothing queued — no prospect has `Send Requested At` set. "
+            "Stopping before the blocklist fetch and the lease (saved ~20 Airtable "
+            "requests). Stranded claims: %d.", stranded,
+        )
+        return EXIT_OK
+
     try:
         budget_remaining = remaining_daily_budget(ledger, today_iso(), OUTREACH_DAILY_CAP)
     except LedgerUnavailable as e:

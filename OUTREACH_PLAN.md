@@ -598,6 +598,15 @@ otherwise ride out the day after the first on the strength of touch 1's age.
 the Airtable UI. That is a safety property, not a limitation — a human sees what
 it does before it can fire once.
 
+**UPDATE 2026-08-18 — `deploymentStatus` does not answer "is it on?".**
+`list_automations` now reports **every** automation in this base as `deployed`,
+including the two SEND drafts created minutes earlier that nobody had touched. So
+either the field means "this config has been published" rather than "this
+automation is enabled", or it is simply not a reliable enabled/disabled signal
+from the API. Do not read it as one, and do not treat a `deployed` SEND
+automation as evidence that it will fire. **Confirm the on/off toggle in the UI**
+— that is the only place the answer is legible.
+
 | Automation | Trigger | Does |
 |---|---|---|
 | `HT · Queue for outreach` (`wfl9EZvH8MsMS9FFl`) | `Queue for outreach` ticked | stamps `Send Requested At`, clears the tick |
@@ -661,10 +670,21 @@ automations serve.
 
 **They are deliberately HALF an automation, and that is the interesting part.**
 Each ends at the claim. Neither sends, and neither marks anything `Sent` or
-`Contacted`. The `gmailSendEmail` action requires an `externalAccountId`, and
-James's connected Gmail is scoped to **his** Airtable login — `list_external_accounts`
-on the API connection that built these returns only a Google Sheets account, so
-the node cannot be authored from here at all.
+`Contacted`. The `gmailSendEmail` node **cannot be authored through the API at
+all**, which was established by trying both ways rather than assumed:
+
+- Omitting the account → `missingRequiredInput (inputKey: externalAccountId)`.
+  The field is not optional; a node with an empty picker cannot be created.
+- Supplying the only account `list_external_accounts` returns (the base's Google
+  Sheets connection, `eac9i3wt9FxkSKRmG`) as a stand-in →
+  `INVALID_PERMISSIONS: You are not permitted to perform this operation`. An
+  external account cannot be attached to a node by a connection that doesn't own
+  it.
+
+James's connected Gmail is scoped to **his** Airtable login and is invisible
+here, so the send step has to be added in the UI by a human who can see it.
+`AIRTABLE_SEND_STEPS.md` carries the body text for both niches, generated from
+`outreach_templates.py` so the transcription cannot drift on the way in.
 
 The choice was therefore between two incomplete shapes, and they fail in opposite
 directions:

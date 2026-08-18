@@ -82,6 +82,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
+from iso_time import parse_iso_utc
 from scoring import QUALIFIED
 
 logger = logging.getLogger(__name__)
@@ -231,19 +232,27 @@ def _utc_now_iso(clock=None) -> str:
 
 def _parse_utc(value: str):
     """
-    Parse one of our own `%Y-%m-%dT%H:%M:%SZ` stamps, or return None.
+    Parse a timestamp read back off an Airtable dateTime field, or return None.
 
-    Returns None rather than raising, and every caller treats None as "cannot
-    prove anything from this" — which for a lease means "assume it is live" and
-    for a follow-up means "assume not enough time has passed". Both lean away
-    from acting.
+    NOT "one of our own stamps" — that wording was the bug. `_utc_now_iso()`
+    above writes `%Y-%m-%dT%H:%M:%SZ`, but the value round-trips through an
+    Airtable dateTime and comes back with milliseconds (`...T12:00:00.000Z`),
+    which a strict `strptime` on the write format rejects. So this could not
+    read what it had just written, and the failure was silent in the refuse
+    direction: `followup_eligibility()` rejected every follow-up with "prior
+    send has no readable timestamp", making OUTREACH_RESPAM_MIN_DAYS
+    unreachable, and `_lease_is_stale()` returned False at any age, so a
+    stranded lease never aged out and needed clearing by hand.
+
+    Delegates to `iso_time.parse_iso_utc` so this rule has exactly one
+    implementation — see that module for the full history.
+
+    Still returns None rather than raising, and every caller still treats None
+    as "cannot prove anything from this": for a lease that means "assume it is
+    live", for a follow-up "assume not enough time has passed". Both lean away
+    from acting, which is why the bug above was safe as well as invisible.
     """
-    if not value:
-        return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        return None
+    return parse_iso_utc(value)
 
 
 def build_key(channel_id: str, campaign: str) -> str:

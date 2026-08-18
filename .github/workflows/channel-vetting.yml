@@ -166,13 +166,29 @@ jobs:
       # run — fresh ledger, cold caches — so treat this as an optimisation
       # and a courtesy, and rely on quota_tracker.py's Pacific-Time day key
       # plus Airtable's own "Date Added" counts for correctness.
-      - name: Restore quota + search + external-handles cache
+      #
+      # credit_log.json is the ONE path here with no correctness backstop
+      # behind it, and that asymmetry matters. Quota self-heals (Google resets
+      # nightly and the Pacific day key enforces it) and the row caps are
+      # recomputed from Airtable's own "Date Added" every run — but credits are
+      # money, spent at a vendor, with no independent record this pipeline can
+      # read back. If this cache misses, credit_tracker starts from an empty
+      # ledger and BOTH its ceilings silently authorise a fresh allowance. So a
+      # cache miss here is fail-OPEN in the one place the ledger exists to fail
+      # closed, and the ledger is a brake on a same-day re-run rather than a
+      # guarantee. The durable fix is a shared remote ledger (or reading the
+      # vendor's own balance, which the discovery response already reports as
+      # credits_left — see InfluencerDiscovery.credits_left_reported); until
+      # then, treat INFLUENCERS_MAX_CREDITS_PER_MONTH as advisory on CI and
+      # check the vendor dashboard for the authoritative figure.
+      - name: Restore quota + search + external-handles + credit cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             quota_log.json
             search_cache.json
             external_handles_cache.json
+            credit_log.json
           # The exact key intentionally never hits (github.run_id is unique
           # per run) — it exists so the SAVE step below always has a fresh,
           # unclaimed key to write to. A cache key is immutable once
@@ -269,7 +285,12 @@ jobs:
       # best-effort by design: a missing path or an unwritable cache logs a
       # warning and does not fail the job (see the "NOT a store of record"
       # note on the restore step).
-      - name: Save quota + search + external-handles cache
+      #
+      # credit_log.json has the strongest claim of the four to being saved on a
+      # FAILED run: an abort after discovery has paged means the money is gone
+      # whether or not the run produced a row, and a ledger dropped there lets
+      # the next run spend a second full allowance believing nothing was spent.
+      - name: Save quota + search + external-handles + credit cache
         if: always()
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -277,4 +298,5 @@ jobs:
             quota_log.json
             search_cache.json
             external_handles_cache.json
+            credit_log.json
           key: channel-vetting-state-${{ github.run_id }}

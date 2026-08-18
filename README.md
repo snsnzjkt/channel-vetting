@@ -393,7 +393,7 @@ calls or real credentials are needed — everything is mocked.
   each `NICHES` entry in `main.py`, not in `.env`.
 - The shared hard requirements are elsewhere: at the top of `main.py`,
   `MIN_VIDEO_COUNT` (30), `MIN_VIEWS_PER_VIDEO` (10,000 per video across the
-  last 10), `MIN_UPLOADS_PER_YEAR` (10), and `MAX_DAYS_SINCE_LAST_UPLOAD`
+  last 10), `MIN_UPLOADS_PER_YEAR` (6), and `MAX_DAYS_SINCE_LAST_UPLOAD`
   (365); and the allowed countries in `search_zones.py`
   (`ALLOWED_COUNTRY_CODES`, plus the name tables the About-panel lookup
   uses). Widening "Europe" to include Russia, Belarus or Turkey is a

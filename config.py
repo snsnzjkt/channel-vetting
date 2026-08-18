@@ -275,6 +275,42 @@ INFLUENCERS_TEST_DISCOVERY_CREDITS = float(
 # module).
 INFLUENCERS_MAX_EXCLUDE_HANDLES = 10_000
 
+# --- Credit ledger: the ceilings that survive the process ---
+#
+# The three limits above are all PER-RUN and live on an object, so they vanish
+# with the process: two runs on the same day each got a full allowance, and
+# nothing could report a monthly total. credit_tracker.py persists spend to
+# CREDIT_LOG_FILE and enforces the two ceilings below across runs. See that
+# module's docstring for why it fails CLOSED where quota_tracker fails open.
+#
+# Gitignored like quota_log.json and search_cache.json — it is machine-local
+# state, and committing it would merge two machines' spend into one nonsense
+# total.
+CREDIT_LOG_FILE = os.getenv("CREDIT_LOG_FILE", "credit_log.json")
+
+# A measured full two-niche day is ~7.3 credits (5.5 discovery + 1.8 email).
+# 10 leaves room for that day plus a small manual top-up, while stopping a
+# second full run from silently doubling it — which is the concrete waste this
+# ledger was built to catch. Raise it deliberately for a backlog sweep.
+INFLUENCERS_MAX_CREDITS_PER_DAY = float(
+    os.getenv("INFLUENCERS_MAX_CREDITS_PER_DAY", 10)
+)
+
+# The brake in front of the vendor's FAIR-USE cap, which resets only at
+# subscription renewal and which no amount of retrying clears (influencers.py
+# trips a circuit breaker on that bodyless 429). 22 weekday runs at ~7.3 is
+# ~161, so 200 is roughly 1.25x a full month.
+#
+# !! CHECK THIS AGAINST THE ACTUAL SUBSCRIPTION. !! The API does not expose the
+# plan's credit allowance or its renewal date, so this default is derived from
+# measured usage, NOT from the real entitlement. If the plan is smaller than
+# 200/month this number is worse than useless — it would authorise spending
+# past the real cap and the first symptom would be a bodyless 429 disabling
+# email lookups mid-run.
+INFLUENCERS_MAX_CREDITS_PER_MONTH = float(
+    os.getenv("INFLUENCERS_MAX_CREDITS_PER_MONTH", 200)
+)
+
 
 # --- Outreach: review-to-send system ---
 # Tables created 2026-08-14 in the same base as the niche tables. IDs are the

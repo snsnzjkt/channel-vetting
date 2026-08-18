@@ -35,6 +35,7 @@ from config import (
     LONGFORM_SCAN_MAX_PAGES,
 )
 from http_client import YOUTUBE as HTTP, safe_body
+from iso_time import parse_iso_utc
 from quota_tracker import record_spend
 
 logger = logging.getLogger(__name__)
@@ -509,26 +510,23 @@ DAYS_PER_MONTH = 30.44
 
 def _parse_iso_timestamp(value: str | None) -> datetime | None:
     """
-    An ISO 8601 timestamp (YouTube's trailing-'Z' form) as a tz-aware
-    datetime, or None when it is missing or unparseable.
+    An ISO 8601 timestamp as a tz-aware datetime, or None when it is missing
+    or unparseable.
 
-    The single home of the tolerant-parse rule, shared by
-    channel_age_months() and days_since_last_upload() so the two can't drift
-    — and so "absent/unreadable data is unknown, never a negative verdict" is
-    decided in one place.
+    The parse itself now lives in `iso_time.parse_iso_utc` — a leaf module that
+    imports nothing — because `outreach_ledger.py` needed the identical rule and
+    must not import this module's `http_client`/`config` chain to get it. See
+    that module's docstring for the two independent strict-strptime bugs that
+    motivated a single home.
+
+    This wrapper survives to keep the enrichment-local logging: an unreadable
+    `videoPublishedAt` or `publishedAt` is worth an INFO line here (it means
+    YouTube sent something unexpected), while the ledger deliberately logs at
+    WARNING for its own timestamps.
     """
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
+    parsed = parse_iso_utc(value)
+    if parsed is None and value:
         logger.info("Unparseable ISO timestamp %r — treating as unknown.", value)
-        return None
-    # A bare date (or any offsetless value) parses tz-NAIVE; coerce to UTC so
-    # every caller can subtract it from datetime.now(timezone.utc) without an
-    # aware/naive TypeError.
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
 
 
@@ -1314,17 +1312,81 @@ def calc_upload_frequency(upload_dates: list[str]) -> float:
     Uses the span between the oldest and newest sampled video, so this is
     a local estimate over the sampled window (not full channel history).
     """
-    if not upload_dates or len(upload_dates) < 2:
-        return 0.0
+    # Tolerant parse, like days_since_last_upload: an unreadable timestamp is
+    # unknown, not a verdict. See iso_time.parse_iso_utc for why this rule has
+    # exactly one implementation.
+    parsed = _parsed_upload_dates(upload_dates)
+    per_month = _uploads_per_month(parsed)
+    if per_month is not None:
+        return per_month
+    # The two legacy fallbacks are preserved DELIBERATELY, and this is the one
+    # place the two public functions diverge. This float is read by
+    # calc_overall_score() (upload-consistency component, weight 0.15) and
+    # written verbatim to the "Upload Frequency" text column, so changing what
+    # it returns for an unmeasurable window would make every Overall Score
+    # already in Airtable incomparable with new ones — the hazard CLAUDE.md
+    # records for the long-form averages change. calc_uploads_per_year() below
+    # returns None for these same two shapes, because it feeds a discard gate
+    # where a fabricated number is a wrong verdict rather than a stale score.
+    if len(parsed) >= 2:
+        return float(len(parsed))  # zero-width window: every upload one day
+    return 0.0  # fewer than two readable timestamps
 
-    parsed = sorted(
-        datetime.strptime(d, "%Y-%m-%dT%H:%M:%SZ") for d in upload_dates
+
+def _parsed_upload_dates(upload_dates: list[str]) -> list[datetime]:
+    """Sampled upload timestamps as sorted aware datetimes, unreadable ones dropped."""
+    return sorted(
+        dt for dt in (_parse_iso_timestamp(d) for d in upload_dates) if dt is not None
     )
+
+
+def _uploads_per_month(parsed: list[datetime]) -> float | None:
+    """
+    Videos/month over the sampled window, or None when the window cannot
+    support an estimate at all.
+
+    Two distinct unmeasurable shapes, both None rather than a fabricated
+    number:
+
+    - **Fewer than two readable timestamps.** Counted AFTER parsing, never
+      from the raw list: five strings of which one is readable is a one-date
+      sample, and a single date describes no cadence.
+    - **A zero-width window** — every sampled upload on one calendar day. The
+      old code returned `float(len(parsed))` here, so ten same-day uploads
+      claimed 10/month (120/yr) under a comment that said, in as many words,
+      that it could not extrapolate from a zero-width window. That is the same
+      unmeasurable-as-confident-number conflation this function exists to end.
+    """
+    if len(parsed) < 2:
+        return None
     span_days = (parsed[-1] - parsed[0]).days
     if span_days <= 0:
-        # All sampled videos published on the same day; can't extrapolate a
-        # monthly cadence from a zero-width window.
-        return float(len(parsed))
+        return None
+    return round(len(parsed) / span_days * 30, 2)
 
-    videos_per_day = len(parsed) / span_days
-    return round(videos_per_day * 30, 2)
+
+def calc_uploads_per_year(upload_dates: list[str]) -> float | None:
+    """
+    Annualised upload cadence for the pre-push cadence gate, or None when the
+    sample is too thin to estimate one.
+
+    Named to match its sibling calc_upload_frequency() — and deliberately NOT
+    `uploads_per_year`, which is the name of pre_push_drop_reason()'s parameter
+    and of the local it feeds in process_candidate(); importing that name into
+    main.py would shadow both.
+
+    The single home of the "videos/month x 12" conversion, shared by main.py
+    and audit_prospects.py so the pipeline and the audit script can never
+    disagree about a channel's cadence.
+
+    None means UNMEASURABLE, not zero, and the distinction decides the
+    channel: pre_push_drop_reason() KEEPS a candidate whose cadence it cannot
+    read (absent data is not evidence against a channel, the same rule an
+    unknown country and an unreported video count follow), while a 0.0 is
+    below every floor and DISCARDS it. Read from _uploads_per_month directly
+    rather than inferred from calc_upload_frequency's return, so the verdict
+    never depends on whether a presentation-layer round() happened to land on
+    zero.
+    """
+    per_month = _uploads_per_month(_parsed_upload_dates(upload_dates))
+    return None if per_month is None else per_month * 12

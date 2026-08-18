@@ -25,6 +25,7 @@ from enrichment import (
     get_channel_stats,
     get_recent_video_performance,
     calc_upload_frequency,
+    calc_uploads_per_year,
     channel_age_months,
     days_since_last_upload,
     scan_older_videos_for_email,
@@ -49,6 +50,11 @@ from external_dedupe import fetch_external_handles, ExternalIndex, match_externa
 from prospect_day import today_iso
 from quota_tracker import can_afford_enrichment, get_today_spend
 from browser_email import BrowserEmailScraper, null_scraper
+from credit_tracker import (
+    CreditLedgerUnavailable,
+    assert_readable as assert_credit_ledger_readable,
+    spend_summary as credit_spend_summary,
+)
 from influencers import InfluencersClient, null_client
 from influencer_discovery import InfluencerDiscovery
 from do_not_contact import BlocklistUnavailable, fetch_blocklist
@@ -985,10 +991,11 @@ def process_candidate(
     # below, never recomputed.
     upload_dates = performance.get("upload_dates", [])
     upload_freq = calc_upload_frequency(upload_dates)
-    # None (not 0) when the window is too thin to estimate a cadence — fewer
-    # than two dated uploads — so an unmeasurable channel isn't dropped on a
-    # made-up zero. See pre_push_drop_reason's None rule.
-    uploads_per_year = upload_freq * 12 if len(upload_dates) >= 2 else None
+    # None (not 0) when the window is too thin to estimate a cadence, so an
+    # unmeasurable channel isn't dropped on a made-up zero — see
+    # pre_push_drop_reason's None rule. Shared with audit_prospects.py; the
+    # rationale lives in calc_uploads_per_year's docstring.
+    uploads_per_year = calc_uploads_per_year(upload_dates)
     days_since = days_since_last_upload(upload_dates)
 
     # Pre-push gate, placed before scoring and before the email chain so a
@@ -1706,6 +1713,18 @@ def run(
         logger.error("ABORTING: %s", e)
         raise SystemExit(1)
 
+    # Checked ONCE here, beside the blocklist, for the same fail-closed reason.
+    # Without it the first corrupt read happens deep inside a paid call site,
+    # which disables only that half: the run then spends YouTube quota, logs two
+    # ERROR lines, prints "LEDGER UNAVAILABLE" in the summary, and exits ZERO —
+    # a scheduled run reported green having produced no influencers-sourced rows.
+    # That is exactly what any_cap_check_completed already refuses to do.
+    try:
+        assert_credit_ledger_readable()
+    except CreditLedgerUnavailable as e:
+        logger.error("ABORTING: %s", e)
+        raise SystemExit(1)
+
     # Global (base-wide) dedupe: fetched once across every niche's table
     # before any niche runs, so a channel already tracked anywhere in the
     # base — not just in the niche currently being processed — is skipped.
@@ -1845,6 +1864,15 @@ def run(
             f"discovery credits: {discovery.credits_spent:g} spent on creator search "
             f"({discovery.creators_billed} creators billed, {per_row} credits/row)"
         )
+
+    # The two figures above describe THIS RUN; this one describes ALL RUNS today
+    # and this month, which was previously impossible to see. Labelled explicitly
+    # because on a second run of the day these numbers legitimately differ from
+    # the per-run ones above, and two different totals under similar labels is how
+    # a reader concludes one of them is wrong. Printed unconditionally — including
+    # when this run spent nothing — since "already at 9.8 of 10 today" is most
+    # worth knowing on the run that is about to be refused.
+    print(f"credits, all runs today: {credit_spend_summary()}")
 
     if not any_cap_check_completed:
         logger.error(

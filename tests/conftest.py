@@ -15,6 +15,15 @@ Blocking at `HTTPAdapter.send` rather than at the socket layer is
 deliberate: it is the single chokepoint every `requests` call passes
 through regardless of which session issued it, and it leaves the error
 message able to name the offending method and URL.
+
+The second autouse fixture isolates the CREDIT LEDGER for the same reason,
+one layer over. `credit_tracker` persists real money spent to
+`credit_log.json` in the working directory, and without redirection a test
+run appends its fixture spend to the production ledger — which then eats
+the real daily/monthly headroom and starts REFUSING live lookups. That is
+not hypothetical: the first run of the credit-guard suite wrote 10.14
+credits into the repo's own ledger and the next run of the same suite
+failed, because every test was correctly told the budget was exhausted.
 """
 import pytest
 from requests.adapters import HTTPAdapter
@@ -40,6 +49,56 @@ def block_real_http(request, monkeypatch):
         )
 
     monkeypatch.setattr(HTTPAdapter, "send", _blocked)
+
+
+@pytest.fixture(autouse=True)
+def isolate_credit_ledger(tmp_path, monkeypatch):
+    """
+    Point the credit ledger at a per-test temp file, and lift the spend ceilings
+    out of the way.
+
+    Patches the names bound in `credit_tracker`, not `config`: the module does
+    `from config import ...`, so those values are copied into its own globals at
+    import and patching config afterwards has no effect.
+
+    Two halves, both load-bearing:
+
+    - **The temp file.** Without it a test run appends its fixture spend to the
+      production ledger, eating real headroom until live lookups are refused.
+      Not hypothetical: the first run of the credit suite wrote 10.14 credits
+      into the repo's own ledger, and the next run of the same suite failed
+      because every test was correctly told the budget was exhausted.
+    - **The lifted ceilings.** The production defaults (10/day) would otherwise
+      apply suite-wide, silently truncating any discovery test that pages more
+      than 20 times at 0.5 credits — and the symptom would present as a
+      pagination bug in an unrelated module. This autouse fixture must not change
+      behaviour by default; its sibling `block_real_http` only ever *fails* by
+      default. A test that wants a real ceiling opts in via `credit_ceilings`.
+    """
+    import credit_tracker
+
+    monkeypatch.setattr(
+        credit_tracker, "CREDIT_LOG_FILE", str(tmp_path / "credit_log.json")
+    )
+    monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_DAY", float("inf"))
+    monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_MONTH", float("inf"))
+
+
+@pytest.fixture
+def credit_ceilings(monkeypatch):
+    """
+    Opt into real spend ceilings: `credit_ceilings(day=1.0, month=5.0)`.
+
+    One factory rather than a near-identical local fixture per test file, so the
+    numbers are visible in the test that depends on them.
+    """
+    import credit_tracker
+
+    def _set(day=1.0, month=5.0):
+        monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_DAY", day)
+        monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_MONTH", month)
+
+    return _set
 
 
 def pytest_configure(config):

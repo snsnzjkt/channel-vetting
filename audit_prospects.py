@@ -45,13 +45,17 @@ from enrichment import (
     get_channel_stats,
     get_recent_video_performance,
     count_longform_in_older_videos,
+    # Imported from enrichment, which OWNS them, not re-exported through main.
+    # main's import list is its own dependency list, not a public facade — a
+    # linter's unused-import autofix there would have broken this script at
+    # import time, far from the cause.
+    calc_uploads_per_year,
+    days_since_last_upload,
 )
 from search_zones import zone_verdict, description_location_outside_zone
 from main import (
     NICHES,
     MIN_LONGFORM_VIDEO_COUNT,
-    calc_upload_frequency,
-    days_since_last_upload,
     description_is_non_english,
     excluded_topic_reason,
     longform_drop_reason,
@@ -123,8 +127,7 @@ def evaluate_row(record: dict, niche_config: dict) -> tuple[str, str]:
         return VERDICT_UNREACHABLE, "no accessible recent video performance"
 
     upload_dates = performance.get("upload_dates", [])
-    upload_freq = calc_upload_frequency(upload_dates)
-    uploads_per_year = upload_freq * 12 if len(upload_dates) >= 2 else None
+    uploads_per_year = calc_uploads_per_year(upload_dates)
     days_since = days_since_last_upload(upload_dates)
 
     settled = performance.get("settled_views") or []

@@ -36,10 +36,18 @@ from config import (
     INFLUENCERS_ENRICH_PATH,
     INFLUENCERS_MAX_LOOKUPS_PER_RUN,
 )
+from credit_tracker import KIND_EMAIL, can_afford, record_spend
 from enrichment import EMAIL_PATTERN, is_blocklisted_email
 from http_client import INFLUENCERS as HTTP, safe_body
 
 logger = logging.getLogger(__name__)
+
+# What one validated address costs on the `profile` variant (0.2; `full` is 1.0
+# and this pipeline deliberately does not use it). Used only to PROJECT whether
+# a hit could still be paid for before asking — the ledger always records the
+# vendor's own `credits_cost`, never this estimate. A miss is free and is not
+# projected against the budget.
+EMAIL_COST_CREDITS = 0.2
 
 # The vendor's own identifier for this pipeline's platform. Their `handle`
 # field accepts a username, a profile URL, or a YouTube channel ID — the
@@ -144,6 +152,17 @@ class InfluencersClient:
         the credit cap has been reported.
         """
         if not channel_id or not self.enabled:
+            return ""
+
+        # The PERSISTENT limits (day, month, vendor balance), which `enabled` — a
+        # per-run REQUEST counter — cannot see. Projected against the cost of ONE
+        # HIT, because a hit is the only billable outcome: an empty `must_have`
+        # result is free. So this refuses only in the last EMAIL_COST_CREDITS of
+        # headroom, i.e. exactly when an address could no longer be paid for, and
+        # never charges misses against the budget — which would turn a credit
+        # budget into a request cap and disable the step having spent nothing.
+        if not can_afford(EMAIL_COST_CREDITS, f"email lookup for {channel_id}"):
+            self._active = False
             return ""
 
         resp = self._send(channel_id)
@@ -398,6 +417,12 @@ class InfluencersClient:
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):
             if math.isfinite(cost) and cost > 0:
                 self._credits_reported += float(cost)
+                # Persisted from the vendor's OWN figure, never the assumed 0.2 —
+                # the projection above only decides whether to ask. A failed write
+                # disables the step: continuing would authorise every later lookup
+                # against a total the ledger no longer reflects.
+                if not record_spend(float(cost), kind=KIND_EMAIL, detail=channel_id):
+                    self._active = False
 
         result = body.get("result")
         if not isinstance(result, dict):

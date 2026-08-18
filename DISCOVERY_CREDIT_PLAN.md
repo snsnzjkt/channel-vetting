@@ -94,7 +94,7 @@ server-side. The string `location` appears **nowhere** in either niche's
 | `ai_search` (semantic) | `MIN_VIEWS_PER_VIDEO` (10,000) |
 | `number_of_subscribers: {min: 2000}` | `MIN_VIDEO_COUNT` (30) |
 | `keywords_not_in_description` (off-brand) | `MIN_LONGFORM_VIDEO_COUNT` (30) |
-| | `MIN_UPLOADS_PER_YEAR` (10) |
+| | `MIN_UPLOADS_PER_YEAR` (6) |
 | | `MAX_DAYS_SINCE_LAST_UPLOAD` (365) |
 | | Shorts-only |
 

@@ -51,6 +51,83 @@ Deferred work, with the reason it was deferred. Created 2026-08-14 by the
   becomes the bottleneck, the correct first move is **lowering
   `DAILY_QUALIFIED_CAP`** to match review capacity, not weakening the gate.
 
+## Deferred from the channel age / upload frequency review (2026-08-18)
+
+- **Per-niche cadence floor.** `MIN_UPLOADS_PER_YEAR` stays a module constant.
+  Deferred on measurement, not effort: across 60 Home Theater rows with reviewer
+  verdicts, cadence does **not** separate Approved (median 7/month, range 1-30)
+  from Rejected (median 5/month, range 1-150). "DaBuild" is Approved at 1/month;
+  "Zero Fidelity" is Rejected at 1/month. Revisit once `Uploads/Yr (last 10)`
+  has accumulated a real distribution to read reviewer verdicts against — that
+  column is the instrument. `CHANNEL_FILTERS_PLAN.md` §3 lists the exact traps
+  (63 test config literals, `REQUIRED_NICHE_KEYS`, `audit_prospects.py:131`'s
+  delete authority, the fail-closed default) so they don't get re-derived.
+
+- **Probe influencers.club for vendor-side cadence / account-age filters.**
+  Potentially higher leverage than anything in that plan. Discovery bills **0.01
+  per creator returned, before any gate sees them**, and is the larger credit
+  stream (5.5 of ~7.3 credits on a measured run). If the vendor supports either
+  filter, the creator is never returned, never billed, never enriched at a
+  YouTube unit, and never reaches a reviewer. Same shape as the already-recorded
+  `location` leak. Cost to find out: 2 probes at `limit=1`, ~0.02 credits, using
+  the method documented at `niches.py:83-98`. Not done in the review because it
+  spends real money against a live paid API.
+
+- **The "zero rows, exit code 0" observability hole.** If every `push_record`
+  fails (schema mismatch, renamed column, computed field), `push_until_full`
+  (`main.py:819`) increments no counter — not even `skipped`; the refill loop
+  keeps buying candidates to `DISCOVERY_MAX_ROUNDS` or the 6-credit cap; the
+  "finished under its qualified budget" warning is gated `if not use_discovery`
+  (`main.py:1676`) so it never fires on the **primary** influencers.club path;
+  and `any_cap_check_completed` is True, so `main.py:1849` exits 0. A weekday
+  cron burns a full day's credits and quota, writes nothing, and reports green.
+  Fix: count push failures in `push_until_full`, and warn or exit non-zero when
+  candidates were examined but zero rows were written. This is the same class of
+  hole `any_cap_check_completed` was added to close, one level down.
+
+- **Redefine cadence over long-form, de-duplicated uploads.** `upload_dates` is
+  taken from raw `items[:10]` at `enrichment.py:799`, before `videos.list` is
+  called at `:823` — so cadence counts Shorts and double-counts re-uploads,
+  unlike the avg-views column next to it. Fixing it is free (the classification
+  already exists) but makes the number incomparable with every existing
+  `Upload Frequency` value, so it needs its own `KNOWN CONSEQUENCE` pass.
+
+- **`table_has_field` caches a failed probe for the whole run.**
+  `airtable_client.py:189-202` treats a `RequestException` as "field absent" and
+  caches it process-wide at WARNING severity. One transient error means a full
+  day of rows written with those cells blank, and blank cells drop out of a
+  reviewer's `>= N` filter entirely. Distinguish "probed and absent" (cache)
+  from "probe failed" (don't cache), or log the failure at ERROR.
+
+- **Extract `atomic_json.py` as a leaf module.** The tmp-sibling + fsync +
+  `_replace_with_retry` + `except BaseException` cleanup dance now exists in
+  THREE places: `quota_tracker._save_log`, `discovery._save_cache`, and
+  `credit_tracker._save_log`. Two of the three already import the *private*
+  `quota_tracker._replace_with_retry`, which is the definition of a helper that
+  should have been promoted. The copies have begun to drift (only credit_tracker
+  prunes inside the writer), and the Windows file-lock fix that ended three real
+  runs has one implementation only by accident of that private import. A leaf
+  module — `write_json_atomic(path, obj)` + `replace_with_retry()`, importing
+  nothing from the project, following the `iso_time.py` / `text_safety.py`
+  precedent — would leave the three call sites differing only in their READ-side
+  failure policy, which is the one place they legitimately differ. Deferred here
+  because two of the three copies predate the credit ledger and the fix touches
+  modules outside that change.
+
+- **Move the credit ledger off a GitHub Actions cache.** `credit_log.json` is now
+  in both halves of the split cache, but a GH cache is explicitly "NOT a store of
+  record" (7-day idle eviction, 10GB LRU, no signal on a miss) — and it is the
+  only cached path with no correctness backstop behind it, since quota self-heals
+  via Google's reset and the row caps are recomputed from Airtable's "Date
+  Added". A miss means an empty ledger and a full fresh allowance, i.e. fail-OPEN
+  in the one place the ledger exists to fail closed. It also cannot see a local
+  `python main.py`. The repo already has the right pattern: the global Airtable
+  Outreach Log behind `outreach_ledger.LedgerStore` (protocol) +
+  `outreach_airtable.py` (real store), deliberately storage-agnostic so the logic
+  stays testable without Airtable. Credits want the same two-layer shape. Partly
+  mitigated already by persisting the vendor's own `credits_left`, which is
+  authoritative and survives any cache loss.
+
 ## Follow-ups spun out separately
 
 - Stale test counts: `CLAUDE.md` says 488, `README.md` says 521, actual is

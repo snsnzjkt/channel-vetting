@@ -67,6 +67,12 @@ from config import (
     INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN,
     INFLUENCERS_MAX_EXCLUDE_HANDLES,
 )
+from credit_tracker import (
+    KIND_DISCOVERY,
+    can_afford,
+    record_spend,
+    record_vendor_balance,
+)
 from enrichment import normalize_handle
 from http_client import INFLUENCERS as HTTP, safe_body
 
@@ -76,6 +82,22 @@ PLATFORM_YOUTUBE = "youtube"
 REQUEST_TIMEOUT_SECONDS = 45
 # The API caps a page at 50 results; asking for more is rejected.
 PAGE_LIMIT = 50
+
+CREDITS_PER_CREATOR = 0.01
+
+
+def page_cost_credits() -> float:
+    """
+    Worst-case credit cost of the next page, for projecting against the ceilings
+    before buying it (see credit_tracker.can_afford).
+
+    Worst case: a short final page bills less. The ledger always records the
+    vendor's own `credits_cost`, never this estimate. A function rather than a
+    constant so tests can shrink PAGE_LIMIT.
+    """
+    return PAGE_LIMIT * CREDITS_PER_CREATOR
+
+
 # Relevancy is the only sort that surfaces on-niche creators first; it only
 # supports descending order (verified). number_of_followers/engagement are
 # available but bias toward big accounts regardless of fit.
@@ -123,8 +145,20 @@ class InfluencerDiscovery:
 
     @property
     def enabled(self) -> bool:
-        """True if this client can still spend on discovery."""
-        return self._active and self._credits_spent < self._max_credits
+        """
+        True if this client can still buy AT LEAST ONE MORE PAGE.
+
+        Projected, matching discover()'s loop check, because the two must not be
+        able to disagree. With a bare `spent < max` this said True at 5.9 of a
+        6.0 ceiling — and run_niche reads it as `use_discovery` (main.py:1556),
+        which then sets `remaining_keywords = []` (main.py:1582) and abandons the
+        search.list fallback. discover() would immediately refuse the page, so
+        the niche got NO discovery at all: worse than either the overshoot or the
+        clean stop.
+        """
+        return self._active and (
+            self._credits_spent + page_cost_credits() <= self._max_credits
+        )
 
     @property
     def credits_spent(self) -> float:
@@ -208,12 +242,24 @@ class InfluencerDiscovery:
         page = 0
 
         while len(candidates) < target and page < page_cap:
-            if self._credits_spent >= self._max_credits:
+            # Both ceilings are PROJECTED against the page's price — see
+            # credit_tracker.can_afford for why a ceiling checked without the
+            # price is not a ceiling.
+            page_cost = page_cost_credits()
+            if self._credits_spent + page_cost > self._max_credits:
                 logger.warning(
-                    "influencers.club discovery credit ceiling (%.2f) reached — "
-                    "stopping discovery for this niche.",
-                    self._max_credits,
+                    "influencers.club per-run discovery ceiling (%.2f) would be "
+                    "exceeded by another page (%.3f spent, page costs up to %.2f) "
+                    "— stopping discovery for this niche.",
+                    self._max_credits, self._credits_spent, page_cost,
                 )
+                break
+
+            # The PERSISTENT limits, which the per-run one above cannot see: the
+            # day, the month, and the vendor's own reported balance. False also
+            # covers an unreadable ledger, since both answers are "stop paying".
+            if not can_afford(page_cost, source_label):
+                self._active = False
                 break
 
             payload = {
@@ -230,8 +276,17 @@ class InfluencerDiscovery:
             # credits_cost is what the vendor billed for THIS page, charged
             # whether or not we end up using every account — so count it now.
             self._credits_spent += cost
+            # Persisted at the same moment and for the same reason. A failed
+            # write stops discovery: continuing would authorise every later page
+            # against a total the ledger no longer reflects.
+            if not record_spend(cost, kind=KIND_DISCOVERY, detail=source_label):
+                self._active = False
             if credits_left is not None:
                 self._credits_left_reported = credits_left
+                # The vendor's own balance outranks our estimated ceilings, and
+                # the email step never sees a discovery response — so persist it
+                # for both to read. Previously this value reached a log line only.
+                record_vendor_balance(credits_left)
 
             if not accounts:
                 break

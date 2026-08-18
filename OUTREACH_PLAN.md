@@ -760,6 +760,54 @@ recipient is unset, whereas an Airtable field can simply be re-pointed at
 for that inside Airtable — the mitigation is that step 2 is documented in the
 automation's own description, where the person editing it will read it.
 
+### UPDATE 2026-08-19 — the send path was finished, and four things above are now wrong
+
+Both SEND automations were completed to the brand's reference design. The section
+above still describes the state before that. Where they disagree, this subsection and
+`AIRTABLE_SEND_STEPS.md` are current; the automations' own descriptions carry the
+operational detail.
+
+**1. The record-link write is VERIFIED, and it was the riskiest unknown in the build.**
+The claim populates its `Prospect` link field with the trigger's record id as a
+*template string*. Had Airtable read that as a name rather than a reference, it would
+have created a junk row instead of linking, left the `Last Send State` rollup empty,
+left the trigger's "no prior send" condition permanently true, and left every creator
+**re-emailable forever** — with nothing on screen to show it. Run on a fake-id test
+row: the link resolves and the Outreach Log row shows the prospect's name. *Still to
+do: the negative half (confirm the trigger actually refuses a second send), and Home
+Theater has not been run at all.*
+
+**2. §3a's cooling-off window DOES NOT EXIST on this path.** That section describes
+queue-then-schedule: a human stamps `Send Requested At`, a later scheduled run sends,
+and clearing the field in between un-queues the row. That is true of the **Python**
+sender only. Here the SEND automation triggers on `Send Requested At` being non-empty
+via `recordMatchesConditions`, which fires within seconds. **Tick → stamp → sent, no
+undo.** Both `Queue for outreach` automations asserted the opposite in their
+descriptions — text sitting on the exact control a reviewer clicks — and were
+corrected. Same defect class as the Rejected→Audit-Trail bug in the section above.
+
+**3. D2 is superseded for this path: there is no compliance footer at all.** No
+unsubscribe, no postal address, no phone. Removed on an informed decision after the
+operator was told CASL, CAN-SPAM, UK PECR and EU GDPR all apply to the zones
+`search_zones.py` targets. `List-Unsubscribe` as a header is not available —
+`gmailSendEmail` exposes no header control. **DO NOT CONTACT is now the only route off
+the list, and it is manual.** Note `outreach.py` cannot reproduce this: the footer and
+opt-out are required config with no defaults and `--send` refuses to start without
+them, so migrating back reinstates them or requires weakening that gate.
+
+**4. The gap list above gains one, and loses the "hand-authored" premise.** Both
+templates now put `Channel Name` inside the channel link's anchor text at the brand's
+request. `render()` HTML-escapes that value; Airtable cannot. Mitigated by using a raw
+`<a>` rather than Markdown — escaping a Markdown link takes ~10 characters, an `<a>`
+element takes a far longer payload — but reduced, not removed. Separately, PR #19's
+claim that the Gmail node "cannot be authored through the API" is now fully retired:
+the entire body, signature, inline logo and attachments expression were written via
+`update_automation`.
+
+See `AIRTABLE_SEND_STEPS.md` for what the Airtable email renderer does and does not
+support — including the underscore trap, which produced two false negatives and cost
+three of four test rounds.
+
 ## Requirement 3c — The follow-up ("respam") button
 
 Resend the same email months later to someone who never replied. Implemented in

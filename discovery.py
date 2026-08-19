@@ -86,7 +86,7 @@ def _cache_key(keyword: str, max_results: int = 50, days_back: int = 90) -> str:
 
     `days_back` and `max_results` are part of the key because they change
     what the API returns. They used to be left out, which made the documented
-    escape hatch for a thin discovery day a SILENT NO-OP: the 09:00 cron
+    escape hatch for a thin discovery day a SILENT NO-OP: the daily cron
     searches a keyword with days_back=7 and caches it, then
     `--days-back 90` later the same day reads that 7-day result straight back
     out and reports it as a 90-day sweep. Same trap for `--test`, whose

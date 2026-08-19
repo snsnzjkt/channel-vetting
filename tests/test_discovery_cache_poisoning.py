@@ -313,7 +313,7 @@ def test_cache_key_normalises_the_keyword():
 def test_a_wider_days_back_is_not_served_from_a_narrower_cached_result(monkeypatch, tmp_path):
     """
     CLAUDE.md's documented escape hatch for a thin day is `--days-back 90`.
-    While the key ignored days_back, the 09:00 cron's 7-day result satisfied
+    While the key ignored days_back, the daily cron's 7-day result satisfied
     it — so the sweep returned the narrow window and spent nothing, with no
     error and no way to tell from the output.
     """

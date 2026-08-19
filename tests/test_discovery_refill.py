@@ -15,6 +15,7 @@ discover another batch. No network: discovery, Airtable and enrichment are
 all monkeypatched.
 """
 import main
+from search_zones import ZONE_CORE
 
 
 class _NullBlocklist:
@@ -86,7 +87,7 @@ def _run(monkeypatch, keywords, per_keyword=20, survives_one_in=5,
         globally_tracked_ids=set(),
         external_handles={},
         blocklist=_NullBlocklist(),
-        niche_config={"min_avg_views": 10_000, "min_channel_age_months": 12},
+        niche_config={"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE},
         scraper=None,
     )
     return searched, pushed, processed, cap_ok
@@ -176,7 +177,7 @@ def test_already_pushed_candidates_are_not_re_enriched(monkeypatch):
         keywords=[f"kw{i}" for i in range(4)], max_results_per_keyword=50, days_back=7,
         globally_tracked_ids=set(), external_handles={},
         blocklist=_NullBlocklist(),
-        niche_config={"min_avg_views": 10_000, "min_channel_age_months": 12},
+        niche_config={"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE},
         scraper=None,
     )
 

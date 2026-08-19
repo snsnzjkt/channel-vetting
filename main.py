@@ -33,9 +33,9 @@ from enrichment import (
 )
 from scoring import calc_fake_follower_risk, calc_overall_score, QUALIFIED, qualify
 from search_zones import (
-    country_code,
     description_location_outside_zone,
-    region_from_language_tag,
+    flag_country_outside_zone,
+    title_country_outside_zone,
     zone_verdict,
 )
 from airtable_client import (
@@ -82,7 +82,11 @@ logger = logging.getLogger(__name__)
 # so leaving it here made `import niches` on its own yield a registry missing
 # keywords_not_in_description and number_of_subscribers — i.e. correctness that
 # depended on whether main happened to be imported first.
-from niches import EXCLUDED_TOPIC_TERMS  # noqa: E402
+from niches import (  # noqa: E402
+    BROADCAST_TV_NAME_TERMS,
+    BROADCAST_TV_PHRASE_TERMS,
+    EXCLUDED_TOPIC_TERMS,
+)
 
 # NICHES lives in niches.py (extracted 2026-08-14) so outreach.py can read the
 # niche -> table mapping without importing this module and, with it, Playwright.
@@ -200,11 +204,15 @@ MIN_LONGFORM_VIDEO_COUNT = 30
 # defaultAudioLanguage/defaultLanguage, reduced to the most common value
 # across the sampled videos by enrichment.dominant_language().
 #
-# Matched on the "en" PREFIX, so en, en-US, en-GB and en-AU all pass: the
-# region subtag is not noise to be normalised away — main.resolve_country()
-# reads it to place channels that declare no country, which is the only
-# search-zone signal available for ~15% of candidates. Stripping it to a bare
-# "en" would silently blind the zone filter for exactly those channels.
+# Matched on the "en" PREFIX, so en, en-US, en-GB and en-AU all pass, and the
+# region subtag is still not noise to be normalised away — but the REASON
+# changed on 2026-08-20. It used to be that main.resolve_country() read the
+# subtag to place channels declaring no country. That fallback is deleted (an
+# `en-US` tag describes the AUDIENCE, and it was placing Vietnamese and Kenyan
+# creators in zone), so the subtag no longer feeds the zone filter at all.
+# What survives is simpler: the full tag is written VERBATIM to the "Content
+# Language" column, so stripping it to a bare "en" would silently rewrite that
+# column for every row and make new rows incomparable with existing ones.
 ENGLISH_LANGUAGE_PREFIX = "en"
 
 # Character ranges that mean a channel description is written in a language
@@ -372,6 +380,14 @@ DROP_TOO_FEW_VIDEOS = "too_few_videos"
 DROP_TOO_FEW_LONGFORM = "too_few_longform_videos"
 DROP_NOT_ENGLISH = "not_english"
 DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
+# The channel declares NO country at all (2026-08-20). Named apart from
+# DROP_OUTSIDE_SEARCH_ZONE on purpose: a run summary that cannot tell "we
+# looked and they're in Kenya" from "they told us nothing" cannot tell a
+# badly-targeted discovery query from a thin-metadata one, and the two need
+# opposite responses. Both are discards; only the reason differs.
+DROP_NO_DECLARED_COUNTRY = "no_declared_country"
+# A television network or a TV show's own channel, not a creator.
+DROP_BROADCAST_TV = "broadcast_tv"
 DROP_EXCLUDED_TOPIC = "excluded_topic"
 DROP_UPLOAD_CADENCE_TOO_LOW = "upload_cadence_too_low"
 DROP_STALE_CHANNEL = "stale_channel"
@@ -408,6 +424,49 @@ def excluded_topic_reason(*texts: str) -> str | None:
     for category, pattern in _EXCLUDED_TOPIC_PATTERNS.items():
         if pattern.search(blob):
             return category
+    return None
+
+
+# Two patterns, not one, because they are matched against DIFFERENT TEXT —
+# see the comment on BROADCAST_TV_NAME_TERMS in niches.py for the measurement
+# that forced the split.
+_BROADCAST_TV_NAME_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in BROADCAST_TV_NAME_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+_BROADCAST_TV_PHRASE_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in BROADCAST_TV_PHRASE_TERMS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def broadcast_tv_reason(channel_title: str, description: str) -> str | None:
+    """
+    Whether this channel is a television network or a TV show rather than a
+    creator: 'broadcast_tv_name', 'broadcast_tv_phrase', or None.
+
+    Free — reads only the title and About description `channels.list` already
+    returned, so it sits with the other description checks and costs no
+    performance fetch for a channel it discards.
+
+    **The two arguments are NOT interchangeable and must not be joined into
+    one blob.** Network NAMES are matched against the title only; a creator
+    who mentions HGTV or the BBC in their bio is citing a credit, and two live
+    rows (`Drew & Jonathan`, `Traveling with Kristin`) are exactly that. The
+    self-describing PHRASES are matched against both, because a show's bio is
+    where "a British daytime television ... programme" actually appears. This
+    is why the function takes (title, description) positionally instead of
+    `*texts` the way excluded_topic_reason does — the distinction is the whole
+    point of the gate.
+
+    Returns which HALF fired, not just that something did: the name list is
+    unbounded whack-a-mole and the phrase list is meant to generalise, so a
+    run summary showing only name hits means the phrase list has gone stale.
+    """
+    if _BROADCAST_TV_NAME_PATTERN.search(channel_title or ""):
+        return "broadcast_tv_name"
+    if _BROADCAST_TV_PHRASE_PATTERN.search(f"{channel_title or ''} {description or ''}"):
+        return "broadcast_tv_phrase"
     return None
 
 
@@ -508,12 +567,19 @@ def pre_push_drop_reason(
     dead channel is exactly the row this gate exists to stop writing.
 
     Deliberately does NOT cover the search zone, nor the long-form video
-    floor. Both need data this function can't get for free — a country
-    (see resolve_country) and up to three extra pages of uploads (see
-    longform_drop_reason) — so they run as their own steps in
-    process_candidate, AFTER everything here. Everything in this function is
-    answerable from data already fetched, which is what makes it the cheapest
-    place to discard.
+    floor, and the two sit on OPPOSITE sides of this function:
+
+      - The search zone (location_drop_reason) runs BEFORE this, and before
+        the performance fetch, because since 2026-08-20 every one of its
+        inputs is free — title, About description, declared country, all on
+        the channels.list response. It used to run after, when it still read
+        the content language's region subtag.
+      - The long-form floor (longform_drop_reason) runs AFTER, because it is
+        the one gate that can spend quota: up to three extra pages of uploads.
+
+    Everything in this function is answerable from data already fetched, which
+    is what makes it a cheap place to discard — but not the cheapest. That is
+    the zone gate above it.
 
     Unknown data never disqualifies, the same rule qualify() follows: a
     `video_count` of None means channels.list didn't report one, and an
@@ -585,45 +651,72 @@ def longform_drop_reason(longform_count: int) -> str | None:
     return None
 
 
-def resolve_country(stats: dict, performance: dict) -> str:
+def location_drop_reason(
+    channel_title: str,
+    description: str,
+    declared_country: str,
+    allowed_codes,
+) -> tuple[str | None, str]:
     """
-    Where the channel says it is, or "" when it says nothing.
+    The whole search-zone decision for one channel, as
+    (drop_reason, detail) — (None, "") to keep it.
 
-      1. `channels.list` -> snippet.country, an ISO 3166-1 alpha-2 code.
-         85% of the channels in the live tables set it (29 of 34).
-      2. The REGION SUBTAG of the content language ("en-GB" -> GB), for
-         the rest. Free — `get_recent_video_performance()` already read
-         `defaultAudioLanguage` for the "Content Language" column.
+    REWRITTEN 2026-08-20. This replaces `resolve_country()` plus the two
+    separate zone checks that used to sit on either side of the performance
+    fetch in `process_candidate`. Three things changed, all measured over the
+    144 rows already in the two niche tables (see search_zones' docstring):
 
-    Both steps are free, so this can run for every surviving candidate.
+      - **A missing country is now a DISCARD.** It used to be absent data and
+        the channel was kept for a human. The instruction was "don't include
+        channels unless they have a specific location listed on YouTube".
+        Costs 8 of 144 rows.
+      - **The content-language region subtag is gone as a location source.**
+        `en-US` describes the AUDIENCE. It is how `Lý Thiên An` and
+        `Her 86m2`, both Vietnamese, were placed in-zone.
+      - **Two new signals OUTRANK the declared country**, because requiring
+        the field fixes far less than it looks like it does: nine of the
+        twelve genuinely out-of-zone rows declare US, GB or CA. A flag in the
+        title and a country name in the title now vote "outside" over it, as
+        the About-description cue already did.
 
-    Step 2 is a weak signal used only where step 1 is silent, never to
-    override it: measured on the live tables the language tag disagrees
-    with the declared country for 4 of the 29 channels that have one
-    (`en-US` content from India, Austria and Serbia; `fr-FR` from the US).
-    A bare language with no region subtag yields nothing at all — see
-    search_zones.region_from_language_tag.
+    Precedence, highest first — the first three can only ever vote "outside",
+    so ordering them among themselves only changes which reason is REPORTED,
+    never whether the channel is dropped:
 
-    There is deliberately no browser step here. See browser_email.py: the
-    About panel's country is the same field as snippet.country, so it
-    recovered 0 of the 5 live channels that lack one.
+      1. flag emoji in the TITLE          -> outside_search_zone
+      2. country name in the TITLE        -> outside_search_zone
+      3. location cue in the DESCRIPTION  -> outside_search_zone
+      4. declared snippet.country         -> outside_search_zone / no_declared_country
 
-    NOTE — this is NOT the whole zone story. process_candidate runs a THIRD,
-    higher-priority signal BEFORE this one: description_location_outside_zone()
-    reads an explicit "based in <outside country>" out of the About text and,
-    unlike step 2 here, it DOES override a declared snippet.country (a creator
-    who set country=US but says "based in the Philippines" is dropped). It is a
-    separate gate rather than a source folded in here because (a) it only ever
-    votes "outside", never "inside", and (b) it must fire before the paid
-    performance/long-form fetch, whereas step 2 above needs content_language
-    from that fetch. Precedence, then, is: description-stated-outside (highest)
-    > declared snippet.country > language region subtag (lowest).
+    Every input is free — the title and description come from the
+    `channels.list` response and the declared country is a field on it — so
+    unlike the old arrangement this whole gate runs BEFORE
+    `get_recent_video_performance()`. That is worth ~3 quota units plus any
+    long-form paging for every out-of-zone candidate, and it is only possible
+    because step 4 no longer needs `content_language` from that fetch.
+
+    There is deliberately no browser step. See browser_email.py: the About
+    panel's country is the same field as snippet.country, so it recovered 0 of
+    the 5 live channels that lack one.
     """
-    country = (stats.get("country") or "").strip()
-    if country_code(country):
-        return country
+    flag_code = flag_country_outside_zone(channel_title, allowed_codes)
+    if flag_code:
+        return DROP_OUTSIDE_SEARCH_ZONE, f"title flies the {flag_code} flag"
 
-    return region_from_language_tag(performance.get("content_language"))
+    title_code = title_country_outside_zone(channel_title)
+    if title_code:
+        return DROP_OUTSIDE_SEARCH_ZONE, f"title names {title_code}"
+
+    desc_code = description_location_outside_zone(description)
+    if desc_code:
+        return DROP_OUTSIDE_SEARCH_ZONE, f"description says {desc_code}"
+
+    verdict = zone_verdict(declared_country, allowed_codes)
+    if verdict is None:
+        return DROP_NO_DECLARED_COUNTRY, "no country set on the channel"
+    if verdict is False:
+        return DROP_OUTSIDE_SEARCH_ZONE, f"declared country {declared_country}"
+    return None, ""
 
 
 def resolve_email_with_source(
@@ -950,6 +1043,20 @@ def process_candidate(
         )
         return None, DROP_EXCLUDED_TOPIC
 
+    # Television networks and TV shows (2026-08-20). A separate gate from
+    # excluded_topic_reason above because it matches network NAMES against the
+    # title only — a creator citing an HGTV credit in their bio is not a
+    # broadcaster — see broadcast_tv_reason and the niches.py comment. Free,
+    # and placed with the other description checks so a discarded broadcaster
+    # costs no performance fetch.
+    tv = broadcast_tv_reason(stats.get("channel_title", ""), stats.get("description", ""))
+    if tv:
+        logger.info(
+            "Dropping %s before push — %s (%s).",
+            stats.get("channel_title"), DROP_BROADCAST_TV, tv,
+        )
+        return None, DROP_BROADCAST_TV
+
     # The channel's own bio must read as English, whatever its per-video
     # language tag says. Free (the description is already fetched) and placed
     # here with the other description checks, so a non-English channel costs no
@@ -964,19 +1071,30 @@ def process_candidate(
         )
         return None, DROP_NON_ENGLISH_DESCRIPTION
 
-    # Real-location check: a creator who set snippet.country to the US but
-    # states an outside-the-zone location in their About ("based in the
-    # Philippines") is dropped here. Free (reads the description already
-    # fetched) and placed before the performance fetch; the declared-country
-    # zone check further down still runs for everyone whose description says
-    # nothing about where they live.
-    desc_country = description_location_outside_zone(stats.get("description", ""))
-    if desc_country:
+    # THE WHOLE SEARCH-ZONE DECISION, and it now runs HERE — before the paid
+    # performance fetch — rather than half here and half after it. Every input
+    # is free (title, About description, and snippet.country, all already on
+    # the channels.list response), so an out-of-zone candidate no longer costs
+    # ~3 quota units plus any long-form paging before being discarded. That
+    # became possible on 2026-08-20 when the declared-country check stopped
+    # falling back to the content language's region subtag, which was the one
+    # input that needed the fetch. See location_drop_reason.
+    #
+    # A channel that declares NO country is dropped here too. That is a
+    # deliberate break from "absent data never disqualifies" — see
+    # search_zones.zone_verdict.
+    zone_drop, zone_detail = location_drop_reason(
+        stats.get("channel_title", ""),
+        stats.get("description", ""),
+        (stats.get("country") or "").strip(),
+        niche_config["allowed_country_codes"],
+    )
+    if zone_drop:
         logger.info(
-            "Dropping %s before push — %s (description says %s, not the declared country).",
-            stats.get("channel_title"), DROP_OUTSIDE_SEARCH_ZONE, desc_country,
+            "Dropping %s before push — %s (%s).",
+            stats.get("channel_title"), zone_drop, zone_detail,
         )
-        return None, DROP_OUTSIDE_SEARCH_ZONE
+        return None, zone_drop
 
     performance = get_recent_video_performance(channel_id, stats.get("uploads_playlist_id"))
     time.sleep(API_SLEEP_SECONDS)
@@ -1024,20 +1142,11 @@ def process_candidate(
         )
         return None, drop_reason
 
-    # Search zone. Free — both of resolve_country's sources come out of
-    # data already fetched, so this costs no extra call and no page load.
-    #
-    # A None verdict means the channel declares no country we can read, and
-    # is deliberately KEPT — absent data is not evidence against a channel,
-    # the same rule qualify() applies to an unknown channel age. Only a
-    # positively-outside country is discarded.
-    country = resolve_country(stats, performance)
-    if zone_verdict(country) is False:
-        logger.info(
-            "Dropping %s before push — %s (country: %s).",
-            stats.get("channel_title"), DROP_OUTSIDE_SEARCH_ZONE, country,
-        )
-        return None, DROP_OUTSIDE_SEARCH_ZONE
+    # (The search-zone gate used to sit here, after the performance fetch,
+    # because its language-region-subtag fallback needed content_language.
+    # That fallback is gone and the whole gate moved ABOVE the fetch — see
+    # location_drop_reason. Don't move it back down: doing so would re-spend
+    # ~3 units on every out-of-zone candidate.)
 
     # Long-form floor, LAST of the discard gates because it is the only one
     # that can cost quota: confirming 30 non-Shorts uploads may need up to
@@ -1694,11 +1803,24 @@ def run_niche(
 
 # A NICHES entry missing any of these crashes run() with a bare KeyError
 # (table_name/keywords, indexed directly in run() before run_niche() is
-# even called) or run_niche() itself (min_avg_views/min_channel_age_months,
-# checked there — see its docstring). Checking all four here, up front,
-# means a bad config skips just that niche instead of killing the whole
-# run partway through.
-REQUIRED_NICHE_KEYS = ("table_name", "keywords", "min_avg_views", "min_channel_age_months")
+# even called), run_niche() itself (min_avg_views/min_channel_age_months,
+# checked there — see its docstring), or process_candidate() partway through
+# a niche (allowed_country_codes, indexed by the zone gate). Checking all
+# five here, up front, means a bad config skips just that niche instead of
+# killing the whole run partway through — which matters most for the last of
+# them, whose KeyError would land only after quota had already been spent.
+REQUIRED_NICHE_KEYS = (
+    "table_name",
+    "keywords",
+    "min_avg_views",
+    "min_channel_age_months",
+    # Required rather than defaulted (2026-08-20) so a new niche cannot
+    # silently inherit search_zones.ALLOWED_COUNTRY_CODES, which is the WIDEST
+    # zone the module knows and includes all of Europe — the zone both current
+    # niches were just taken OUT of. A missing key skips that niche with a
+    # logged error, which is loud; a silent Europe-wide default would not be.
+    "allowed_country_codes",
+)
 
 
 def run(

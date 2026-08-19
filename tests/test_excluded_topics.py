@@ -12,6 +12,7 @@ import pytest
 
 import main
 import niches
+from search_zones import ZONE_CORE
 
 
 class _NullBlocklist:
@@ -148,7 +149,7 @@ def test_process_candidate_drops_excluded_topic_before_performance(monkeypatch):
 
     record, reason = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Daily Politics"}, {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": 12}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE}, None,
     )
     assert record is None
     assert reason == main.DROP_EXCLUDED_TOPIC

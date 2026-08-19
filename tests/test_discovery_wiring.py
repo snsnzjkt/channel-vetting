@@ -23,6 +23,7 @@ import main
 # Imported by NAME rather than reached through the module: three tests below
 # bind a LOCAL dict called `niches`, which would shadow the module and turn an
 # attribute lookup into an AttributeError on a dict.
+from search_zones import ZONE_CORE
 from niches import (
     DISCOVERY_SUBSCRIBER_FLOOR_RATIO,
     EXCLUDED_TOPIC_KEYWORDS,
@@ -113,7 +114,7 @@ def test_get_channel_stats_requires_exactly_one_key():
 # --- process_candidate: handle-first + resolved-id dedupe -------------------
 
 def _niche():
-    return {"min_avg_views": 10_000, "min_channel_age_months": 12,
+    return {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
             "discovery_filters": {"profile_language": ["en"]}}
 
 
@@ -245,7 +246,7 @@ def _run_niche_discovery(monkeypatch, discovery, survives_one_in=1, blocklist=No
     result = main.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), external_handles or {},
         blocklist or _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": 12,
+        {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
          "discovery_filters": {"profile_language": ["en"]}},
         None, None, discovery,
     )
@@ -306,7 +307,7 @@ def _run_with_caps(monkeypatch, discovery, examined, qualified_cap, flagged_cap,
     monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
     return main.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": 12,
+        {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
          "discovery_filters": {"profile_language": ["en"]}},
         None, None, discovery,
     )
@@ -508,7 +509,7 @@ def test_the_quota_ceiling_stops_enrichment(monkeypatch):
     record, reason = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Anything", "matched_keywords": []},
         {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
 
     assert record is None
@@ -544,7 +545,7 @@ def test_the_blocklist_is_checked_before_the_quota_gate(monkeypatch):
     record, reason = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Blocked Co", "matched_keywords": []},
         {}, _NameBlocklist("Blocked Co"),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
 
     assert record is None
@@ -586,7 +587,7 @@ def test_run_niche_falls_back_to_search_when_discovery_is_disabled(monkeypatch):
     disabled = _FakeDiscovery([], enabled=False)
     main.run_niche(
         "Home Theater", "tbl", ["kw0", "kw1"], 50, 7, set(), {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": 12,
+        {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
          "discovery_filters": {"profile_language": ["en"]}},
         None, None, disabled,
     )
@@ -651,7 +652,7 @@ def test_tracked_handles_are_excluded_server_side(monkeypatch):
 
     main.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": 12,
+        {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
          "discovery_filters": {"profile_language": ["en"]}},
         None, None, disc,
     )
@@ -751,7 +752,7 @@ def test_the_handle_is_written_only_when_the_column_exists(monkeypatch):
     monkeypatch.setattr(main, "get_recent_video_performance", lambda *a, **k: perf)
     monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("e@x.com", "s", None))
     monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
-    niche = {"min_avg_views": 10_000, "min_channel_age_months": None, "table_name": "tbl"}
+    niche = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE, "table_name": "tbl"}
     candidate = {"channel_id": "UC1", "channel_title": "A Channel", "matched_keywords": []}
 
     # Column absent -> the field must not be sent at all.
@@ -778,6 +779,6 @@ def test_no_handle_field_probe_without_a_table_name(monkeypatch):
 
     record, reason = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "X"}, {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
     assert record is None and reason == "unreachable"

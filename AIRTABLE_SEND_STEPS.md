@@ -130,11 +130,27 @@ Each SEND automation looks its row up by that exact string.
 
 ## Before either automation is enabled
 
-1. **Ticking `Queue for outreach` sends immediately.** There is no cooling-off window
+1. **Ticking `Send email now` sends immediately.** There is no cooling-off window
    on this path — that is a property of the Python sender. Both Queue automations
    previously claimed otherwise in their descriptions; corrected 2026-08-19.
+   The field was **renamed** from `Queue for outreach` on 2026-08-19 because the old
+   name promised the queue this path does not have. Safe to rename: the automations
+   match on field ID, and the string appears in no `.py` file. Airtable automations
+   have **no delay action**, so the window cannot be added here — see
+   `AIRTABLE_INTERFACE_STEPS.md`.
 2. Confirm no real row has `Send Requested At` set, or enabling will fire for it.
+   **Checked and cleared 2026-08-19:** both `ZZ TEST` rows
+   (HT `recq9zwahlDCGvekx`, LS `recsupCMyIdkPxKCw`) had it set and would each have
+   fired on enable, before anyone clicked anything. Both tables now read **0** rows
+   stamped and **0** ticked. Re-check after any bulk edit — this is the precondition
+   that silently stops being true.
+   - **The LS row also had an EMPTY `Last Send State`**, so the Outreach Log row from
+     this file's own verification run is gone and the re-fire guard is unobserved
+     again, not merely unverified. Re-run the positive test before relying on it.
 3. `To` must be repointed from the demo address to the `Email` field.
+   Note the reviewer-facing half of this is **not** done: the send control was never
+   placed on the `Outreach` interface pages, so there is currently nothing to tick.
+   It cannot be added through the API. See `AIRTABLE_INTERFACE_STEPS.md`.
 4. **James attaches his Google account LAST.** The API can only attach an account
    owned by the same person who authorised the connection, and `update_automation` is
    a full replacement — so once the step points at his account, the whole automation

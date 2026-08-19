@@ -147,13 +147,81 @@ Each SEND automation looks its row up by that exact string.
    - **The re-fire guard is now VERIFIED on both niches** (2026-08-19), which this file
      previously recorded as never observed. Both test sends settled to `Sent`, both
      linked-prospect cells resolved to the channel NAME rather than a `rec…` string, and
-     both `Last Send State` rollups populated. The negative half — confirming a second
-     send REFUSES — is still unrun.
+     both `Last Send State` rollups populated. **The negative half is now RUN too
+     (2026-08-19): the rollup guard held for 87 seconds against a fresh stamp with
+     `Status` manually reset to `Approved`, and released only when the ledger row was
+     deleted.** See "The re-fire guard" below — including why that procedure disables one
+     of the two guards, and why deleting a ledger row mid-stamp re-fires the send.
 3. **The reviewer-facing half is DONE (2026-08-20).** The send control now lives on
    `📧 Send Emails — Home Theater` / `— Lifestyle Sofa` and it works. An earlier version
    of this file said it could not be added through the API; that was wrong —
    `recordReview` pages come out read-only, `grid` pages do not. See
    `AIRTABLE_INTERFACE_STEPS.md`.
+
+## The re-fire guard: TWO independent blocks, and how testing fools you
+
+Established 2026-08-19 across three test sends, two of which I misread. Read this before
+concluding the guard is broken.
+
+**The trigger carries two independent guards, not one:**
+
+| Condition | Field type | Set by |
+|---|---|---|
+| `Status = Approved` | plain singleSelect | the send's LAST step writes `Contacted` |
+| `Last Send State isEmpty` | **rollup** through a record link | the claim row's `Send State` |
+
+A normally-completed send trips **both**. `Contacted` is not `Approved`, so the first
+blocks a re-fire without the rollup being involved at all. That redundancy is the real
+protection, and it is easy to miss because only the rollup is described as "the guard".
+
+**A proposed third condition, `Status is not Contacted`, is REDUNDANT — do not add it.**
+`Status = Approved` already excludes `Contacted`. It was recommended once on the false
+premise that it would have blocked the observed spurious sends; it would have blocked
+none of them, because `Status` was `Approved` in every case.
+
+### Why the negative test appears to fail
+
+The documented procedure — *set `Status` back to `Approved`, clear and re-set
+`Send Requested At`* — **deliberately disables the first guard** in order to test the
+second in isolation. A send firing during that test therefore does NOT demonstrate a
+production defect. It demonstrates that one of two guards was switched off by the tester.
+
+Measured on the realistic path: with `Status` reset to `Approved` and a fresh stamp, the
+rollup guard **held for 87 seconds** and nothing sent.
+
+### THE FOOTGUN: never remove a ledger row while the stamp is still set
+
+The 87-second block ended the instant the ledger row was deleted:
+
+```
+18:19:36.786   re-stamp; Last Send State = "Sent"   -> correctly BLOCKED
+18:21:02.xxx   ledger row DELETED -> rollup empties -> guard RELEASED
+18:21:02.510   claim written -> sent 1.5s later
+```
+
+Deleting or **unlinking** a claim row empties the rollup. If `Send Requested At` is still
+stamped, all four conditions become true again and the send fires within a second. The
+automation is behaving correctly; the cleanup was wrong.
+
+**Correct cleanup order: clear `Send Requested At` FIRST, then remove ledger rows.**
+This also explains earlier confusion in the same session when ledger rows were unlinked
+to re-arm test rows.
+
+### Latency varies enormously — never conclude from an early check
+
+Observed claim latency after a stamp: **1.5 s** in one run, **87 s** in another. Two
+"the guard passed" conclusions were drawn during that gap and both were wrong. Wait a
+bounded interval and re-list the Outreach Log before concluding anything; report "no
+result yet" rather than "passed".
+
+### One bypass remains unexplained
+
+A synthetic test — ledger row hand-created and linked by hand, `Status` left at
+`Approved`, nothing deleted — fired at +1.5 s with the rollup reading `"Sent"`. No
+mechanism was established and none is guessed here. Note it required `Status` to be
+manually held at `Approved`, which production never does after a send, so the
+double-guard design covers it. Treat hand-written or hand-linked Outreach Log rows as
+outside the guard's tested envelope.
 
 ## GO LIVE — the order IS the instruction
 

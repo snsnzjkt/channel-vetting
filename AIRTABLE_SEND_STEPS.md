@@ -139,19 +139,68 @@ Each SEND automation looks its row up by that exact string.
    have **no delay action**, so the window cannot be added here — see
    `AIRTABLE_INTERFACE_STEPS.md`.
 2. Confirm no real row has `Send Requested At` set, or enabling will fire for it.
-   **Checked and cleared 2026-08-19:** both `ZZ TEST` rows
-   (HT `recq9zwahlDCGvekx`, LS `recsupCMyIdkPxKCw`) had it set and would each have
-   fired on enable, before anyone clicked anything. Both tables now read **0** rows
-   stamped and **0** ticked. Re-check after any bulk edit — this is the precondition
-   that silently stops being true.
-   - **The LS row also had an EMPTY `Last Send State`**, so the Outreach Log row from
-     this file's own verification run is gone and the re-fire guard is unobserved
-     again, not merely unverified. Re-run the positive test before relying on it.
-3. `To` must be repointed from the demo address to the `Email` field.
-   Note the reviewer-facing half of this is **not** done: the send control was never
-   placed on the `Outreach` interface pages, so there is currently nothing to tick.
-   It cannot be added through the API. See `AIRTABLE_INTERFACE_STEPS.md`.
-4. **James attaches his Google account LAST.** The API can only attach an account
-   owned by the same person who authorised the connection, and `update_automation` is
-   a full replacement — so once the step points at his account, the whole automation
-   becomes un-writable by the API and every later edit is by hand.
+   Two `ZZ TEST` rows once had it set and would each have fired on enable before anyone
+   clicked anything; both were cleared, then deleted entirely on 2026-08-20 along with
+   every ZZ TEST row and Outreach Log entry. **Both prospect tables now read 0 stamped
+   and 0 ticked, and the Outreach Log is EMPTY** — so its next row will be a real send.
+   Re-check after any bulk edit; this is the precondition that silently stops being true.
+   - **The re-fire guard is now VERIFIED on both niches** (2026-08-19), which this file
+     previously recorded as never observed. Both test sends settled to `Sent`, both
+     linked-prospect cells resolved to the channel NAME rather than a `rec…` string, and
+     both `Last Send State` rollups populated. The negative half — confirming a second
+     send REFUSES — is still unrun.
+3. **The reviewer-facing half is DONE (2026-08-20).** The send control now lives on
+   `📧 Send Emails — Home Theater` / `— Lifestyle Sofa` and it works. An earlier version
+   of this file said it could not be added through the API; that was wrong —
+   `recordReview` pages come out read-only, `grid` pages do not. See
+   `AIRTABLE_INTERFACE_STEPS.md`.
+
+## GO LIVE — the order IS the instruction
+
+Two fields separate demo from production, and **the order matters more than either
+change**. Both must be done in BOTH automations; they are independent of each other.
+
+### Step 1 — every other edit, first
+
+Copy, links, attachments, trigger conditions, anything at all. Do it now, because step 3
+permanently ends the ability to make these programmatically.
+
+### Step 2 — `To`
+
+Automations → the Gmail step → **To**. It currently holds typed text,
+`edrine.e@hendersonassociates.ca`. Replace it with a **reference to the prospect's
+`Email` field** — insert the field token, do not type an address.
+
+**How to tell the states apart:** plain text = demo, safe, cannot reach a creator. A
+field token = **LIVE**. Check it before any session where you intend to tick something,
+on both automations.
+
+The moment it is a token, every creator on the send pages (49 as of 2026-08-20) sits one
+tick from a real cold email, with no undo.
+
+### Step 3 — `From`, a ONE-WAY DOOR
+
+The **From** address is the connected Google account on that same Gmail step. It must
+become `james@valenciatheaterseating.com`, and **James must attach it himself while
+signed into that account** — the API can only attach an account owned by whoever
+authorised the connection, so nobody can do it on his behalf.
+
+**This permanently locks the automation to hand-editing.** `update_automation` is a full
+replacement, so once the step points at his account the API can no longer rewrite that
+automation at all, and every later change — one word of copy, one link — becomes manual
+UI work forever. That is why it is step 3 and not step 1.
+
+Until it is done, the visible sender is a Henderson address while the signature reads
+`james@valenciatheaterseating.com`. The two disagree, so it cannot ship as is.
+
+### The stop switch
+
+Toggling the two SEND automations **off** halts everything immediately. First thing to
+reach for if anything looks wrong.
+
+### Before the first real batch
+
+Run `python audit_blocklist.py` — read-only, no quota. The Airtable send checks DO NOT
+CONTACT by **email only** (314 of 1329 entries); that script checks handle, email and
+name, and is the only check covering the whole list. Verified 0 hits across both tables
+on 2026-08-20.

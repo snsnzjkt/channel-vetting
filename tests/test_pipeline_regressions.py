@@ -19,6 +19,7 @@ import pytest
 
 from airtable_client import AirtableReadError
 from do_not_contact import BlocklistUnavailable
+from search_zones import ZONE_CORE
 
 
 class _NullBlocklist:
@@ -97,7 +98,7 @@ def test_run_aborts_when_blocklist_unavailable(monkeypatch):
             "table_name": "tbl",
             "keywords": ["kw"],
             "min_avg_views": 0,
-            "min_channel_age_months": None,
+            "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE,
         }
     }
 
@@ -138,7 +139,7 @@ def test_run_aborts_when_get_existing_channel_ids_fails(monkeypatch):
             "table_name": "tbl",
             "keywords": ["kw"],
             "min_avg_views": 0,
-            "min_channel_age_months": None,
+            "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE,
         }
     }
 
@@ -163,7 +164,7 @@ def test_run_niche_skips_on_airtable_read_error(monkeypatch):
         globally_tracked_ids=set(),
         external_handles={},
         blocklist=_NullBlocklist(),
-        niche_config={"min_avg_views": 0, "min_channel_age_months": None},
+        niche_config={"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE},
         scraper=None,
     )
 
@@ -190,7 +191,7 @@ def test_run_niche_skips_run_discovery_when_already_at_cap(monkeypatch):
         globally_tracked_ids=set(),
         external_handles={},
         blocklist=_NullBlocklist(),
-        niche_config={"min_avg_views": 0, "min_channel_age_months": None},
+        niche_config={"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE},
         scraper=None,
     )
 
@@ -240,7 +241,7 @@ def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
     monkeypatch.setattr(main, "push_record", lambda t, r: pytest.fail("blocked candidate must never be pushed"))
 
-    niche_config = {"min_avg_views": 0, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
 
     result = main.push_until_full(
@@ -274,7 +275,7 @@ def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
-    niche_config = {"min_avg_views": 0, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
 
     main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, sentinel_scraper)
 
@@ -302,7 +303,7 @@ def test_process_candidate_drops_a_channel_with_no_external_links(monkeypatch):
     )
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
-    niche_config = {"min_avg_views": 0, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
 
     record, reason = main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
@@ -325,7 +326,7 @@ def test_process_candidate_keeps_a_channel_when_link_presence_is_unknown(monkeyp
     )
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
-    niche_config = {"min_avg_views": 0, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
 
     record, reason = main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
@@ -361,7 +362,7 @@ def test_process_candidate_does_not_feed_the_view_floor_to_qualify(monkeypatch):
     """
     from scoring import QUALIFIED
 
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 6}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 6, "allowed_country_codes": ZONE_CORE}
     _record, qualification = _run_process_candidate(
         monkeypatch, niche_config, avg_views=50_000, age=100,
     )
@@ -373,7 +374,7 @@ def test_process_candidate_still_flags_a_young_channel(monkeypatch):
     """The age gate is the one criterion that still produces a row."""
     from scoring import NEW_CHANNEL
 
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 12}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE}
     record, qualification = _run_process_candidate(
         monkeypatch, niche_config, avg_views=50_000, age=3,
     )
@@ -392,7 +393,7 @@ def test_process_candidate_drops_a_channel_below_the_view_floor(monkeypatch):
     """
     import main
 
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
         monkeypatch, niche_config, avg_views=5_000, age=100,
     )
@@ -404,7 +405,7 @@ def test_process_candidate_drops_a_channel_below_the_view_floor(monkeypatch):
 def test_process_candidate_drops_a_channel_with_too_few_videos(monkeypatch):
     import main
 
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
         monkeypatch, niche_config, avg_views=50_000, age=100, video_count=12,
     )
@@ -416,7 +417,7 @@ def test_process_candidate_drops_a_channel_with_too_few_videos(monkeypatch):
 def test_process_candidate_drops_a_channel_outside_the_search_zones(monkeypatch):
     import main
 
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
         monkeypatch, niche_config, avg_views=50_000, age=100, country="IN",
     )
@@ -425,29 +426,50 @@ def test_process_candidate_drops_a_channel_outside_the_search_zones(monkeypatch)
     assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
 
 
-def test_process_candidate_keeps_a_channel_with_no_declared_country(monkeypatch):
+def test_process_candidate_drops_a_channel_with_no_declared_country(monkeypatch):
     """
-    Most channels never set snippet.country. Discarding them would throw
-    away the bulk of the pipeline's output, so an unknown country is kept
-    and a human decides — the same rule as an unknown channel age.
-    """
-    from scoring import QUALIFIED
+    2026-08-20 INVERSION, and the headline one. This test previously asserted
+    the OPPOSITE — that an unknown country is absent data and the channel is
+    kept for a human, the same rule as an unknown channel age.
 
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
-    record, qualification = _run_process_candidate(
+    The instruction that reversed it was explicit: "don't include channels
+    unless they have a specific location listed on YouTube". The old docstring
+    also justified itself with "most channels never set snippet.country",
+    which measurement did not support: over the 144 rows already tracked, only
+    8 (5.6%) leave it blank.
+
+    So a blank country is now evidence, not the absence of it. This and the
+    English-language gate are the two places the project deliberately breaks
+    its own "absent data never disqualifies" rule — do not "restore
+    consistency" here without reading search_zones' docstring first.
+    """
+    import main
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
+    record, reason = _run_process_candidate(
         monkeypatch, niche_config, avg_views=50_000, age=100, country="Unknown",
     )
 
-    assert record is not None
-    assert qualification == QUALIFIED
+    assert record is None
+    assert reason == main.DROP_NO_DECLARED_COUNTRY
 
 
-def test_the_language_region_subtag_resolves_a_country_the_api_left_blank(monkeypatch):
+def test_the_language_region_subtag_is_no_longer_a_location(monkeypatch):
     """
-    Step 2 of resolve_country, and the real case it exists for: Tamilan
-    Market, live in the Lifestyle Sofa table, sets no snippet.country but
-    tags its videos `en-IN`. Without this step it stays "unknown" and gets
-    written.
+    2026-08-20 INVERSION. `resolve_country` used to fall back to the content
+    language's region subtag when snippet.country was blank, so an `en-IN`
+    channel resolved to IN and an `en-US` one resolved to US.
+
+    That fallback is deleted, and this test pins the direction it was deleted
+    in: a channel with NO declared country is dropped as
+    `no_declared_country`, and specifically NOT as `outside_search_zone` —
+    which is what the old code would have said here, having read IN out of the
+    tag. The reasons are distinct so a run summary can tell "we looked and
+    they're out of zone" from "they told us nothing".
+
+    Why it went: the tag describes the AUDIENCE. Measured on the live tables,
+    `Lý Thiên An` and `Her 86m2` are both Vietnamese creators tagging `en-US`,
+    and both were placed in zone by this step.
     """
     import main
 
@@ -461,14 +483,46 @@ def test_the_language_region_subtag_resolves_a_country_the_api_left_blank(monkey
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
 
     record, reason = main.process_candidate(
         candidate, {}, _NullBlocklist(), niche_config, None,
     )
 
     assert record is None
-    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+    assert reason == main.DROP_NO_DECLARED_COUNTRY
+
+
+def test_an_in_zone_language_tag_does_not_rescue_a_blank_country(monkeypatch):
+    """
+    The half of the inversion above that actually costs rows, and the half a
+    well-meaning "fix" would restore: `en-US` on a channel that declares no
+    country used to resolve to US and be KEPT. It is now dropped.
+
+    This is the direction the instruction asked for — "don't include channels
+    unless they have a specific location listed on YouTube" — and an `en-US`
+    tag is not a location listed on YouTube.
+    """
+    import main
+
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(country=""))
+    monkeypatch.setattr(
+        main, "get_recent_video_performance",
+        lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-US"),
+    )
+    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+
+    candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
+
+    record, reason = main.process_candidate(
+        candidate, {}, _NullBlocklist(), niche_config, None,
+    )
+
+    assert record is None
+    assert reason == main.DROP_NO_DECLARED_COUNTRY
 
 
 def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
@@ -490,7 +544,7 @@ def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
 
     record, reason = main.process_candidate(
         candidate, {}, _NullBlocklist(), niche_config, None,
@@ -500,35 +554,49 @@ def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
     assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
 
 
-def test_a_bare_language_leaves_the_country_unknown(monkeypatch):
+def test_a_bare_language_no_longer_leaves_the_channel_admitted(monkeypatch):
     """
-    `en` says nothing about where the creator is, so the channel is kept.
-    Mapping bare languages to countries would have gained nothing on the
-    live tables and cost real prospects — see search_zones.py.
-    """
-    from scoring import QUALIFIED
+    2026-08-20 INVERSION of "an unknown country is absent data, so keep it".
 
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
-    record, qualification = _run_process_candidate(
+    `en` still says nothing about where the creator is — that part is
+    unchanged, and bare languages are still never mapped to countries. What
+    changed is the CONSEQUENCE: a channel this pipeline cannot place is now
+    discarded rather than written for a human to judge.
+
+    Measured cost before choosing it: 8 of the 144 rows already tracked
+    (5.6%). Measured reason: the reviewer found the rows that could not be
+    placed were overwhelmingly outside the zone.
+    """
+    import main
+
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
+    record, reason = _run_process_candidate(
         monkeypatch, niche_config, avg_views=50_000, age=100, country="Unknown",
     )
 
-    assert record is not None
-    assert qualification == QUALIFIED
+    assert record is None
+    assert reason == main.DROP_NO_DECLARED_COUNTRY
 
 
-def test_resolve_country_does_not_take_a_scraper():
+def test_the_zone_gate_does_not_take_a_scraper():
     """
     The About panel's country is the same field as snippet.country and
     recovered 0 of the 5 live channels without one. A scraper argument
-    reappearing here means that page load came back.
+    appearing on the zone gate means that page load came back.
+
+    Also pins that the gate reads only FREE inputs — title, description and
+    the declared country, all already on the channels.list response, with no
+    `performance` argument. That is what lets it run BEFORE
+    get_recent_video_performance and save ~3 quota units per out-of-zone
+    candidate; a `performance` parameter reappearing here means the gate has
+    been pushed back below the paid fetch.
     """
     import inspect
 
     import main
 
-    assert list(inspect.signature(main.resolve_country).parameters) == [
-        "stats", "performance",
+    assert list(inspect.signature(main.location_drop_reason).parameters) == [
+        "channel_title", "description", "declared_country", "allowed_codes",
     ]
 
 
@@ -643,7 +711,7 @@ def test_run_raises_when_every_niche_skips_for_non_cap_reason(monkeypatch):
             "table_name": "tbl",
             "keywords": ["kw"],
             "min_avg_views": 0,
-            "min_channel_age_months": None,
+            "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE,
         }
     }
 
@@ -698,7 +766,7 @@ def test_run_does_not_raise_when_a_niche_is_legitimately_at_cap(monkeypatch):
             "table_name": "tbl",
             "keywords": ["kw"],
             "min_avg_views": 0,
-            "min_channel_age_months": None,
+            "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE,
         }
     }
 
@@ -725,13 +793,13 @@ def test_run_skips_niche_missing_table_name_or_keywords_key(monkeypatch):
             # missing "table_name"
             "keywords": ["kw"],
             "min_avg_views": 0,
-            "min_channel_age_months": None,
+            "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE,
         },
         "No Keywords": {
             "table_name": "tbl",
             # missing "keywords"
             "min_avg_views": 0,
-            "min_channel_age_months": None,
+            "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE,
         },
     }
 

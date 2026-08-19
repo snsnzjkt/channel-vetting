@@ -52,19 +52,24 @@ from enrichment import (
     calc_uploads_per_year,
     days_since_last_upload,
 )
-from search_zones import zone_verdict, description_location_outside_zone
+# Nothing is imported from search_zones directly any more: the whole zone
+# decision (flag in title / country in title / cue in description / declared
+# country, against the NICHE's own allowed set) lives in
+# main.location_drop_reason, and reimplementing any part of it here is exactly
+# the drift this script exists to avoid.
 from main import (
     NICHES,
     MIN_LONGFORM_VIDEO_COUNT,
+    broadcast_tv_reason,
     description_is_non_english,
     excluded_topic_reason,
+    location_drop_reason,
     longform_drop_reason,
     non_latin_script_chars,
     pre_push_drop_reason,
-    resolve_country,
+    DROP_BROADCAST_TV,
     DROP_EXCLUDED_TOPIC,
     DROP_NON_ENGLISH_DESCRIPTION,
-    DROP_OUTSIDE_SEARCH_ZONE,
 )
 from config import API_SLEEP_SECONDS
 
@@ -111,15 +116,29 @@ def evaluate_row(record: dict, niche_config: dict) -> tuple[str, str]:
     if topic:
         return DROP_EXCLUDED_TOPIC, topic
 
+    tv = broadcast_tv_reason(stats.get("channel_title", ""), stats.get("description", ""))
+    if tv:
+        return DROP_BROADCAST_TV, tv
+
     # Same order as process_candidate: the free description checks first.
     if description_is_non_english(stats.get("description", "")):
         return DROP_NON_ENGLISH_DESCRIPTION, (
             f"{non_latin_script_chars(stats.get('description', ''))} non-Latin script chars in the bio"
         )
 
-    desc_country = description_location_outside_zone(stats.get("description", ""))
-    if desc_country:
-        return DROP_OUTSIDE_SEARCH_ZONE, f"description says {desc_country}"
+    # The whole search-zone decision, delegated to the pipeline's own
+    # function so this script and process_candidate can never disagree about
+    # what "in zone" means — and, since 2026-08-20, running BEFORE the
+    # performance fetch here for the same reason it does there: every input is
+    # free, so a row that fails it costs 1 quota unit to audit instead of ~3.
+    zone_drop, zone_detail = location_drop_reason(
+        stats.get("channel_title", ""),
+        stats.get("description", ""),
+        (stats.get("country") or "").strip(),
+        niche_config["allowed_country_codes"],
+    )
+    if zone_drop:
+        return zone_drop, zone_detail
 
     performance = get_recent_video_performance(channel_id, stats.get("uploads_playlist_id"))
     time.sleep(API_SLEEP_SECONDS)
@@ -150,9 +169,8 @@ def evaluate_row(record: dict, niche_config: dict) -> tuple[str, str]:
             f"{stats.get('video_count')} videos, lang {performance.get('content_language') or 'unset'}"
         )
 
-    country = resolve_country(stats, performance)
-    if zone_verdict(country) is False:
-        return DROP_OUTSIDE_SEARCH_ZONE, f"country {country}"
+    # (The zone check used to sit here, after the performance fetch. It moved
+    # above it on 2026-08-20 — see location_drop_reason.)
 
     # Long-form floor last, because it is the only check that can spend extra
     # quota — exactly the ordering process_candidate uses.

@@ -226,11 +226,21 @@ def test_numeric_un_m49_regions_are_ignored():
     assert region_from_language_tag("en-419") == ""
 
 
-def test_the_live_language_tags_get_the_right_verdicts():
+def test_the_language_region_subtag_is_no_longer_composed_into_a_verdict():
     """
-    Every distinct Content Language value across the two live tables. Only
-    en-IN should be excluded; the rest are either inside the zones or carry
-    no region at all.
+    HISTORICAL. This composition — region_from_language_tag() piped into
+    zone_verdict() — WAS how ~15% of candidates got placed, and this test
+    pinned its answers over every distinct Content Language value in the live
+    tables. **The pipeline no longer does this**, as of 2026-08-20: the tag
+    describes the AUDIENCE, and it was placing Vietnamese (`en-US`) and
+    Japanese (`en-US`) creators inside the zone.
+
+    Both functions still exist and both still behave as they did, so the
+    composition is still computable — which is exactly the risk. It is kept
+    here, renamed, so that the numbers stay recorded AND so a reader cannot
+    mistake it for live behaviour. `region_from_language_tag` survives only
+    because the full tag is written verbatim to the "Content Language" column;
+    nothing reads it as a location. See main.location_drop_reason.
     """
     from search_zones import region_from_language_tag, zone_verdict
 
@@ -241,8 +251,17 @@ def test_the_live_language_tags_get_the_right_verdicts():
         "en-IN": False,
     }
     for tag, want in expected.items():
+        # NOTE the default `allowed_codes` here: the widest zone, Europe
+        # included. That is why fr-FR still reads True. No niche runs on it.
         got = zone_verdict(region_from_language_tag(tag))
         assert got is want, f"{tag}: expected {want}, got {got}"
+
+    import main
+
+    assert not hasattr(main, "resolve_country"), (
+        "resolve_country was the only caller that turned a language tag into a "
+        "location. If it is back, the 2026-08-20 fix has been reverted."
+    )
 
 
 def test_country_code_passes_through_an_unrecognised_two_letter_code():

@@ -10,6 +10,7 @@ already show MIN_LONGFORM_VIDEO_COUNT of them (2 quota units per extra page).
 No network: every YouTube call is monkeypatched.
 """
 import pytest
+from search_zones import ZONE_CORE
 
 
 class _Resp:
@@ -260,7 +261,7 @@ def test_process_candidate_does_not_page_for_a_candidate_it_already_rejected(mon
     record, reason = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
 
     assert record is None
@@ -301,7 +302,7 @@ def test_process_candidate_pages_when_the_newest_window_is_short(monkeypatch):
     record, qualification = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
 
     assert calls == [(22, 30)], "must resume from the 22 already seen, not recount from zero"

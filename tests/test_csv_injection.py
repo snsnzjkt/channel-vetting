@@ -22,6 +22,7 @@ genuinely numeric and Airtable's Number fields reject strings.
 No network: the record test monkeypatches every YouTube/Airtable call.
 """
 import pytest
+from search_zones import ZONE_CORE
 
 
 # --- the dangerous prefixes ----------------------------------------------
@@ -229,7 +230,7 @@ def _build_record(monkeypatch, *, channel_title="Chan", email="", content_langua
     monkeypatch.setattr(main.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": channel_title, "matched_keywords": []}
-    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None}
+    niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, _qualification = main.process_candidate(
         candidate, {}, _NullBlocklist(), niche_config, None,
     )
@@ -335,7 +336,7 @@ def test_a_hostile_content_language_is_dropped_outright(monkeypatch):
     record, reason = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
 
     assert record is None

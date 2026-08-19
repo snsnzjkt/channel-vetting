@@ -19,6 +19,7 @@ every hard requirement:
 Shorts are detected by duration, since the API has no Shorts flag.
 """
 import pytest
+from search_zones import ZONE_CORE
 
 
 # A catalogue and a view count that comfortably clear the new floors, so
@@ -234,9 +235,15 @@ def test_drops_a_channel_whose_content_is_not_english():
 
 def test_regional_english_variants_all_pass():
     """
-    en-GB/en-US/en-AU must pass, and must NOT be normalised to a bare "en":
-    resolve_country() reads the region subtag to place channels that declare
-    no country, and that is the only zone signal for ~15% of candidates.
+    en-GB/en-US/en-AU must pass, and must NOT be normalised to a bare "en".
+
+    The reason changed on 2026-08-20 but the rule did not. It used to be that
+    resolve_country() read the region subtag to place channels declaring no
+    country; that fallback is deleted, because the tag describes the AUDIENCE
+    and was placing Vietnamese and Kenyan creators in zone. What still forbids
+    normalising is that the full tag is written verbatim to the "Content
+    Language" column — flattening it would rewrite that column for every new
+    row and make them incomparable with the existing ones.
     """
     for tag in ("en", "en-US", "en-GB", "en-AU", "en-CA", "EN-gb"):
         assert drop_reason(content_language=tag) is None, tag
@@ -567,7 +574,7 @@ def test_process_candidate_drops_a_non_english_bio_before_paying_for_performance
     record, reason = main.process_candidate(
         {"channel_id": "UC1", "channel_title": "LIN TAN", "matched_keywords": []},
         {}, _NoBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
     assert record is None
     assert reason == main.DROP_NON_ENGLISH_DESCRIPTION
@@ -695,7 +702,7 @@ def _process_candidate(monkeypatch, perf):
     return main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Clean Channel", "matched_keywords": []},
         {}, _NullBlocklist(),
-        {"min_avg_views": 10_000, "min_channel_age_months": None}, None,
+        {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
 
 

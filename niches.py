@@ -10,6 +10,7 @@ Playwright — into a process whose only job is sending an email.
 truth: adding a niche in one place is still enough.
 """
 from config import AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA
+from search_zones import ZONE_CORE
 
 # One entry per niche: its search keywords (drawn directly from the
 # "Types of Content Posting" > Primary section of each influencer
@@ -51,6 +52,20 @@ NICHES = {
         # bar again without unpicking the gate.
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
+        # NARROWED 2026-08-20 from US/CA/UK/Europe/AU to US/CA/UK/AU. The
+        # instruction named Lifestyle ("Europe is not in our search zone for
+        # lifestyle. Only UK USA CANADA and AUS") and the standing instruction
+        # to keep the two niches' criteria unified carries it here — the same
+        # reasoning that moved the other niche's view floor to match this one.
+        # Cost, measured over this table's 60 tracked rows: 5 European rows
+        # (2 DE, NO, FR, CH). To put Europe back for this niche alone, write
+        # `ZONE_CORE | EUROPE_COUNTRY_CODES` — search_zones still defines it.
+        #
+        # Per-niche rather than a module constant for the same reason
+        # min_avg_views is: these two niches' criteria have already diverged
+        # and reconverged once, and a shared constant would have to be
+        # unpicked from the gate to let them diverge again.
+        "allowed_country_codes": ZONE_CORE,
         # influencers.club discovery filters (the source that replaces
         # search.list when INFLUENCERS_API_KEY is set — see run_niche). The
         # products being promoted are home-theatre gear, so the creators worth
@@ -146,6 +161,12 @@ NICHES = {
         # views) are out of scope — this pipeline only observes YouTube.
         "min_avg_views": 10_000,
         "min_channel_age_months": None,
+        # NARROWED 2026-08-20. This is the niche the instruction actually
+        # named: "Europe is not in our search zone for lifestyle. Only UK USA
+        # CANADA and AUS". Cost, measured over this table's 84 tracked rows:
+        # 4 European rows (2 DE, FR, UA). See the Home Theater entry for why
+        # this is a per-niche key and how to restore Europe.
+        "allowed_country_codes": ZONE_CORE,
         # Fashion, lifestyle, travel, house tours, and home decor — and
         # especially women-led channels. gender="female" filters the CREATOR
         # server-side (values verified live: 'any' | 'male' | 'female').
@@ -303,7 +324,82 @@ EXCLUDED_TOPIC_TERMS = {
     ],
 }
 
-# The same off-brand terms, flattened for influencers.club discovery's
+# ---------------------------------------------------------------------------
+# BROADCASTERS AND TV SHOWS (2026-08-20)
+#
+# Added after HGTV (1.07M subs), Entertainment Tonight (7.71M) and Escape To
+# The Country — a BBC daytime property programme — were all written into the
+# Lifestyle table as **Qualified**. Nothing in the pipeline asked whether a
+# channel is a person or a broadcaster, so all three cleared every gate: they
+# post long-form English video, well over the view floor, from an in-zone
+# country. A brand-partnership run cannot use a television network.
+#
+# Kept SEPARATE from EXCLUDED_TOPIC_TERMS above rather than added as another
+# category there, for two reasons that both come out of the measurement:
+#
+#   1. **The two lists need different SCOPES.** Network names are matched
+#      against the channel TITLE ONLY. Matching them in the About text was
+#      measured over all 144 tracked rows and produces false positives
+#      immediately: `Drew & Jonathan` say "you probably know us from our HGTV
+#      shows" and `Traveling with Kristin` lists BBC among her press credits.
+#      Both are genuine creator channels. A creator MENTIONS a network; a
+#      network IS one. EXCLUDED_TOPIC_TERMS is title+bio and must stay that
+#      way, so these cannot share its matcher.
+#   2. **These must NOT reach the vendor.** Every term in
+#      EXCLUDED_TOPIC_TERMS is flattened into EXCLUDED_TOPIC_KEYWORDS and sent
+#      as influencers.club's `keywords_not_in_description`, which is a BIO
+#      negation — precisely the scope proved unsafe in (1). Sending "bbc"
+#      would have withheld Traveling with Kristin from discovery entirely.
+#      The credit saving forgone is trivial (0.01 per creator, and this fires
+#      on 3 of 144 rows); the pool damage would not have been.
+#
+# Verified over all 144 tracked rows: exactly HGTV, Entertainment Tonight and
+# Escape To The Country fire. Zero false positives. This is the same honest
+# whack-a-mole as sim_racing / forestry above — it catches the broadcasters
+# named here and the shows that describe themselves as shows, and nothing
+# else. It deliberately does NOT catch corporate/brand channels that are not
+# television (Dolby, ADAM Audio, Apartment Therapy are all still admitted);
+# widening to those was considered and declined as a separate decision.
+#
+# Matched on the channel TITLE ONLY — see reason (1) above. Keep this list to
+# broadcaster BRANDS whose name in a channel title can only mean the
+# broadcaster. Show names do not belong here: they are unbounded, and
+# BROADCAST_TV_PHRASE_TERMS catches a show generically instead (Escape To The
+# Country is caught by "daytime television", not by its own name).
+BROADCAST_TV_NAME_TERMS = [
+    "hgtv", "entertainment tonight", "food network", "diy network",
+    "magnolia network", "discovery channel", "travel channel",
+    "history channel", "bbc", "itv", "channel 4", "channel 5", "sky news",
+    "cnn", "msnbc", "fox news", "abc news", "nbc news", "cbs news", "pbs",
+    "tlc", "bravo tv", "a&e", "lifetime tv", "paramount network",
+    "nickelodeon", "disney channel",
+]
+
+# Matched on the channel title AND the About description. These are how a
+# broadcast property describes ITSELF, and they generalise past the name list
+# — "a British daytime television property-buying programme, first airing in
+# 2002" is Escape To The Country's own bio, and no creator writes that.
+#
+# Every term is multi-word on purpose. Bare "television" was measured and
+# rejected: `CritiX tv`, a film-and-TV fan-review channel and a legitimate
+# creator, uses the word three times in its bio. "official youtube channel of"
+# was also measured and dropped — it caught ADAM Audio, a speaker
+# manufacturer, which is a brand channel but not a TV one, and this gate is
+# scoped to TV.
+BROADCAST_TV_PHRASE_TERMS = [
+    "full episodes", "full episode", "new episodes air", "episodes air",
+    "airs every", "first airing", "first aired", "originally aired",
+    "television programme", "television program", "tv programme",
+    "television series", "television network", "tv network",
+    "broadcast network", "television channel", "daytime television",
+    "television programming", "season premiere", "series premiere",
+    "tune in every",
+]
+
+
+# The off-brand terms from EXCLUDED_TOPIC_TERMS ONLY — deliberately NOT the
+# broadcast-TV lists above, which are local-only for the reasons recorded
+# there — flattened for influencers.club discovery's
 # SERVER-SIDE negation filter (see the wiring loop below). Sent as the
 # vendor's `keywords_not_in_description`, which withholds any creator whose
 # profile bio carries one of these words/phrases — so the whole political /

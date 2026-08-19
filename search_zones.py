@@ -1,6 +1,14 @@
 """
-The geographic search zones a prospect channel has to sit inside:
-US, Canada, the UK, Europe, and Australia — Ireland excluded.
+The geographic search zones a prospect channel has to sit inside.
+
+**2026-08-20: both niches now run on US / Canada / UK / Australia only.**
+Europe was removed at the operator's direction ("Europe is not in our search
+zone for lifestyle. Only UK USA CANADA and AUS"), and the standing instruction
+to unify the two niches' criteria — the same one that moved Lifestyle Sofa's
+view floor from 2,000 to 10,000 — carries it to Home Theater as well. The
+European block is still DEFINED below as EUROPE_COUNTRY_CODES so restoring it
+to a niche is a one-line edit of that niche's `allowed_country_codes`, not
+forty codes retyped from memory.
 
 Why this is a channel-location filter and not a search parameter:
 `search.list` does take a `regionCode`, but it takes exactly ONE per call
@@ -11,16 +19,41 @@ roughly 30x the current discovery spend — and still wouldn't guarantee the
 creator's own location. So the zone check happens after `channels.list`,
 against the channel's declared country, where it costs nothing.
 
-Two forms of that country reach this module, because two sources report it:
+**The declared country is now REQUIRED, and it is not trusted on its own.**
+Two changes on 2026-08-20, both from one measurement over all 144 rows
+already tracked in the two niche tables:
 
-  - `channels.list` -> `snippet.country`, an ISO 3166-1 alpha-2 code ("US").
-    Measured over the 34 channels in the live niche tables, 29 (85%) set it.
-  - The region subtag of the content language ("en-GB" -> GB), for the
-    other 15%. Free — `enrichment.get_recent_video_performance()` already
-    reads `defaultAudioLanguage` for the "Content Language" column.
+  - `snippet.country` must be SET and in the niche's zone. It used to be
+    treated as absent data and kept (`zone_verdict` -> None -> keep), with the
+    content language's region subtag standing in when it was blank. That
+    fallback is deleted: `en-US` describes the AUDIENCE, and the live tables
+    hold Vietnamese, Kenyan and Japanese creators that reached them that way.
+    Requiring the field costs 8 of 144 rows (5.6%) — far less than the 15%
+    the old comment here predicted.
+  - Requiring it is NOWHERE NEAR SUFFICIENT, which is the more important
+    finding. YouTube's country field is self-declared and unverified, and
+    creators set it to their MARKET. Measured: `Linet_ke` ("a girl from a
+    village in Kenya Africa") declares US; `Olesya & house` ("I live in
+    Belarus") declares US; `Thai Girl Gift & Foreigner Joe` ("We live in ...
+    Thailand") declares US; `LIV KENYA` declares GB. NINE of the twelve
+    genuinely out-of-zone rows declare an IN-ZONE country. So three
+    title/description signals below now OVERRIDE a declared country.
 
-`zone_verdict()` takes either form; `region_from_language_tag()` converts
-the second into the first.
+Signals, highest precedence first. All are free — they read the title and the
+About description that `channels.list` has already returned:
+
+  1. `flag_country_outside_zone()` — a flag emoji in the channel TITLE.
+     A regional-indicator pair literally encodes an ISO code, so this is
+     exact rather than heuristic.
+  2. `title_country_outside_zone()` — an out-of-zone country NAME in the
+     channel title ("LIV KENYA", "Inside Japan Living").
+  3. `description_location_outside_zone()` — an explicit location cue plus an
+     out-of-zone country name in the About text.
+  4. `zone_verdict()` on the declared `snippet.country`.
+
+Measured over all 144 tracked rows, signals 1-3 fire on 7 channels and every
+one is a true positive; zero false positives. Each function records the
+variants that were tried and rejected — read those before widening one.
 
 Things measured and REJECTED as region sources, so they don't get tried
 again:
@@ -37,17 +70,27 @@ again:
     would have added nothing — while being wrong in the other direction for
     4 of the 29 channels that do declare a country: `en-US` content from
     India, Austria and Serbia, and `fr-FR` content from the US. Language
-    describes the audience, not the creator's location, which is why only
-    the explicit REGION SUBTAG is used and only when no country is known.
+    describes the audience, not the creator's location.
+  - **The content language's REGION SUBTAG** ("en-GB" -> GB), which used to
+    stand in for a missing country and is now gone entirely — see above.
+    `region_from_language_tag()` survives as a pure helper, because the full
+    tag is still written to the "Content Language" column verbatim (which is
+    why that tag must never be normalised to a bare "en"), but NOTHING reads
+    it as a location any more. Do not re-wire it.
+  - **A bare country name anywhere in the About text**, with no location cue
+    in front of it. Measured over the same 144 rows it fires 11 times and at
+    least two are plainly wrong: "jordan" matched a person's name in
+    `Emily Canham`'s bio, and a passing "afghanistan" matched in `Kresnt`'s.
+    The cue requirement is what makes signal 3 precise.
 """
 import re
 
-# Ireland is deliberately absent even though it is both an EU member and
-# the obvious neighbour of the UK zone — "UK (except Ireland)" was an
-# explicit instruction, so IE is excluded from every zone here, not just
-# from the UK one. Removing it from this comment's reasoning first, then
-# the set, is the order to undo it in.
-ALLOWED_COUNTRY_CODES = frozenset({
+# The zone BOTH niches run on since 2026-08-20 (see the module docstring).
+# Ireland is deliberately absent even though it is the obvious neighbour of
+# the UK zone — "UK (except Ireland)" was an explicit instruction, so IE is
+# excluded from every zone here, not just from the UK one. Removing it from
+# this comment's reasoning first, then the set, is the order to undo it in.
+ZONE_CORE = frozenset({
     # North America
     "US", "CA",
     # United Kingdom (GB covers England, Scotland, Wales and Northern
@@ -55,6 +98,14 @@ ALLOWED_COUNTRY_CODES = frozenset({
     "GB",
     # Australia
     "AU",
+})
+
+# Europe, kept DEFINED but WIRED TO NOTHING as of 2026-08-20: no niche's
+# `allowed_country_codes` includes it. It stays here so that restoring Europe
+# to a niche is `ZONE_CORE | EUROPE_COUNTRY_CODES` in niches.py rather than a
+# fresh and error-prone list — and so the deliberate omissions recorded below
+# (IE, and RU/BY/TR) are not lost along with it.
+EUROPE_COUNTRY_CODES = frozenset({
     # European Union, minus IE
     "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
     "HU", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI",
@@ -69,13 +120,30 @@ ALLOWED_COUNTRY_CODES = frozenset({
 
 # Deliberately NOT in the set above, flagged here so the omission reads as
 # a decision rather than an oversight: RU, BY and TR are geographically
-# European in whole or part. Add them to ALLOWED_COUNTRY_CODES if the
-# brief's "Europe" is meant to stretch that far.
+# European in whole or part. Add them to EUROPE_COUNTRY_CODES if a "Europe"
+# zone is ever restored to a niche AND is meant to stretch that far.
+
+# The widest zone this module knows about: every code that could legitimately
+# appear in SOME niche's zone. It is the default argument for `zone_verdict()`
+# and the anchor for the name-table invariants below — it is NOT what any
+# niche actually runs on today. Niches pass their own `allowed_country_codes`,
+# and `REQUIRED_NICHE_KEYS` in main.py makes that key mandatory precisely so a
+# niche cannot silently inherit this wider default.
+ALLOWED_COUNTRY_CODES = ZONE_CORE | EUROPE_COUNTRY_CODES
 
 # The About panel renders a country NAME, so names need their own lookup.
 # Keys are lowercased and stripped; aliases matter because the panel's
 # wording varies by YouTube locale and by era ("Czechia" vs "Czech
 # Republic", "Holland" vs "Netherlands").
+#
+# NOTE THE NAME IS NOW HISTORICAL. "Allowed" here means "in ALLOWED_COUNTRY_CODES",
+# i.e. the WIDEST zone this module knows — not "allowed by a niche". Since
+# 2026-08-20 no niche admits the European entries below. This table's real job
+# is name -> code RESOLUTION for `country_code()`; whether that code is in zone
+# is `zone_verdict()`'s question, and it asks it against the niche's own set.
+# It is kept split from KNOWN_OUTSIDE_COUNTRY_NAMES rather than merged because
+# only the OUTSIDE half feeds the title and description signals, which must
+# never vote "inside".
 ALLOWED_COUNTRY_NAMES = {
     "united states": "US",
     "united states of america": "US",
@@ -234,48 +302,172 @@ def country_code(raw: str | None) -> str:
     return ALLOWED_COUNTRY_NAMES.get(name) or KNOWN_OUTSIDE_COUNTRY_NAMES.get(name, "")
 
 
-def zone_verdict(raw: str | None) -> bool | None:
+def zone_verdict(raw: str | None, allowed_codes=ALLOWED_COUNTRY_CODES) -> bool | None:
     """
-    Whether a channel's declared country is inside the allowed search
-    zones:
+    Whether a channel's declared country is inside `allowed_codes`:
 
       True  — declared, and inside.
       False — declared, and outside.
       None  — nothing declared, or a name this module doesn't recognise.
 
-    None is NOT "outside". An unrecognised country name is absent data,
-    and this project's standing rule is that absent data is not evidence
-    against a channel (same treatment as an unknown channel age or a
-    hidden subscriber count) — so the caller keeps it and a human decides.
-    The alternative, reading "a name I don't have in my table" as "outside
-    the zones", would silently discard real prospects every time YouTube
-    changes a label or renders the panel in another locale.
+    `allowed_codes` is the NICHE's zone and callers are expected to pass it.
+    The default is the widest zone this module knows (see
+    ALLOWED_COUNTRY_CODES) and exists for tests and for the name-table
+    invariants, NOT as a niche's fallback — `allowed_country_codes` is a
+    required key in NICHES for exactly that reason, so a niche that forgets it
+    is skipped with a logged error rather than quietly getting Europe back.
+
+    **A None verdict is now a DROP, not a keep** (changed 2026-08-20). What
+    this function reports is unchanged; what changed is
+    `main.process_candidate`, which used to discard only on `is False` and
+    keep None as absent data. The instruction was explicit — "don't include
+    channels unless they have a specific location listed on YouTube" — and the
+    measurement behind it is in the module docstring. This is now one of the
+    two places (with the English-language gate) where the project deliberately
+    breaks its own "absent data never disqualifies" rule.
+
+    The three-state return is still worth keeping over a bool: the caller logs
+    a DIFFERENT drop reason for "declared somewhere we don't serve"
+    (`outside_search_zone`) than for "declared nothing at all"
+    (`no_declared_country`), and a run summary that cannot tell those apart
+    cannot tell a badly-targeted discovery query from a thin-metadata one.
 
     If a country genuinely outside the zones keeps slipping through as
-    unknown, add its name to KNOWN_OUTSIDE_COUNTRY_NAMES — don't invert
-    this default.
+    unknown, add its name to KNOWN_OUTSIDE_COUNTRY_NAMES — that table is what
+    the title and description signals below match on, and it is still the
+    right place to widen.
     """
     code = country_code(raw)
     if not code:
         return None
-    return code in ALLOWED_COUNTRY_CODES
+    return code in allowed_codes
+
+
+# Regional indicator symbols (U+1F1E6-U+1F1FF) are just A-Z shifted, so a pair
+# of them IS an ISO 3166-1 alpha-2 code — the Japanese flag is literally "JP".
+# That makes a flag an EXACT location signal rather than a heuristic one,
+# which is why it outranks every other signal in this module.
+_FLAG_PAIR = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
+_REGIONAL_INDICATOR_BASE = 0x1F1E6
+
+
+def flag_emoji_countries(text: str | None) -> set[str]:
+    """Every ISO alpha-2 code spelled by a flag emoji in `text`."""
+    return {
+        "".join(chr(ord(c) - _REGIONAL_INDICATOR_BASE + ord("A")) for c in match.group(0))
+        for match in _FLAG_PAIR.finditer(text or "")
+    }
+
+
+def flag_country_outside_zone(title: str | None, allowed_codes) -> str:
+    """
+    The code of an out-of-zone country whose FLAG the channel flies in its
+    TITLE, or "". Caught the live row "Daichi" + Japanese flag, which declares
+    `country: US` and posts Japanese travel content.
+
+    **TITLE only, deliberately.** A flag in the About TEXT is usually a trip
+    list on a travel channel, which would be a false positive in a lifestyle
+    niche that legitimately contains travel creators. A flag in the channel's
+    own NAME is an identity claim. Measured over 144 tracked rows exactly two
+    carry a flag anywhere: the Daichi title (JP, correctly dropped) and
+    `Vroon & Britt TV` (About text, Canadian flag, in zone anyway). Title-only
+    therefore costs nothing today and closes the travel-list risk before it
+    can open.
+
+    Sorted so a title flying several out-of-zone flags reports a stable one
+    rather than whichever the set happened to yield first.
+    """
+    outside = sorted(code for code in flag_emoji_countries(title) if code not in allowed_codes)
+    return outside[0] if outside else ""
 
 
 # Cues a creator uses to state where they actually LIVE, so a non-zone
 # country right after one is their location rather than a passing mention.
-# "from" is deliberately NOT a cue: "from India" too often means "parents
-# from India" or "clips from India", and "shot in"/"filmed in" describe a
-# location the video was made, not the creator's residence.
-_LOCATION_CUE = r"(?:based in|based out of|located in|living in|lives in|home base|📍|location\s*[:\-])"
+#
+# REPAIRED AND WIDENED 2026-08-20. The previous cue set fired on **0 of the
+# 144 tracked rows** — it was inert on live data, and every channel it existed
+# to catch was sitting in the table. Two faults, both measured:
+#
+#   1. "lives in" and "living in" were present but plain "live in" was NOT, so
+#      first-person "I live in Belarus" (`Olesya & house`) and "We live in ...
+#      Thailand" (`Thai Girl Gift & Foreigner Joe`) — the single most common
+#      phrasing a creator uses — never matched. `lives?\s+in` now covers both.
+#   2. The gap allowed between cue and country name was `[^\n,.]{0,30}`: 30
+#      characters AND no comma or period. "We live in Mueang Prachuap Khiri
+#      Khan Thailand" is 35 characters, and "from a village in Kenya Africa"
+#      crosses a comma. It is now `[^\n]{0,60}` — still one line, still
+#      bounded, but wide enough for a real address-shaped phrase.
+#
+# "from" is now a cue ONLY in the shape `from <up to two words> in <country>`
+# ("from a village in Kenya"). Bare "from <country>" stays excluded for the
+# original reason: "gear from Japan" and "clips from India" are passing
+# mentions, and "parents from India" is not a location at all. "shot in" /
+# "filmed in" stay out too — they describe where a video was made.
+#
+# Measured after the change over all 144 tracked rows: fires on 5, and all 5
+# are true positives (CN, KE x2, BY, TH) with zero false positives. The
+# rejected wider variant — any country name anywhere in the About text with no
+# cue at all — fires on 11 and is plainly wrong on at least two.
+# Every cue that ends in a word ("in", "to", "base") is anchored with \b.
+# Without it the cue glues onto the FRONT of the next word and eats the
+# country: "Clips from India and Pakistan" matched cue "from In", left "dia
+# and Pakistan", and reported PK — a false positive on a bare mention, which
+# is the exact failure this gate's cue requirement exists to prevent. "moved
+# to" + "moved together" is the same bug. 📍 and the `location:` form end in
+# punctuation and take no anchor.
+_LOCATION_CUE = (
+    r"(?:based in\b|based out of\b|located in\b|living in\b|lives?\s+in\b|"
+    r"moved to\b|home (?:is )?in\b|home base\b|life in\b|"
+    r"from(?: a| the)?(?: \w+){0,2} in\b|📍|location\s*[:\-])"
+)
+# How far past the cue a country name may sit. See fault 2 above.
+_LOCATION_WINDOW = 60
 # Longest names first so "south korea" wins over "korea", "hong kong" over a
 # stray "kong", etc.
 _OUTSIDE_NAME_ALTERNATION = "|".join(
     re.escape(n) for n in sorted(KNOWN_OUTSIDE_COUNTRY_NAMES, key=len, reverse=True)
 )
+_OUTSIDE_NAME_PATTERN = re.compile(
+    r"\b(" + _OUTSIDE_NAME_ALTERNATION + r")\b", re.IGNORECASE
+)
 _DESC_LOCATION_PATTERN = re.compile(
-    _LOCATION_CUE + r"[^\n,.]{0,30}?\b(" + _OUTSIDE_NAME_ALTERNATION + r")\b",
+    _LOCATION_CUE + r"[^\n]{0," + str(_LOCATION_WINDOW) + r"}?\b("
+    + _OUTSIDE_NAME_ALTERNATION + r")\b",
     re.IGNORECASE,
 )
+
+
+def _outside_code(match) -> str:
+    # The alternation is built from already-normalized (lowercase) keys with
+    # the \b anchors OUTSIDE the capture group, so the group cannot carry
+    # surrounding whitespace — only case differs, the pattern being
+    # IGNORECASE — which makes .lower() enough to hit the (lowercase)
+    # KNOWN_OUTSIDE_COUNTRY_NAMES key.
+    return KNOWN_OUTSIDE_COUNTRY_NAMES[match.group(1).lower()]
+
+
+def title_country_outside_zone(title: str | None) -> str:
+    """
+    The ISO code of an out-of-zone country NAMED IN THE CHANNEL TITLE, or "".
+
+    Added 2026-08-20 for two live rows that declare an in-zone country and say
+    where they are in their own name: `LIV KENYA` (declares GB) and
+    `Inside Japan Living` (declares US). A creator who puts a country in the
+    channel NAME is not mentioning it in passing.
+
+    Scoped to `KNOWN_OUTSIDE_COUNTRY_NAMES`, i.e. the far-outside set, and so
+    it takes no `allowed_codes`: it can only ever vote "outside", never
+    "inside", and a European name is not in that table at all — a German
+    channel is caught by the declared-country check instead. Keeping it narrow
+    is what keeps it precise.
+
+    Word-boundary matching does useful work here for free: "Japanese Joinery"
+    does NOT match "japan", because the trailing \\b requires a non-word
+    character next. Measured over all 144 tracked titles it fires exactly
+    twice, both true positives, zero false positives.
+    """
+    match = _OUTSIDE_NAME_PATTERN.search(title or "")
+    return _outside_code(match) if match else ""
 
 
 def description_location_outside_zone(description: str | None) -> str:
@@ -283,19 +475,18 @@ def description_location_outside_zone(description: str | None) -> str:
     The ISO code of a non-zone country a channel's About description gives as
     its LOCATION (e.g. "based in the Philippines" -> "PH"), or "".
 
-    Catches creators who set snippet.country to the US but reveal their real,
-    outside-the-zone location in their description. An explicit location cue
-    is required before the country name, so a passing mention ("gear from
-    Japan", "shot in Iceland") does not trip it, and only OUTSIDE names are
-    matched, so an in-zone location ("based in Canada") never fires. It is a
-    heuristic: a location stated only as a city or a flag emoji is missed, but
-    the burden is on excluding, so a miss just means a human might review one.
+    Catches creators who set snippet.country to an IN-ZONE country but reveal
+    their real, outside-the-zone location in their description — which,
+    measured over the live tables, is the COMMON case rather than the exotic
+    one: nine of the twelve genuinely out-of-zone rows declare US, GB or CA.
+
+    An explicit location cue is required before the country name, so a passing
+    mention ("gear from Japan", "shot in Iceland") does not trip it, and only
+    OUTSIDE names are matched, so an in-zone location ("based in Canada")
+    never fires. It is still a heuristic: a location given only as a city
+    ("straight from Guangzhou") or as a flag inside the About text is missed,
+    but the burden is on excluding, so a miss just means a human might review
+    one. See the _LOCATION_CUE comment for what was repaired and measured.
     """
-    if not description:
-        return ""
-    match = _DESC_LOCATION_PATTERN.search(description)
-    # group(1) is captured from an alternation of already-normalized keys, with
-    # the \b anchors outside the capture, so it can't carry surrounding
-    # whitespace — only case differs (the pattern is IGNORECASE), so .lower()
-    # is enough to hit the (lowercase) KNOWN_OUTSIDE_COUNTRY_NAMES key.
-    return KNOWN_OUTSIDE_COUNTRY_NAMES[match.group(1).lower()] if match else ""
+    match = _DESC_LOCATION_PATTERN.search(description or "")
+    return _outside_code(match) if match else ""

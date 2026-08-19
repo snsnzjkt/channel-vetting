@@ -153,12 +153,49 @@ editable, which is an accepted trade: seeing the recipient before sending is wor
 more than protection against a stray keystroke, and a bad edit is visible and
 reversible where a send is not.
 
+## NEVER RECYCLE A TEST ROW — make a fresh one per demo
+
+Learned the hard way 2026-08-19, after three failed attempts.
+
+`recordMatchesConditions` fires when a record **enters** the condition set. Airtable
+tracks that per record. A row that has already fired, then had its send markers
+rewound by hand (`Send Requested At` cleared, `Status` reset, ledger row unlinked or
+deleted), **does not reliably fire again** — even when all four trigger conditions are
+demonstrably satisfied. Verified: the queue automation stamped correctly, all four
+conditions read true, `Outreach Ineligible Reason` was blank, and no Outreach Log row
+was ever written, i.e. the send automation never started.
+
+**A brand-new record fires immediately.** `ZZ TEST 2` sent within seconds on its first
+tick with no other change made.
+
+So the diagnostic order for "the tickbox did nothing" is:
+
+1. Did `Send Requested At` get stamped? **No** → the page's checkbox is read-only
+   (see the grid/recordReview section above), or the queue automation is off.
+2. Stamped but no Outreach Log row? → the SEND automation never ran. Check its toggle,
+   then **stop trying to reuse the row** and create a fresh one.
+3. An Outreach Log row stuck on `Claimed`/`MaybeSent`? → the send was attempted and
+   its outcome is unknown. Never auto-retry these.
+
+Do not spend attempts patching a row you have already disturbed. Every reset adds a
+variable instead of removing one.
+
 ## Live pages as of 2026-08-20 — the send surface is now exactly two grids
 
 | Page | ID | Element | Scope | Live count |
 |---|---|---|---|---|
-| `📧 Send Emails — Home Theater` | `pagDSrAsus3Wes771` | grid, **editable** | Qualified + Approved + emailable + never sent | 17 |
-| `📧 Send Emails — Lifestyle Sofa` | `pagLO0UI2rLDHNgTh` | grid, **editable** | same, LS field IDs | 24 |
+| `📧 Send Emails — Home Theater` | `pagVXrv1qFZcS55RO` | grid, **editable** | Qualified + Approved + emailable + never sent | 17 + test |
+| `📧 Send Emails — Lifestyle Sofa` | `pag05Tgmcl4Of9Du8` | grid, **editable** | same, LS field IDs | 24 + test |
+| `🧪 DEMO ONLY — Home Theater` | `pagNk2a3QimpsVS9l` | grid, editable | `Channel Name` contains `ZZ TEST` | 1 |
+| `🧪 DEMO ONLY — Lifestyle Sofa` | `paghrf4zdgZqAUcex` | grid, editable | same, LS field IDs | 1 |
+
+**`Send Requested At` WAS added as a column on both send pages (2026-08-20), reversing
+the earlier decision below.** It was originally omitted because a grid makes every
+column editable and a hand-typed stamp is indistinguishable from pressing send. It was
+added because it is the only on-page signal that distinguishes a **stuck** row
+(stamped, never sent) from an un-actioned one — the exact failure that took three
+attempts to diagnose. The editability risk is real and accepted; the diagnostic value
+won.
 
 Sorted by subscriber count descending, row height medium, with a record-count summary
 under the name column so queue depth is visible without counting. Columns are

@@ -49,10 +49,11 @@ name: Outreach
 # it. `*/30 13-21 * * 1-5` is 09:00-17:00 America/Toronto during EDT and
 # 08:00-16:00 during EST — the cron field is UTC and cannot follow DST, so the
 # window drifts by an hour twice a year. That is acceptable here (both spans sit
-# inside a working day). channel-vetting.yml used to hold a 09:00 UTC slot for
-# the stricter reason that it had to land on the same calendar day in two zones;
-# as of 2026-08-19 it runs at 01:30 UTC (09:30 Asia/Manila) and no longer does —
-# see the note on its cron.
+# inside a working day). channel-vetting.yml holds its slot for the stricter
+# reason that it has to land on the same calendar day in two zones: it briefly
+# ran at 01:30 UTC (09:30 Asia/Manila) and did not, and as of 2026-08-20 it runs
+# at 18:00 UTC (02:00 Asia/Manila the next day) and does again — see the note on
+# its cron.
 on:
   workflow_dispatch:
     inputs:

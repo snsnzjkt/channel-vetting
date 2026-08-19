@@ -182,12 +182,63 @@ variable instead of removing one.
 
 ## Live pages as of 2026-08-20 — the send surface is now exactly two grids
 
-| Page | ID | Element | Scope | Live count |
+| Page | ID | Element | Scope | Count at 2026-08-20 |
 |---|---|---|---|---|
-| `📧 Send Emails — Home Theater` | `pagVXrv1qFZcS55RO` | grid, **editable** | Qualified + Approved + emailable + never sent | 17 + test |
-| `📧 Send Emails — Lifestyle Sofa` | `pag05Tgmcl4Of9Du8` | grid, **editable** | same, LS field IDs | 24 + test |
-| `🧪 DEMO ONLY — Home Theater` | `pagNk2a3QimpsVS9l` | grid, editable | `Channel Name` contains `ZZ TEST` | 1 |
-| `🧪 DEMO ONLY — Lifestyle Sofa` | `paghrf4zdgZqAUcex` | grid, editable | same, LS field IDs | 1 |
+| `📧 Send Emails — Home Theater` | `pagVXrv1qFZcS55RO` | grid, **editable** | Qualified + Approved + emailable + never sent | 21 |
+| `📧 Send Emails — Lifestyle Sofa` | `pag05Tgmcl4Of9Du8` | grid, **editable** | same, LS field IDs | 28 |
+| `No email` (Home Theater) | `pagJ80jgOYJoEIcGO` | grid | the dead end needing a non-email channel | — |
+| `No email — Lifestyle Sofa` | `pagjD2ls0xn0NRTvd` | grid | Qualified + Approved + `Email` EMPTY | 1 |
+
+Counts are not fixed — they track the review queue draining into the send queue, and
+both grew during the 2026-08-20 session (17 → 21 and 24 → 28) as reviewers approved
+more channels. A rising count is the pipeline working, not a filter leaking; verify by
+confirming every listed row is `Qualified` **and** `Approved`.
+
+### Coverage audit 2026-08-20 — every approved creator is on exactly one page
+
+The send pages exclude a row with no `Email`, which is correct — but an excluded row is
+also an INVISIBLE row unless some other page claims it. Audit:
+
+| Niche | `Status = Approved` | On its send page | Unaccounted |
+|---|---|---|---|
+| Home Theater | 21 | 21 | 0 |
+| Lifestyle Sofa | 29 | 28 | **1** |
+
+The one was `Simple Scottish Living - Zach & Annie` (`recJwGimXzqqOul7t`) — Qualified and
+Approved, with a channel URL but **no email address**. It appeared on nothing.
+`No email — Lifestyle Sofa` (`pagjD2ls0xn0NRTvd`) was built to catch it; Home Theater
+already had `No email` (`pagJ80jgOYJoEIcGO`).
+
+**Re-run this audit after any approval batch.** Count `Status = Approved` per table and
+compare against the send page plus the No-email page. A row in neither is a prospect
+nobody will ever action, and nothing surfaces it on its own.
+
+### DO NOT CONTACT coverage on the Airtable path is NARROWER than in Python
+
+Measured 2026-08-20 via `audit_blocklist.py` (read-only, no quota):
+
+```
+DO NOT CONTACT index: 1329 rows -> 1181 handles, 314 emails, 1327 names
+0 blocklisted row(s) found across 2 table(s)
+```
+
+`do_not_contact.py` matches **handle, email and name** — any hit blocks — so coverage is
+near-complete. **The Airtable send checks EMAIL ONLY**, so it can use just **314 of 1329**
+entries. A creator suppressed by name or handle alone is **not** blocked on this path.
+
+Current exposure is zero: no approved creator matches on any key. But that is a fact
+about today's data, not a property of the design. **Run `audit_blocklist.py` before each
+send batch** — it is free, takes seconds, and is the only check that uses all three keys.
+
+Note a raw count of empty email cells (981 of 1329) badly overstates the gap and should
+not be quoted as a coverage figure — email is simply the sparsest of the three keys.
+
+**The two `🧪 DEMO ONLY` pages were deleted 2026-08-20 after the demo.** They were grids
+scoped to `Channel Name` contains `ZZ TEST`, each holding one disposable test row
+addressed to a Henderson inbox. Recreate the same way for a future demo, and delete
+them again afterwards — a page that looks like the send surface but isn't is a trap for
+anyone who finds it without context. All `ZZ TEST` prospect rows and their Outreach Log
+entries were also removed, so the ledger is empty and its next row will be a real send.
 
 **`Send Requested At` WAS added as a column on both send pages (2026-08-20), reversing
 the earlier decision below.** It was originally omitted because a grid makes every

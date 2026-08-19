@@ -330,10 +330,12 @@ python main.py
 
 ## Running on a schedule (GitHub Actions)
 
-`.github/workflows/channel-vetting.yml` runs the full pipeline daily at
-09:00 UTC (safely after the YouTube quota resets at midnight Pacific) and
-can also be triggered manually from the Actions tab, with an option to run
-in `--test` mode.
+`.github/workflows/channel-vetting.yml` runs the full pipeline on weekdays at
+01:30 UTC — 09:30 Asia/Manila, which is where the operator is — and can also be
+triggered manually from the Actions tab, with an option to run in `--test` mode.
+Note the cron's Mon-Fri is UTC, and 01:30 UTC is the previous evening in
+`PROSPECT_DAY_TZ`, so rows land stamped Sun-Thu in Toronto; the comment on the
+cron itself spells out the consequences.
 
 Setup:
 1. Push this repo to GitHub.

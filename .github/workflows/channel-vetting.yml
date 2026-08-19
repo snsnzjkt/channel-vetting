@@ -2,24 +2,34 @@ name: Channel Vetting Pipeline
 
 on:
   schedule:
-    # 09:00 UTC = 1-2am Pacific, safely after the YouTube quota resets at
-    # midnight Pacific Time.
+    # 01:30 UTC = 09:30 Asia/Manila (UTC+8, no DST, so this is exact all year).
+    # Requested 2026-08-19: the operator runs on Philippine time.
     #
     # WEEKDAYS ONLY (1-5 = Mon-Fri). Rows are written for a human review queue,
     # so discovering on days nobody works just ages the leads and spends
     # influencers.club credits (~7 per run) against a table that will not be
     # touched until Monday.
     #
-    # The day-of-week field is evaluated in UTC, and at 09:00 that lands on the
-    # SAME calendar day in both zones this pipeline cares about — 04:00/05:00 in
-    # America/Toronto (PROSPECT_DAY_TZ, which stamps "Date Added" and drives the
-    # daily caps) and 01:00/02:00 in America/Los_Angeles (the quota reset zone).
-    # So Mon-Fri here really is Mon-Fri for the reviewers, in both DST states.
-    # Moving this cron near either midnight would break that alignment.
+    # WHAT THIS SLOT GAVE UP, and it is the thing the old comment here warned
+    # about. The day-of-week field is evaluated in UTC. At the previous 09:00
+    # UTC that landed on the SAME calendar day in both zones this pipeline
+    # pins, so Mon-Fri here was Mon-Fri for the reviewers. 01:30 UTC does not:
+    #   - America/Toronto (PROSPECT_DAY_TZ, which stamps "Date Added" and
+    #     drives the daily caps) is 21:30/20:30 the PREVIOUS day, so a UTC
+    #     Mon-Fri cron stamps its rows Sun-Thu — including one run per Sunday,
+    #     which is the weekend day the 1-5 restriction existed to avoid.
+    #   - America/Los_Angeles (the quota reset zone) is 18:30/17:30 the
+    #     previous day, i.e. LATE in the Pacific quota day rather than just
+    #     after its midnight reset. Each daily run still falls in its own
+    #     Pacific day, so the ceiling is not shared between two crons — but a
+    #     manual dispatch earlier the same Pacific day now competes with it
+    #     for the 8000-unit ceiling instead of sitting in the day before.
+    # To put the reviewers' week back, shift the DOW field to 2-6 (UTC Tue-Sat
+    # = Toronto Mon-Fri) rather than moving the time.
     #
     # workflow_dispatch below is deliberately NOT restricted: a human choosing
     # to run on a Saturday is a decision, not a schedule.
-    - cron: "0 9 * * 1-5"
+    - cron: "30 1 * * 1-5"
   workflow_dispatch:
     inputs:
       test_mode:
@@ -43,7 +53,7 @@ on:
 # read-then-write: quota_tracker.py keeps its ledger in a local
 # quota_log.json (one per runner, neither seeing the other's spend), and
 # count_added_today() reads Airtable BEFORE either run has pushed anything.
-# So a workflow_dispatch fired while the 09:00 cron is still going gives two
+# So a workflow_dispatch fired while the 01:30 cron is still going gives two
 # runs that both read the same low "added today" count, both compute a FULL
 # day's headroom, and both spend a full day's quota against it — up to 2x
 # the daily row cap and 2x the quota.

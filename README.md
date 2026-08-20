@@ -19,7 +19,8 @@ weak day can't flood a table with below-criteria channels:
    `INFLUENCERS_API_KEY` set, it uses **influencers.club creator search**
    (`influencer_discovery.py`), filtering server-side on the niche's own
    criteria — content language, a subscriber floor, creator gender, a
-   creator **location** restricted to the niche's own search zone, and an
+   creator **location** restricted to the niche's own search zone, a negation
+   list covering off-brand topics *and* gaming / generic-tech bios, and an
    `ai_search` description of the niche — so far more of what it returns
    survives the hard requirements below than raw keyword search does. Your
    DO NOT CONTACT handles are excluded server-side (never dropped under the
@@ -43,6 +44,28 @@ weak day can't flood a table with below-criteria channels:
    the last 50 videos' descriptions looking for a contact email — a wider
    window that costs no extra quota, since the underlying calls are billed
    per-call rather than per-video.
+4b. **Relevance** (`main.off_target_reason`) — a candidate is discarded when
+   its recent video titles are DOMINATED by an off-target vertical: gaming,
+   phones/PCs, generic gadgets, or AI/crypto. It reads the last ~50 video
+   TITLES, which enrichment already fetched, because a title is evidence of what
+   a channel *publishes* while a bio is a claim it *made once* (and four tracked
+   channels have no usable bio at all).
+
+   This is deliberately **negative evidence only**. Nothing is required of a
+   candidate — a positive "must match an on-niche term" gate was built, measured
+   and rejected in 2026-08, because it discarded a real prospect scoring 0/50
+   while missing an off-niche channel whose woodworking titles carried
+   "furniture" and "interior". Each niche's `on_target_terms` exist purely to
+   **rescue** a flagged channel, never to admit one: that asymmetry is what
+   keeps "OCM Reviews" (Fosi DACs, IEMs, an Atmos soundbar — 6% off-target, 60%
+   on-target) while dropping "DragsterTV" (Forza money glitches — 4%
+   off-target, 0% on-target) at almost the same off-target score.
+
+   Placed immediately after the performance fetch, so an off-target channel
+   costs no long-form paging, no scoring, and — the point — **no paid email
+   credit**. Measured against the 147 rows live on 2026-08-21 it rejects 29 of
+   the 63 Home Theater rows (46%) and 0 of the 84 Lifestyle rows.
+
 5. **Hard requirements** (`main.pre_push_drop_reason`, `search_zones.py`) —
    a candidate is **discarded**, with no row written, unless it clears all
    of: 10,000+ average views (both niches), **at least half of the judgeable
@@ -262,6 +285,7 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `DISCOVERY_DAYS_BACK` | 7 | How many days back `search.list` looks for videos (short and self-renewing by design — see below; `--days-back` overrides per run) |
 | `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
 | `EMAIL_DEEP_SCAN_PAGES` | 4 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
+| `OFF_TARGET_MIN_SHARE` | 0.10 (code) | Share of recent video titles that must read as gaming / phones-PCs / gadgets / AI-crypto before the relevance gate fires (it also has to exceed the on-target share) |
 | `REJECTED_HANDLES_FILE` | `rejected_handles.json` | Where the already-rejected-creator cache lives (gitignored; cached in CI) |
 | `REJECTED_HANDLES_RETENTION_DAYS` | 90 | How long a rejection is honoured before the creator is discovered again |
 | `LONGFORM_SCAN_MAX_PAGES` | 3 | Extra pages of older uploads paged through to confirm 30+ non-Shorts videos, and only for channels the newest 50 left short of that bar (2 quota units per page; 0 judges on the newest 50 alone) |

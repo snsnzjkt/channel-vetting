@@ -165,11 +165,36 @@ def test_process_candidate_drops_excluded_topic_before_performance(monkeypatch):
 # already-known creators.
 
 def test_both_niches_carry_the_discovery_negation_filter():
-    # Compare against the constant itself; test_discovery_negation_reuses_the_
-    # gate_terms_verbatim below is what pins that constant to EXCLUDED_TOPIC_TERMS.
+    # The wired list is the UNION of two bio-level negation sets (widened
+    # 2026-08-21 to add the gaming / generic-tech terms the brief asked for).
+    # Asserted as a union rather than as either half, so neither can be dropped
+    # silently: losing EXCLUDED_TOPIC_KEYWORDS would re-open the off-brand
+    # topics, and losing GAMING_AND_TECH_BIO_NEGATIONS would start paying 0.01
+    # again for creators the local gate then throws away.
+    expected = sorted(
+        set(niches.EXCLUDED_TOPIC_KEYWORDS) | set(niches.GAMING_AND_TECH_BIO_NEGATIONS)
+    )
     for niche_name, cfg in main.NICHES.items():
         filters = cfg["discovery_filters"]
-        assert filters.get("keywords_not_in_description") == niches.EXCLUDED_TOPIC_KEYWORDS, niche_name
+        wired = filters.get("keywords_not_in_description")
+        assert wired == expected, niche_name
+        # Both halves present, stated explicitly so a future edit that replaces
+        # rather than merges fails here with an obvious message.
+        assert set(niches.EXCLUDED_TOPIC_KEYWORDS) <= set(wired), niche_name
+        assert set(niches.GAMING_AND_TECH_BIO_NEGATIONS) <= set(wired), niche_name
+
+
+def test_the_vendor_negations_never_include_an_on_niche_word():
+    """
+    Every term here shrinks the discovery pool and a false negation is
+    unrecoverable — the creator is never shown to us at all. So no word that a
+    legitimate prospect would put in their own bio may appear.
+    """
+    wired = set(main.NICHES["Home Theater"]["discovery_filters"]["keywords_not_in_description"])
+    for on_niche in ("speaker", "projector", "soundbar", "atmos", "surround",
+                     "hi-fi", "home theater", "man cave", "nvidia", "home audio",
+                     "decor", "interior", "furniture", "diy"):
+        assert on_niche not in wired, f"{on_niche!r} is on-niche and must not be negated"
 
 
 def test_discovery_negation_reuses_the_gate_terms_verbatim():

@@ -54,6 +54,25 @@ NICHES = {
         # the other niche moved to. The threshold stays per-niche rather
         # than becoming a shared constant so a niche can be given its own
         # bar again without unpicking the gate.
+        # RESCUE vocabulary for main.off_target_reason — NEVER an admission
+        # test. A channel is never kept because it matches these and never
+        # dropped for failing to; they exist only so a channel the off-target
+        # vocabulary flagged can survive when its content is genuinely on-niche.
+        # That asymmetry is the whole design — see OFF_TARGET_TERMS for why the
+        # positive-requirement version was measured and rejected. Measured:
+        # "OCM Reviews" (DACs, IEMs, Atmos soundbars) scores 0.06 off / 0.60 on
+        # and is rescued; "DragsterTV" (Forza money glitches) scores 0.04 off /
+        # 0.00 on and is dropped. No single signal separates those two.
+        "on_target_terms": [
+            "home theater", "home theatre", "home cinema", "projector",
+            "projection screen", "projector screen", "soundbar", "atmos",
+            "surround", "speaker", "subwoofer", "amplifier", "av receiver",
+            "hi-fi", "hifi", "audiophile", " dac", "iem", "headphone",
+            "turntable", "vinyl", "media room", "man cave", "dolby", "5.1",
+            "7.1", "klipsch", "denon", "marantz", "sonos", "bookshelf speaker",
+            "acoustic", "listening room", "theater seating", "recliner",
+            "4k hdr", "home audio",
+        ],
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
         # NARROWED 2026-08-20 from US/CA/UK/Europe/AU to US/CA/UK/AU. The
@@ -120,9 +139,49 @@ NICHES = {
             # 180-char version measured WORSE (1,039) than this 122-char one,
             # which reads like silent truncation. Re-probe with the snippet above
             # after any reword; do not assume more terms means a wider pool.
+            # REWRITTEN 2026-08-21. The previous wording contained the literal
+            # phrase "gaming setup" and so ASKED THE VENDOR FOR GAMING
+            # CHANNELS. It was added on 2026-08-14 for pool size (444 -> 2,623)
+            # and never re-checked for precision: measured 2026-08-21, that one
+            # phrase was carrying 370 of the niche's 588 creators, and 45% of
+            # the rows it produced were gaming or generic-tech channels.
+            #
+            # Man caves, media rooms and home audio STAY — those are the
+            # persona. What is gone is the word that matches a Fortnite channel.
+            #
+            # Re-probed at limit=1 (0.01 credits) per the rule below, because
+            # more terms does not mean a wider pool. Measured totals:
+            #   with "gaming setup" (the old wording) ......... 588
+            #   this wording ................................. 209
+            #   + "DIY home improvement and renovation" ...... 250
+            #   + "movie room, basement media room" ..........  94
+            #   + "entertainment room / setup" ............... 125
+            #   AV-forward rewrite ...........................  95
+            #
+            # THE 250 VARIANT WAS TRIED FIRST AND REVERTED, and the reason is
+            # the whole lesson of this field. Picking it meant picking the
+            # biggest pool — which is precisely the reasoning that added
+            # "gaming setup" on 2026-08-14 and caused this problem. Comparing
+            # the top 20 BY RELEVANCY rather than the totals settled it:
+            #
+            #   with "DIY home improvement and renovation" (250): Under
+            #     Construction with Tate, GrantMaury Builds, Sanborn
+            #     Construction Group, Aspen Custom Carpentry — builders,
+            #     roofers and a plumber. An allowed adjacency, but it had
+            #     displaced the core persona at the top of the ranking, which
+            #     is the only part of the ranking a run ever reaches.
+            #   this wording (209): Audio Arkitekts, Linsoul Audio, Jay's Audio
+            #     Lab, Pursuit Perfect System, SoundStage! Network, Sydney HiFi,
+            #     Andrew Robinson — AV and hi-fi channels.
+            #
+            # 41 fewer creators for a materially better pool. JUDGE A REWORD ON
+            # WHO IT RETURNS, NOT ON HOW MANY: a limit=20 probe costs 0.2
+            # credits and answers the question the total cannot. The brief: "I
+            # would rather have 20 highly relevant creators than 200 irrelevant
+            # gaming/tech creators."
             "ai_search": (
-                "home theater and home cinema, media room, man cave, gaming setup, "
-                "home audio, projector and TV setup, living room furniture"
+                "home theater and home cinema, media room, man cave, home audio, "
+                "projector and TV setup, living room furniture"
             ),
             # `number_of_subscribers` is wired in below the NICHES dict, derived
             # from this niche's own min_avg_views via
@@ -163,6 +222,24 @@ NICHES = {
         # The brief sets no channel-age requirement, and that part still
         # stands. Its Instagram thresholds (100k+ followers, 20k+ reel
         # views) are out of scope — this pipeline only observes YouTube.
+        # RESCUE vocabulary for main.off_target_reason — never an admission
+        # test. See the Home Theater entry and OFF_TARGET_TERMS. Broader than
+        # Home Theater's because this persona's vocabulary is broader: a
+        # cleaning routine, a nursery reveal and a Christmas decor haul are all
+        # the same customer. Measured over the 85 rows live on 2026-08-21, no
+        # Lifestyle row was flagged off-target at all (the highest scored 0.04),
+        # so these terms currently rescue nothing — they are here so the
+        # gaming/tech vocabulary can never start eating this niche either.
+        "on_target_terms": [
+            "home decor", "decor", "interior", "styling", "organiz",
+            "declutter", "cleaning", "clean with me", "diy", "makeover",
+            "renovation", "house tour", "home tour", "apartment tour",
+            "furniture", "homeware", "cozy", "cosy", "minimalist", "farmhouse",
+            "kitchen", "bedroom", "living room", "nursery", "seasonal",
+            "christmas", "haul", "recipe", "cooking", "baking", "mom",
+            "motherhood", "family", "homemaking", "self care", "morning routine",
+            "home office", "small home", "tiny home", "house plan",
+        ],
         "min_avg_views": 10_000,
         "min_channel_age_months": None,
         # NARROWED 2026-08-20. This is the niche the instruction actually
@@ -181,7 +258,34 @@ NICHES = {
         "discovery_filters": {
             "profile_language": ["en"],
             "gender": "female",
-            "ai_search": "fashion and lifestyle vlogs, travel, house tours, home decor and interior styling",
+            # REWRITTEN 2026-08-21. The previous wording LED WITH "fashion and
+            # lifestyle vlogs, travel", which is exactly the generic-lifestyle
+            # creator the brief rules out: "do NOT treat a generic lifestyle
+            # influencer as a good match just because they post occasional
+            # lifestyle content." It is why this table filled with travel
+            # vloggers, beauty creators and fitness channels — Travel For
+            # Phoebe, Traveling with Kristin, Trini Surfer, LeanBeefPatty,
+            # Emily Canham — none of whose audiences are shopping for a sofa.
+            #
+            # Now home-first. Re-probed at limit=1 (0.01 credits) per the same
+            # rule as Home Theater. Measured totals:
+            #   current, fashion/travel first ................ 2,120
+            #   home-first, fashion/travel dropped ........... 1,501  <- this
+            #   + "homemaking" phrasing ...................... 1,492
+            #   + "family home life" ......................... 1,018
+            #   + "furniture and homeware, cozy living" ......   997
+            #   + "seasonal decorating, decor hauls" .........   782
+            # Smaller and on-persona beats larger and generic; the relevance
+            # gate cannot rescue a pool that was never the right pool.
+            #
+            # CONFIRMED ON CHARACTER, not just on size — the check Home Theater's
+            # entry explains at length. Top of the ranking under this wording:
+            # Lexi DIY, HerDIYHome, Cozy DIY Home, Carissa Cleans It All,
+            # Alexandra Gater, Canterbury Cottage, Minimal Ease, Nora G's Nook,
+            # Karin Bohn. The narrower "furniture and homeware, cozy living"
+            # variant (994) returned more undifferentiated vloggers at the top,
+            # so it was rejected despite reading like the tighter query.
+            "ai_search": "home decor and interior styling, house tours, home organization and cleaning, DIY home makeovers",
             # As with Home Theater, `number_of_subscribers` is derived from this
             # niche's own min_avg_views below the dict — so if this niche's view
             # floor is ever un-unified back toward the brief's 2,000, its
@@ -451,6 +555,128 @@ BROADCAST_TV_PHRASE_TERMS = [
 # exactly — P + N == base total). So the landmine words that gate deliberately
 # omits ("gun"/"rifle"/"conservative"/…) stay omitted here too; "MAGA" does
 # not match "magazine".
+# ---------------------------------------------------------------------------
+# RELEVANCE: what an off-target channel looks like (2026-08-21)
+# ---------------------------------------------------------------------------
+#
+# The brief: the tables were filling with gaming and generic-tech creators, and
+# "a YouTuber who reviews iPhones, laptops, gaming PCs and gadgets" is a bad
+# match however good their numbers are. Measured over the 147 rows then live,
+# 29 of the 64 Home Theater rows (45%) were off-target by this definition.
+#
+# WHY THIS IS A NEGATIVE VOCABULARY AND NOT A POSITIVE ONE. A positive
+# must-match-a-term gate was built and measured on 2026-08-15 and REJECTED (the
+# reasoning is preserved above EXCLUDED_TOPIC_TERMS): it discarded "Jasper Tran
+# - House Design Ideas", a real prospect, on a positive score of 0/50, while
+# missing an off-niche logging channel whose woodworking titles carried
+# "furniture" and "interior". Requiring a channel to PROVE it belongs is the
+# thing that does not work, because plenty of genuine prospects use no
+# vocabulary a list can anticipate ("This Small House Will Make You Fall in
+# Love"). So nothing here is ever required. A channel is dropped only on
+# positive evidence that it is something ELSE, which keeps the pipeline's
+# standing rule that absent data never disqualifies.
+#
+# ON_TARGET_TERMS (per niche, in the NICHES dict above) exist ONLY to RESCUE a
+# channel these terms flagged — never to admit one. That asymmetry is what lets
+# the gate keep "OCM Reviews" (DACs, IEMs, Atmos soundbars: off 0.06 / on 0.60)
+# while dropping "DragsterTV" (Rainbow Six and Forza money glitches: off 0.04 /
+# on 0.00) at almost the same off-target score. One signal cannot separate those
+# two; the on-target rescue is what does.
+#
+# TERM SELECTION IS PRECISION-FIRST. Deliberately ABSENT, because each is
+# legitimately on-niche for Home Theater: speaker, soundbar, receiver,
+# projector, TV, 4K, HDR, atmos, amplifier, headphone, subwoofer, and the bare
+# word "gaming" — a man cave with a gaming setup is a prospect, a Fortnite
+# gameplay channel is not, and GAME TITLES are what tell those apart. That is
+# the same argument the sim_racing entry above already makes.
+OFF_TARGET_TERMS = {
+    # Game titles and console platforms, never the bare word "gaming".
+    "gaming": [
+        "fortnite", "roblox", "minecraft", "call of duty", "warzone", "valorant",
+        "overwatch", "apex legends", "league of legends", "counter-strike", "cs2",
+        "gta v", "gta 6", "elden ring", "zelda", "pokemon", "rainbow six", "forza",
+        "modern warfare", "battle pass", "playstation", "ps5", "ps4", "xbox",
+        "nintendo", "dualsense", "gameplay", "speedrun", "let's play", "lets play",
+        "steam deck", "esports", "fps montage", "game review", "gamer",
+    ],
+    # Phones, laptops and PC hardware — named in the brief as must-exclude.
+    # "pc build" and friends rather than a bare "pc", because an HTPC in a media
+    # rack is on-niche.
+    "phones_and_pcs": [
+        "iphone", "android phone", "galaxy s2", "galaxy z", "pixel 9", "pixel 10",
+        "pixel 11", "smartphone", "macbook", "chromebook", "ipad", "laptop review",
+        "gaming pc", "gaming laptop", "rtx 40", "rtx 50", "radeon", "ryzen",
+        "intel core", "motherboard", "overclock", "gpu", "benchmark", "ssd review",
+        "5g phone", "phone case", "foldable phone", "pc build", "pcbuild",
+        "pc builds", "diy pc", "pc case", "pc parts", "custom pc", "pcgaming",
+        "gaming monitor", "gaming handheld", "gaming chair", "gaming keyboard",
+        "mechanical keyboard", "lian li", "thermaltake", "steamos", "water cooling",
+        "liquid cooling", "rgb build", "mini pc", "geforce", "nvidia",
+        "cable management",
+    ],
+    # The general-consumer-electronics channel: reviews whatever arrives in the
+    # post. Audio gear is deliberately absent from this list.
+    "generic_gadgets": [
+        "robot vacuum", "robotic vacuum", "vacuum mop", "dehumidifier",
+        "air purifier", "treadmill", "power station", "smartwatch",
+        "fitness tracker", "earbuds", "electric scooter", "3d printer",
+        "drone review", "action camera", "osmo pocket", "insta360", "dash cam",
+        "massage gun",
+    ],
+    "ai_and_crypto": [
+        "crypto", "bitcoin", "ethereum", "nft", "altcoin", "web3", "blockchain",
+        "ai tool", "ai platform", "ai automation", "ai review", "chatgpt",
+        "midjourney", "ai agent", "saas",
+    ],
+}
+
+# What a creator SAYS their channel is. High precision, because these are the
+# creator's own claims about their own channel ("Gamer / lover of pop culture",
+# "hands-on guide to DIY PC", "Its all about technology and gadgets").
+#
+# Used only by the PERSONA rule, which additionally requires the video titles to
+# corroborate. A bio alone never drops a channel: bios are written once and go
+# stale, four tracked channels have no usable bio at all, and "High-quality
+# Tech, Unboxing, Reviews" is OCM Reviews — a genuine hi-fi channel.
+BIO_OFF_SIGNALS = [
+    "gamer", "gaming channel", "playing games", "video game", "let's play",
+    "lets play", "twitch", "speedrun", "money glitches", "fortnite", "roblox",
+    "minecraft", "playstation", "xbox", "nintendo", "esports",
+    "about technology", "all about tech", "tech world", "tech reviews",
+    "technology and gadgets", "gadget reviews", "latest technology",
+    "consumer electronics", "smartphone", "unboxing and product reviews",
+    "crypto", "nft", "blockchain", "ai tools",
+    "diy pc", "pc building", "pc builds", "pc component", "gaming pc",
+]
+
+OFF_TARGET_KEYWORDS = sorted(
+    {term for terms in OFF_TARGET_TERMS.values() for term in terms}
+)
+
+# The subset of the above sent to the VENDOR as keywords_not_in_description, so
+# a gaming or generic-tech creator is never returned and never billed the 0.01.
+#
+# DELIBERATELY A SMALL SUBSET, not OFF_TARGET_KEYWORDS. Two reasons. First, this
+# filter reads the BIO, and a bio is the weak signal — the local gate reads 50
+# video titles and is what actually does the work (it rejects 46% of Home
+# Theater's current rows; these bio terms remove only ~18 creators from the
+# pool). Second, every term here silently shrinks the discovery pool, and a
+# false negation is unrecoverable: the creator is never shown to us at all. So
+# only high-precision, self-descriptive phrases are here. "nvidia" is absent on
+# purpose — an NVIDIA Shield is a streaming box a home-theater creator may well
+# mention — and so are "speaker", "projector" and every other on-niche word.
+#
+# Pool cost measured at limit=1 on 2026-08-21, per the re-probe rule above:
+#   Home Theater .... 250 -> 232 (7% narrower)
+#   Lifestyle Sofa .. 1,501 -> 1,498 (0%)
+GAMING_AND_TECH_BIO_NEGATIONS = [
+    "fortnite", "roblox", "minecraft", "call of duty", "valorant", "video game",
+    "gamer", "twitch", "esports", "playstation", "xbox", "nintendo",
+    "tech reviews", "gadget reviews", "consumer electronics", "smartphone",
+    "pc building", "gaming pc",
+]
+
+
 EXCLUDED_TOPIC_KEYWORDS = sorted(
     {term for terms in EXCLUDED_TOPIC_TERMS.values() for term in terms}
 )
@@ -485,7 +711,13 @@ def wire_discovery_filters(niches: dict) -> None:
         # the other niche's filter (or EXCLUDED_TOPIC_KEYWORDS) in place. The
         # copies are still all derived from EXCLUDED_TOPIC_TERMS at import, so
         # the no-drift guarantee above is unaffected.
-        filters["keywords_not_in_description"] = list(EXCLUDED_TOPIC_KEYWORDS)
+        # Off-brand topics AND the gaming/generic-tech negations, merged and
+        # deduped. Both are bio-level filters that save a 0.01 discovery credit
+        # each; neither is the relevance decision, which main.off_target_reason
+        # makes off the video titles.
+        filters["keywords_not_in_description"] = sorted(
+            set(EXCLUDED_TOPIC_KEYWORDS) | set(GAMING_AND_TECH_BIO_NEGATIONS)
+        )
 
         # The subscriber floor, derived from THIS niche's own view floor so the
         # two can never drift apart — see DISCOVERY_SUBSCRIBER_FLOOR_RATIO.

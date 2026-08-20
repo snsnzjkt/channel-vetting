@@ -85,9 +85,11 @@ logger = logging.getLogger(__name__)
 # keywords_not_in_description and number_of_subscribers — i.e. correctness that
 # depended on whether main happened to be imported first.
 from niches import (  # noqa: E402
+    BIO_OFF_SIGNALS,
     BROADCAST_TV_NAME_TERMS,
     BROADCAST_TV_PHRASE_TERMS,
     EXCLUDED_TOPIC_TERMS,
+    OFF_TARGET_TERMS,
 )
 
 # NICHES lives in niches.py (extracted 2026-08-14) so outreach.py can read the
@@ -413,6 +415,19 @@ DROP_NON_ENGLISH_DESCRIPTION = "non_english_description"
 # the email chain runs, so a candidate with nowhere to land can be dropped
 # BEFORE the 0.2-credit influencers.club lookup rather than after it. See the
 # has_room parameter.
+# Share of recent video titles that must read as an OFF-TARGET vertical before
+# the content rule fires — and it only fires when that share also EXCEEDS the
+# on-target share, so this is a floor on evidence, not the whole test.
+#
+# 0.10 measured over the 147 rows live on 2026-08-21. The distribution has a
+# real gap rather than a slope: verified-good channels score 0.00, every
+# Lifestyle row is <= 0.04, and verified off-target Home Theater rows run
+# 0.10-0.86. Lowering it to 0.05 buys nothing (nothing sits between) and starts
+# reading noise; raising it to 0.20 loses Tofer.A (0.12, bio "Video game
+# aficionado"), Technology Space HQ (0.14) and ETPC (0.10), all off-target.
+OFF_TARGET_MIN_SHARE = 0.10
+
+DROP_OFF_TARGET = "off_target_niche"
 DROP_NO_HEADROOM = "no_headroom_for_bucket"
 
 # Drop reasons that say nothing about the CHANNEL, only about this run's
@@ -660,6 +675,103 @@ def pre_push_drop_reason(
     if (subscriber_count or 0) < JUNK_MIN_SUBSCRIBERS and (avg_views or 0) < JUNK_MIN_AVG_VIEWS:
         return DROP_DEAD_CHANNEL
     return None
+
+
+def off_target_reason(niche_config: dict, description: str, video_titles) -> tuple[str | None, str]:
+    """
+    (reason, detail) when this channel's content is DOMINATED by an off-target
+    vertical — gaming, phones/PCs, generic gadgets, AI/crypto — else (None, "").
+
+    Answers the brief's question "what does this creator CONSISTENTLY publish?"
+    by reading the last ~50 video TITLES, which enrichment already fetched for
+    the duplicate filter and used to throw away. Titles beat the bio for this:
+    a bio is written once and goes stale, and four tracked channels have no
+    usable bio at all ("Hi!", a bare email address).
+
+    ## Why this is negative-evidence only
+
+    A positive "must match an on-niche term" gate was built, measured and
+    REJECTED on 2026-08-15 (the reasoning is preserved in niches.py above
+    EXCLUDED_TOPIC_TERMS). It discarded "Jasper Tran - House Design Ideas" — a
+    real prospect — on a positive score of 0/50, because genuine prospects title
+    videos things like "This Small House Will Make You Fall in Love", which no
+    vocabulary anticipates. So NOTHING is required here. A channel is dropped
+    only on positive evidence that it is something else, which keeps the
+    pipeline's standing rule that absent data never disqualifies: no titles, or
+    no `on_target_terms` configured, means no verdict.
+
+    ## Why on-target terms only ever RESCUE
+
+    Two rules fire, and both require off-target evidence to EXCEED on-target
+    evidence:
+
+      - CONTENT: off_share >= OFF_TARGET_MIN_SHARE and off_share > on_share.
+      - PERSONA: the bio self-describes as a gaming or generic-tech channel
+        (BIO_OFF_SIGNALS), the titles corroborate at all, and off > on.
+
+    The persona rule exists because at the low end one signal cannot do the job.
+    Measured 2026-08-21: "DragsterTV" (bio: "money glitches on games such as
+    Forza Horizon 5"; titles: Rainbow Six, Modern Warfare) scores 0.04
+    off-target, and "OCM Reviews" (Fosi Audio DACs, IEMs, an Atmos soundbar)
+    scores 0.06 — nearly identical. What separates them is the on-target rescue:
+    OCM scores 0.60 on-target and is kept; DragsterTV scores 0.00 and its bio
+    names three games. Neither the titles alone nor the bio alone gets both
+    right; "High-quality Tech, Unboxing, Reviews" is OCM's own bio.
+
+    ## Calibration
+
+    Measured over the 147 rows live on 2026-08-21, this drops 29 — all of them
+    in Home Theater, every one hand-verified off-target (Grxnt/Fortnite 0.76,
+    DanKamYouKnow/PC builds 0.86, Octorious/PlayStation 0.58, Paul Antill/phones
+    and cameras 0.42, NFT TIGERS/crypto 0.34, Bane Tech/gadgets 0.18). Zero
+    Lifestyle rows are flagged: the highest scores 0.04, so the threshold has
+    real headroom rather than sitting on top of the distribution.
+    """
+    on_terms = niche_config.get("on_target_terms") or []
+    if not on_terms:
+        # No rescue vocabulary configured means the gate would run with
+        # on_share pinned at 0, so ANY off-target term would outweigh it and the
+        # gate would turn far more aggressive than it was calibrated to be.
+        # Disabled is the safe reading of a missing key, not "run it harder".
+        return None, ""
+
+    judged = [t for t in (video_titles or []) if t and t.strip()]
+    if not judged:
+        return None, ""
+
+    off_hits = 0
+    on_hits = 0
+    categories: set[str] = set()
+    for title in judged:
+        low = title.lower()
+        matched = {
+            category
+            for category, terms in OFF_TARGET_TERMS.items()
+            if any(term in low for term in terms)
+        }
+        if matched:
+            off_hits += 1
+            categories |= matched
+        if any(term in low for term in on_terms):
+            on_hits += 1
+
+    off_share = off_hits / len(judged)
+    on_share = on_hits / len(judged)
+    if off_share <= on_share:
+        return None, ""
+
+    detail = (
+        f"{off_share:.0%} of {len(judged)} recent titles are "
+        f"{'/'.join(sorted(categories))} vs {on_share:.0%} on-niche"
+    )
+    if off_share >= OFF_TARGET_MIN_SHARE:
+        return DROP_OFF_TARGET, detail
+
+    bio_signals = [s for s in BIO_OFF_SIGNALS if s in (description or "").lower()]
+    if bio_signals and off_hits:
+        return DROP_OFF_TARGET, f"{detail}; bio says {bio_signals[:2]}"
+
+    return None, ""
 
 
 def longform_drop_reason(longform_count: int) -> str | None:
@@ -1187,6 +1299,31 @@ def process_candidate(
     if performance is None:
         logger.info("Skipping %s — no accessible recent video performance data.", stats.get("channel_title"))
         return None, "unreachable"
+
+    # RELEVANCE, and it runs HERE for a reason: this is the first point at which
+    # the video titles exist (they arrive free on the response just fetched), and
+    # it is still ahead of everything expensive — the long-form confirmation
+    # paging (2 units a page), the scoring, and the email chain whose step 4 is a
+    # 0.2-credit influencers.club lookup. So a gaming or generic-tech channel is
+    # discarded before it can consume a paid email credit, which is what the
+    # brief asks for: "irrelevant creators are filtered out before they consume a
+    # creator credit or get added to Airtable."
+    #
+    # The creator's 0.01 DISCOVERY credit is already spent by here and cannot be
+    # recovered — the vendor bills on RETURN, before any gate sees the creator.
+    # What stops that recurring is the pair of changes upstream: the retuned
+    # ai_search (which no longer asks for "gaming setup") and the
+    # rejected-handle cache, which excludes this creator server-side from the
+    # next run onward so the same 0.01 is never paid twice.
+    off_target, off_detail = off_target_reason(
+        niche_config, stats.get("description", ""), performance.get("video_titles"),
+    )
+    if off_target:
+        logger.info(
+            "Dropping %s before push — %s (%s).",
+            stats.get("channel_title"), off_target, off_detail,
+        )
+        return None, off_target
 
     # Activity/quality signals for the gate, all free from data already
     # fetched. upload_freq (videos/month over the sampled window) is computed

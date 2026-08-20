@@ -27,6 +27,7 @@ import search_zones
 # attribute lookup into an AttributeError on a dict.
 from search_zones import ZONE_CORE
 from niches import (
+    GAMING_AND_TECH_BIO_NEGATIONS,
     DISCOVERY_SUBSCRIBER_FLOOR_RATIO,
     EXCLUDED_TOPIC_KEYWORDS,
     wire_discovery_filters,
@@ -408,7 +409,9 @@ def test_a_niche_missing_min_avg_views_does_not_break_import():
 
     filters = niches["Broken"]["discovery_filters"]
     # The filter it COULD wire is still wired...
-    assert filters["keywords_not_in_description"] == list(EXCLUDED_TOPIC_KEYWORDS)
+    assert filters["keywords_not_in_description"] == sorted(
+        set(EXCLUDED_TOPIC_KEYWORDS) | set(GAMING_AND_TECH_BIO_NEGATIONS)
+    )
     # ...and the one it couldn't is simply absent, rather than a crash or a
     # wrong default sent to the vendor.
     assert "number_of_subscribers" not in filters

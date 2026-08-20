@@ -159,12 +159,24 @@ PROSPECT_DAY_TZ = os.getenv("PROSPECT_DAY_TZ", "America/Toronto")
 # --- Email deep scan (step 3 of the chain) ---
 # Extra pages of OLDER uploads to scan for a contact email, and only for
 # channels where the two free steps found nothing. Each page is 50 more
-# video descriptions for 2 quota units (playlistItems.list + videos.list),
-# so the worst case is bounded: 40 rows x 2 niches x 2 pages x 2 units =
-# 320 units against a QUOTA_CEILING of 8000, and in practice far less
-# because channels whose email is already known never trigger it.
+# video descriptions for 2 quota units (playlistItems.list + videos.list).
+#
+# RAISED from 2 to 4 on 2026-08-20. This is the widest FREE step in the chain
+# and the only one that can be widened without spending money: step 4 costs 0.2
+# credits per hit and step 5 needs a browser that CI can barely run (datacenter
+# IP reputation, see influencers.py). So when email coverage needs to improve,
+# this is the lever that costs quota rather than cash.
+#
+# Worst case: 40 rows x 2 niches x 4 pages x 2 units = 640 units against a
+# QUOTA_CEILING of 8000, and in practice far less — the step only runs for
+# channels the two free steps missed, and 4 pages is a CEILING that
+# scan_older_videos_for_email stops short of as soon as a repeated address is
+# found. Measured coverage before the raise: 138 of 146 live rows already
+# carried an address, so this is chasing the tail, which is exactly what a
+# quota-only step should be spent on.
+#
 # Set to 0 to disable the step entirely.
-EMAIL_DEEP_SCAN_PAGES = int(os.getenv("EMAIL_DEEP_SCAN_PAGES", 2))
+EMAIL_DEEP_SCAN_PAGES = int(os.getenv("EMAIL_DEEP_SCAN_PAGES", 4))
 
 # --- Long-form confirmation (the "30+ videos that aren't Shorts" gate) ---
 # Extra pages of OLDER uploads to page through when confirming a channel has
@@ -287,6 +299,27 @@ INFLUENCERS_MAX_EXCLUDE_HANDLES = 10_000
 # state, and committing it would merge two machines' spend into one nonsense
 # total.
 CREDIT_LOG_FILE = os.getenv("CREDIT_LOG_FILE", "credit_log.json")
+
+# --- Rejected-handle cache (server-side exclusion budget) ---
+# Creators a niche's discovery query has already returned and our gates already
+# rejected. See rejected_handles.py for why this exists; in short, the vendor
+# bills 0.01 per creator RETURNED and sorts deterministically by relevancy, so
+# without this the same rejects are re-bought every run.
+REJECTED_HANDLES_FILE = os.getenv("REJECTED_HANDLES_FILE", "rejected_handles.json")
+
+# How long a rejection is honoured before the creator is looked at again.
+#
+# This is a WINDOW, not a blacklist, and the length is the whole trade. Too short
+# and we re-buy the same rejects on a fixed schedule, which is the leak. Too long
+# and a channel that has since grown past the view floor stays invisible —
+# growth is the entire reason a creator becomes a prospect, and the pipeline's
+# own gates are the only thing that can notice it.
+#
+# 90 days: long enough that a daily run never re-buys the same reject (the leak
+# was measured at 28% of a page), short enough that a channel gets four looks a
+# year. A handle the query keeps returning is re-stamped on every rejection, so
+# an actively-surfaced creator does not age out mid-window and get re-bought.
+REJECTED_HANDLES_RETENTION_DAYS = int(os.getenv("REJECTED_HANDLES_RETENTION_DAYS", 90))
 
 # A measured full two-niche day is ~7.3 credits (5.5 discovery + 1.8 email).
 # 10 leaves room for that day plus a small manual top-up, while stopping a

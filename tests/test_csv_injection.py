@@ -409,6 +409,11 @@ def test_backfill_neutralises_a_formula_email(monkeypatch):
         lambda *a, **k: ('=HYPERLINK("http://evil.tld","x")', "browser", None),
     )
     monkeypatch.setattr(backfill, "push_record", lambda table, fields: pushed.append(fields) or True)
+    # The optional "Email Source"/"Email Type" columns are PROBED before being
+    # sent (push_record rejects the whole record for one unknown field), and the
+    # probe is a real Airtable read that conftest correctly refuses. Answered
+    # "no" here so these tests stay about csv_safe on the Email value.
+    monkeypatch.setattr(backfill, "table_has_field", lambda table, field: False)
     monkeypatch.setattr(backfill.time, "sleep", lambda *a, **k: None)
 
     backfill.backfill_table("Test Niche", "tblFake", None, scraper=None)
@@ -437,6 +442,11 @@ def test_backfill_leaves_an_ordinary_email_byte_identical(monkeypatch):
         lambda *a, **k: ("admin@avnirvana.com", "about", None),
     )
     monkeypatch.setattr(backfill, "push_record", lambda table, fields: pushed.append(fields) or True)
+    # The optional "Email Source"/"Email Type" columns are PROBED before being
+    # sent (push_record rejects the whole record for one unknown field), and the
+    # probe is a real Airtable read that conftest correctly refuses. Answered
+    # "no" here so these tests stay about csv_safe on the Email value.
+    monkeypatch.setattr(backfill, "table_has_field", lambda table, field: False)
     monkeypatch.setattr(backfill.time, "sleep", lambda *a, **k: None)
 
     backfill.backfill_table("Test Niche", "tblFake", None, scraper=None)

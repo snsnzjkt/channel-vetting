@@ -106,6 +106,19 @@ class InfluencersClient:
         # money figure for reporting. Don't merge them.
         self._credits_reported = 0.0
         self._consecutive_failures = 0
+        # The vendor's OWN label for the address it last returned — observed
+        # values include "personal_email". Held on the client rather than
+        # threaded back through find_email()'s return type because it is
+        # reporting metadata about ONE step of a five-step chain, and four of
+        # those steps have no concept of it. Cleared at the top of every
+        # find_email() so it can never describe a previous channel.
+        self._last_email_type = ""
+        # Why the vendor declined, when it says so, e.g. "not_found" or
+        # "invalid_or_expired". A 400 here is the vendor ANSWERING (and is free)
+        # rather than failing, and the two answers mean different things to a
+        # reviewer looking at a blank Email cell: one creator has no address on
+        # file, the other has one that no longer validates.
+        self._last_email_note = ""
         # Injectable so tests don't actually wait out a cooldown, matching
         # http_client.post_with_rate_limit_retry()'s convention.
         self._sleep = sleep if sleep is not None else time.sleep
@@ -133,6 +146,21 @@ class InfluencersClient:
         """
         return self._credits_reported
 
+    @property
+    def last_email_type(self) -> str:
+        """The vendor's label for the most recently returned address, or "".
+
+        Only meaningful immediately after a find_email() that returned an
+        address; a caller reading it after a miss gets "", which is the honest
+        answer rather than a stale one.
+        """
+        return self._last_email_type
+
+    @property
+    def last_email_note(self) -> str:
+        """Why the vendor had no address for the most recent lookup, or ""."""
+        return self._last_email_note
+
     @classmethod
     def from_config(cls) -> "InfluencersClient":
         """The client main.py uses, or an inert one when no key is set."""
@@ -151,6 +179,12 @@ class InfluencersClient:
         Never raises. Never spends a lookup once the budget is exhausted or
         the credit cap has been reported.
         """
+        # Cleared FIRST, before any early return: a caller that reads
+        # last_email_type after a disabled/unaffordable call must not see the
+        # label from the previous channel.
+        self._last_email_type = ""
+        self._last_email_note = ""
+
         if not channel_id or not self.enabled:
             return ""
 
@@ -174,6 +208,14 @@ class InfluencersClient:
                 "influencers.club returned %s for %s: %s",
                 resp.status_code, channel_id, safe_body(resp),
             )
+            # A 4xx under `must_have` is the vendor's ANSWER, not a failure, and
+            # it is free. Recorded so a blank Email cell can say WHY: measured
+            # live 2026-08-20 against the 8 email-less rows in the base, the
+            # vendor answered 7x "Email is required but not found for this
+            # creator" and 1x "Email for this creator is invalid or expired".
+            # Those are different facts and only one of them is worth retrying.
+            if 400 <= resp.status_code < 500:
+                self._last_email_note = self._decline_note(resp)
             # A 5xx has already cost ~45s of adapter backoff plus up to five
             # 30s timeouts before reaching here. Repeating that for every
             # remaining candidate during an outage is hours of wall clock
@@ -193,6 +235,31 @@ class InfluencersClient:
         self._consecutive_failures = 0
 
         return self._email_from_response(resp, channel_id)
+
+    @staticmethod
+    def _decline_note(resp) -> str:
+        """
+        A short, STABLE code for why the vendor had no address.
+
+        Classified into our own vocabulary rather than storing the vendor's
+        prose: the message is theirs to reword at any time, and this value goes
+        into an Airtable cell a human filters on. An unrecognised message falls
+        back to "declined" rather than to the raw text, so a wording change
+        degrades to a vaguer code instead of splintering the column.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            return "declined"
+        message = body.get("error") if isinstance(body, dict) else None
+        if not isinstance(message, str):
+            return "declined"
+        lowered = message.lower()
+        if "invalid" in lowered or "expired" in lowered:
+            return "invalid_or_expired"
+        if "not found" in lowered:
+            return "not_found"
+        return "declined"
 
     def _record_billable(self) -> None:
         """
@@ -428,6 +495,14 @@ class InfluencersClient:
         if not isinstance(result, dict):
             logger.debug("influencers.club returned no result for %s", channel_id)
             return ""
+
+        # The vendor's own label for the address, captured BEFORE the screens
+        # below so a rejected address still reports what it was. Observed
+        # values include "personal_email"; "other" is what shows up in the
+        # vendor's dashboard for an address it cannot categorise, which is the
+        # value a reviewer asks about.
+        email_type = result.get("email_type")
+        self._last_email_type = email_type.strip() if isinstance(email_type, str) else ""
 
         email = result.get("email")
         email = email.strip() if isinstance(email, str) else ""

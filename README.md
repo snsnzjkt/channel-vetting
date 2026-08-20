@@ -18,7 +18,8 @@ weak day can't flood a table with below-criteria channels:
 1. **Discovery** — finds candidate channels for the niche. With
    `INFLUENCERS_API_KEY` set, it uses **influencers.club creator search**
    (`influencer_discovery.py`), filtering server-side on the niche's own
-   criteria — content language, a subscriber floor, creator gender, and an
+   criteria — content language, a subscriber floor, creator gender, a
+   creator **location** restricted to the niche's own search zone, and an
    `ai_search` description of the niche — so far more of what it returns
    survives the hard requirements below than raw keyword search does. Your
    DO NOT CONTACT handles are excluded server-side (never dropped under the
@@ -44,8 +45,10 @@ weak day can't flood a table with below-criteria channels:
    per-call rather than per-video.
 5. **Hard requirements** (`main.pre_push_drop_reason`, `search_zones.py`) —
    a candidate is **discarded**, with no row written, unless it clears all
-   of: 10,000+ average views (both niches), **each of the last 10 videos
-   over 10,000 views**, 30+ public videos, **at least 10 uploads a year**,
+   of: 10,000+ average views (both niches), **at least half of the judgeable
+   long-form videos in that window over 10,000 views** (see
+   `MIN_VIEWS_PER_VIDEO_RATIO` — the README previously said "each of the last
+   10", which has not been the rule since the ratio was introduced), 30+ public videos, **at least 10 uploads a year**,
    **a most-recent upload inside a rolling 12 months**, and a location
    inside the allowed search zones — **US, Canada, UK, Europe, Australia;
    Ireland excluded**. Dead channels and Shorts-only channels are dropped
@@ -65,6 +68,15 @@ weak day can't flood a table with below-criteria channels:
 8. **Airtable push** (`airtable_client.py`) — creates or updates a row per
    channel in that niche's table (never duplicates), until both the
    qualified and flagged daily budgets are full or candidates run out.
+
+Creators a niche's query has already returned and the gates already rejected
+are remembered in `rejected_handles.json` and excluded server-side on the next
+run, so the vendor is not paid 0.01 twice for the same reject — the discovery
+endpoint sorts by relevancy deterministically, so without this the same rejects
+come back every run. It is an optimisation only: a missing or unreadable file
+costs credits, never correctness, and DO NOT CONTACT screening is untouched by
+it. Entries expire after `REJECTED_HANDLES_RETENTION_DAYS` (90) so a channel
+that has since grown gets looked at again.
 
 Quota spend is tracked in `quota_log.json` and capped by `QUOTA_CEILING`
 (default 8000/10000 daily units) so a run never blows your daily YouTube API
@@ -93,6 +105,20 @@ budget.
    below), Status (single
    select: New/Reviewing/Approved/Rejected/Contacted), Source, Notes,
    Date Added.
+
+   Two further **optional** columns are written when they exist and skipped
+   silently when they don't (the pipeline probes once per table per run, so
+   adding them later switches them on with no code change):
+
+   - **Email Source** (Single line text) — which step of the five-step email
+     chain produced the address, or, when none did, why: `none found
+     (not_found)`, `none found (invalid_or_expired)`, `none found (all 5 steps
+     ran)`. Without it a blank Email cell cannot be told apart from a row
+     written before the column existed.
+   - **Email Type** (Single line text) — influencers.club's own label for the
+     address (`personal_email`, `other`, ...), written only when step 4 is what
+     found it, since the other four sources have no such concept. This is the
+     value that shows as "Other" in the vendor's dashboard.
 
    Grab each table's ID (open the table → **Help → API documentation**,
    or read it from the URL — the `tbl...` segment) for step 4.
@@ -133,7 +159,7 @@ budget.
    > more reliable "this is their real contact"
    > signal than a single mention — and falling back to the channel's
    > About description if no repeated one is found. If both come up
-   > empty, it pages back through `EMAIL_DEEP_SCAN_PAGES` (default 2)
+   > empty, it pages back through `EMAIL_DEEP_SCAN_PAGES` (default 4)
    > pages of *older* uploads and applies the same repeat test across
    > everything scanned so far, at 2 quota units per page. If that also
    > comes up empty and `INFLUENCERS_API_KEY` is set, it asks
@@ -235,7 +261,9 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `EXPECTED_CANDIDATES_PER_KEYWORD` | 40 | Unique channels one keyword is expected to yield (measured ~42 at `max_results=50` over a 7-day window). Converts a row shortfall into a keyword count for the next discovery round |
 | `DISCOVERY_DAYS_BACK` | 7 | How many days back `search.list` looks for videos (short and self-renewing by design — see below; `--days-back` overrides per run) |
 | `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
-| `EMAIL_DEEP_SCAN_PAGES` | 2 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
+| `EMAIL_DEEP_SCAN_PAGES` | 4 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
+| `REJECTED_HANDLES_FILE` | `rejected_handles.json` | Where the already-rejected-creator cache lives (gitignored; cached in CI) |
+| `REJECTED_HANDLES_RETENTION_DAYS` | 90 | How long a rejection is honoured before the creator is discovered again |
 | `LONGFORM_SCAN_MAX_PAGES` | 3 | Extra pages of older uploads paged through to confirm 30+ non-Shorts videos, and only for channels the newest 50 left short of that bar (2 quota units per page; 0 judges on the newest 50 alone) |
 | `USE_PLAYWRIGHT_STEALTH` | `false` | Enables the Playwright link-list email fallback (see §3b). The search-zone filter does not depend on it. `USE_CLOAKBROWSER` is still accepted as an alias |
 | `INFLUENCERS_API_KEY` | _(unset)_ | Enables influencers.club **discovery** (replacing `search.list`) and email chain **step 4** (enrich-by-handle). Unset means both are skipped and discovery falls back to `search.list` — the pipeline runs fine without it |
@@ -254,7 +282,8 @@ qualification thresholds — `min_avg_views` and `min_channel_age_months`
 
 Each entry also carries a `discovery_filters` dict — the server-side
 filters influencers.club discovery uses: content language, creator
-`gender`, a subscriber floor, and an `ai_search` description of the niche
+`gender`, a subscriber floor, a `location` list built from the niche's own
+`allowed_country_codes`, and an `ai_search` description of the niche
 (or `topics` codes where the taxonomy fits). When `INFLUENCERS_API_KEY` is
 set these drive discovery; the `keywords` are only the `search.list`
 fallback used when no key is configured. Reword `ai_search` to steer which

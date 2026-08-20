@@ -9,6 +9,7 @@ Run with --test to sanity-check the whole pipeline cheaply (1 keyword,
 5 results, first niche only) before spending real quota on a full run.
 """
 import argparse
+import inspect
 import logging
 import math
 import re
@@ -47,6 +48,7 @@ from airtable_client import (
     count_added_today,
 )
 from external_dedupe import fetch_external_handles, ExternalIndex, match_external
+import rejected_handles
 from prospect_day import today_iso
 from quota_tracker import can_afford_enrichment, get_today_spend
 from browser_email import BrowserEmailScraper, null_scraper
@@ -400,6 +402,34 @@ DROP_QUOTA_EXHAUSTED = "quota_exhausted"
 # Distinct from DROP_NOT_ENGLISH so a run summary shows which signal fired —
 # they disagree in exactly the case this gate was added for.
 DROP_NON_ENGLISH_DESCRIPTION = "non_english_description"
+# Also not a judgement on the channel: it qualified, but the bucket its
+# qualification lands in is already full for the day, so no row can be written
+# for it. Named distinctly for the same reason as DROP_QUOTA_EXHAUSTED — a run
+# summary showing these means "the cap worked", not "these channels failed", and
+# the candidate is a genuine prospect to re-examine tomorrow.
+#
+# This drop exists to stop a CREDIT LEAK, and its position in process_candidate
+# is the whole feature: qualification is knowable from channel age alone, before
+# the email chain runs, so a candidate with nowhere to land can be dropped
+# BEFORE the 0.2-credit influencers.club lookup rather than after it. See the
+# has_room parameter.
+DROP_NO_HEADROOM = "no_headroom_for_bucket"
+
+# Drop reasons that say nothing about the CHANNEL, only about this run's
+# circumstances. They must never reach the rejected-handle cache: a creator we
+# simply did not get to is a genuine prospect, and recording it would blind the
+# pipeline to it for REJECTED_HANDLES_RETENTION_DAYS to save 0.01 credits — a
+# terrible trade, and an invisible one, since the symptom would be a table that
+# quietly stopped finding people.
+#
+# "unreachable" is in here deliberately: a private, deleted or temporarily
+# erroring channel may be back tomorrow, and a transient YouTube 5xx surfaces
+# through this same reason (see enrichment's exception handling).
+TRANSIENT_DROP_REASONS = frozenset({
+    DROP_QUOTA_EXHAUSTED,
+    DROP_NO_HEADROOM,
+    "unreachable",
+})
 
 
 
@@ -841,6 +871,12 @@ def push_until_full(
     `build_record(candidate)` returns `(record, qualification)`, or
     `(None, reason)` to skip the candidate without spending budget.
 
+    A build_record that accepts a SECOND parameter is additionally handed a
+    `has_room(qualification) -> bool` probe over the live counts below, so it can
+    bail out before spending money on a row that has nowhere to land — see
+    process_candidate's has_room. Arity is inspected once, up front, so the
+    one-argument form keeps working unchanged.
+
     Only SUCCESSFUL pushes consume budget. The previous loop counted
     attempts, so a run of Airtable failures would have burned the day's
     allowance without writing anything.
@@ -854,12 +890,39 @@ def push_until_full(
 
     Returns counts plus "pushed_ids", the Channel IDs actually written —
     matching the original loop, which added to newly_tracked_ids only
-    when push_record returned True.
+    when push_record returned True — and "rejected_handles", the @handles
+    dropped for a reason that describes the channel rather than the run (see
+    TRANSIENT_DROP_REASONS), which feeds the rejected-handle cache so the vendor
+    is not paid to return them again.
     """
-    counts = {"qualified": 0, "flagged": 0, "skipped": 0, "pushed_ids": set()}
+    counts = {
+        "qualified": 0, "flagged": 0, "skipped": 0, "pushed_ids": set(),
+        # Handles dropped for a reason that describes the CHANNEL rather than
+        # this run — the input to the rejected-handle cache. Only populated for
+        # candidates that carry a handle, i.e. the discovery path, which is the
+        # only path where a re-return costs money.
+        "rejected_handles": set(),
+    }
     # Candidates enriched since the qualified budget filled without producing a
     # flagged row. See FLAGGED_ONLY_PATIENCE.
     fruitless_flagged_hunt = 0
+
+    def has_room(qualification) -> bool:
+        """Whether a row of this qualification could still be written today."""
+        if qualification == QUALIFIED:
+            return counts["qualified"] < qualified_headroom
+        return counts["flagged"] < flagged_headroom
+
+    # Inspected ONCE, not per candidate, and by signature rather than by calling
+    # with two arguments and catching TypeError: a TypeError raised from deep
+    # inside process_candidate looks identical to a wrong arity, and swallowing
+    # it would silently call build_record — and re-spend its quota — twice.
+    try:
+        accepts_room = len(inspect.signature(build_record).parameters) >= 2
+    except (TypeError, ValueError):
+        # An un-introspectable callable (a C builtin, some Mock configurations)
+        # falls back to the one-argument contract, which is always safe.
+        accepts_room = False
 
     for candidate in candidates:
         if counts["qualified"] >= qualified_headroom and counts["flagged"] >= flagged_headroom:
@@ -895,9 +958,18 @@ def push_until_full(
                 )
                 break
 
-        record, qualification = build_record(candidate)
+        record, qualification = (
+            build_record(candidate, has_room) if accepts_room else build_record(candidate)
+        )
         if record is None:
             counts["skipped"] += 1
+            # `qualification` is the DROP REASON on this branch (build_record
+            # returns (None, reason)), which is what makes the durable/transient
+            # split readable here without a second return value.
+            if qualification not in TRANSIENT_DROP_REASONS:
+                handle = (candidate.get("handle") or "").strip().lstrip("@").lower()
+                if handle:
+                    counts["rejected_handles"].add(handle)
             # A gate-dropped candidate still cost enrichment, so it counts
             # against the hunt's patience.
             fruitless_flagged_hunt += hunting_flagged_only
@@ -950,8 +1022,22 @@ def process_candidate(
     scraper,
     enricher=None,
     known_channel_ids: set[str] | None = None,
+    has_room=None,
 ) -> tuple[dict | None, str]:
-    """Enrich, screen, qualify, and build an Airtable record for one candidate."""
+    """
+    Enrich, screen, qualify, and build an Airtable record for one candidate.
+
+    `has_room(qualification) -> bool` is an optional budget probe, called once
+    the qualification is known and BEFORE the email chain spends anything. It
+    answers "is there still a daily slot for a row of this kind?"; False drops
+    the candidate as DROP_NO_HEADROOM. Omit it and nothing is skipped for
+    budget reasons, which is the pre-2026-08-20 behaviour.
+
+    Why it exists, and why it is a callback rather than a number: push_until_full
+    owns the running counts, and they change with every push inside the batch, so
+    a headroom figure passed in here would be stale by the second candidate. The
+    callback reads the live counts at the moment they matter.
+    """
     known_channel_ids = known_channel_ids or set()
     # A candidate carries EITHER a "channel_id" (discovery.py / YouTube search)
     # OR a "handle" (influencer_discovery.py, which surfaces creators by
@@ -1193,7 +1279,35 @@ def process_candidate(
         niche_config["min_channel_age_months"],
     )
 
-    email, _email_source, has_external_links = resolve_email_with_source(
+    # LAST FREE EXIT, and the only one placed on a budget rather than on the
+    # channel. Everything above this line is spent (YouTube quota, and on the
+    # discovery path the creator's 0.01 credit); everything below can cost REAL
+    # MONEY — resolve_email_with_source step 4 is a 0.2-credit influencers.club
+    # lookup.
+    #
+    # push_until_full used to make this decision AFTER build_record returned, by
+    # which point the lookup was paid for and the record was thrown away at its
+    # bucket check. Measured on the live shape (both tables are 100% "Qualified",
+    # so DAILY_FLAGGED_CAP never fills and the flagged hunt keeps going): 8
+    # candidates offered, 8 email lookups paid for, 1 row written. Up to
+    # FLAGGED_ONLY_PATIENCE of those per round, per niche.
+    #
+    # Qualification is what makes the early exit possible: it turns on channel
+    # age alone (see scoring.qualify), and age comes from `published_at`, which
+    # channels.list already returned. So the bucket a candidate would land in is
+    # knowable here, before the chain — no extra call, no reordering of any gate.
+    #
+    # The post-build bucket check in push_until_full deliberately STAYS as the
+    # backstop: this probe is an optimisation and a caller may not pass one.
+    if has_room is not None and not has_room(qualification):
+        logger.info(
+            "Dropping %s before the email chain — %s (a '%s' row has no daily "
+            "headroom left, so no email lookup is worth paying for).",
+            stats.get("channel_title"), DROP_NO_HEADROOM, qualification,
+        )
+        return None, DROP_NO_HEADROOM
+
+    email, email_source, has_external_links = resolve_email_with_source(
         stats, performance, scraper, enricher
     )
 
@@ -1310,7 +1424,55 @@ def process_candidate(
     if handle and niche_table and table_has_field(niche_table, "Handle"):
         record["Handle"] = handle
 
+    # WHERE the address came from, and — when step 4 produced it — what the
+    # vendor called it. Same table_has_field guard and same reasoning as
+    # "Handle" above: push_record sends field names as-is and Airtable rejects
+    # the whole record for one unknown field.
+    #
+    # Why this is worth two columns. The chain has five steps of very different
+    # trustworthiness (a repeated address across recent videos vs. a regex hit on
+    # a third-party website), and until now the source was computed by
+    # resolve_email_with_source and then DISCARDED into `_email_source`, so every
+    # cell looked equally authoritative and a blank one explained nothing. A
+    # reviewer asking "why does this row have no email, and what is 'Other'?"
+    # could not answer it from the table — the answer only existed in a log line
+    # from a run that had already scrolled past.
+    #
+    # "Other" is specifically `email_type`, the vendor's own label, which this
+    # pipeline never stored. Writing it puts the value the reviewer sees in the
+    # vendor's dashboard next to the address in the table they actually work from.
+    #
+    # On a MISS the source is "" and the note carries the vendor's reason
+    # (not_found / invalid_or_expired / declined), which is the difference
+    # between "nobody has this address" and "the one on file stopped
+    # validating" — verified live: 7 of the 8 email-less rows in the base are
+    # the former and 1 is the latter.
+    if niche_table and table_has_field(niche_table, "Email Source"):
+        record["Email Source"] = csv_safe(email_source or _email_miss_note(enricher))
+    if niche_table and table_has_field(niche_table, "Email Type"):
+        # Only step 4 has a type; the other four sources have no such concept,
+        # so this is deliberately blank for them rather than guessed at.
+        record["Email Type"] = csv_safe(
+            getattr(enricher, "last_email_type", "") or ""
+            if email_source == EMAIL_SOURCE_INFLUENCERS else ""
+        )
+
     return record, qualification
+
+
+def _email_miss_note(enricher) -> str:
+    """
+    What to write in "Email Source" when the whole chain came up empty.
+
+    Prefers the vendor's own reason for declining (step 4 is the only step that
+    gives one) and falls back to a plain statement that every step ran. Either
+    way the cell says something, because an empty "Email Source" beside an empty
+    "Email" is the ambiguity this column exists to remove — it would leave a
+    reviewer unable to tell "we looked and there is nothing" from "this row
+    predates the column".
+    """
+    note = (getattr(enricher, "last_email_note", "") or "").strip()
+    return f"none found ({note})" if note else "none found (all 5 steps ran)"
 
 
 def _external_priority(external_handles, source_hint: str) -> list[str]:
@@ -1360,7 +1522,7 @@ def _external_priority(external_handles, source_hint: str) -> list[str]:
 
 def _discovery_exclude_handles(
     blocklist, external_handles, seen_handles, tracked_handles=(),
-    external_source_hint: str = "",
+    external_source_hint: str = "", rejected_handles=(),
 ) -> set[str]:
     """
     Assemble the discovery exclude set, PRIORITISED under the 10k cap.
@@ -1374,6 +1536,15 @@ def _discovery_exclude_handles(
 
     `seen_handles` (creators already examined THIS run) come next, so a later
     round never re-bills an earlier round's candidates.
+
+    `rejected_handles` — creators this niche's query has already returned and our
+    gates already rejected — rank alongside them too, and for the identical
+    reason: the endpoint sorts by relevancy deterministically, so a reject is a
+    creator the vendor WILL return again, not one it might. Measured 2026-08-20,
+    28% of a live page was creators already known to us (7 tracked elsewhere, 4
+    on DO NOT CONTACT). See rejected_handles.py, and note the vendor's 10,000
+    cap is verified rather than assumed — 12,000 elements is a 400 — which is
+    what makes this a BUDGET and the ordering below a real decision.
 
     `tracked_handles` — this niche's OWN Airtable rows — rank alongside them,
     and closing that gap is why they exist. The niche tables historically stored
@@ -1397,7 +1568,10 @@ def _discovery_exclude_handles(
     name, which a handle-only exclusion can't). This set is a cost-saver layered
     in front of it, never a replacement for it.
     """
-    must_keep = set(blocklist.handles) | set(seen_handles) | set(tracked_handles)
+    must_keep = (
+        set(blocklist.handles) | set(seen_handles) | set(tracked_handles)
+        | set(rejected_handles)
+    )
     room = max(0, INFLUENCERS_MAX_EXCLUDE_HANDLES - len(must_keep))
     ranked = _external_priority(external_handles, external_source_hint)
     external = [h for h in ranked if h not in must_keep][:room]
@@ -1450,6 +1624,15 @@ def _run_discovery_rounds(
     # channel, at the cost of the 1-unit channels.list to resolve it.
     filters = niche_config["discovery_filters"]
     seen_handles: set[str] = set()
+    # Loaded ONCE per niche, then grown in memory as this run rejects more, so a
+    # later round in the same run already excludes what an earlier one rejected
+    # without re-reading the file.
+    rejected = rejected_handles.for_niche(niche_name)
+    if rejected:
+        logger.info(
+            "'%s': %d previously-rejected handle(s) will be excluded server-side.",
+            niche_name, len(rejected),
+        )
     # Creators the vendor already billed us for but that this niche hasn't had
     # the headroom to examine yet. Drained before any new request is issued, so
     # a page bought in round 1 is spent over as many rounds as it takes instead
@@ -1490,6 +1673,7 @@ def _run_discovery_rounds(
                 exclude_handles=_discovery_exclude_handles(
                     blocklist, external_handles, seen_handles, tracked_handles,
                     external_source_hint=niche_config.get("external_source_hint", ""),
+                    rejected_handles=rejected,
                 ),
                 source_label=f"influencers.club discovery ({niche_name})",
             )
@@ -1522,9 +1706,10 @@ def _run_discovery_rounds(
 
         counts = push_until_full(
             batch,
-            lambda c: process_candidate(
+            lambda c, has_room: process_candidate(
                 c, external_handles, blocklist, niche_config, scraper, enricher,
                 known_channel_ids=globally_tracked_ids | pushed_ids,
+                has_room=has_room,
             ),
             table_name,
             qualified_headroom - pushed_qualified,
@@ -1535,6 +1720,15 @@ def _run_discovery_rounds(
         pushed_flagged += counts["flagged"]
         total_skipped += counts["skipped"]
         pushed_ids |= counts["pushed_ids"]
+
+        # Persisted per ROUND, not once at the end of the niche: a run that dies
+        # mid-niche (quota abort, runner timeout, the 60-minute CI ceiling) has
+        # already PAID for these creators, and losing the record means paying for
+        # them again next run.
+        newly_rejected = counts["rejected_handles"] - rejected
+        if newly_rejected:
+            rejected |= newly_rejected
+            rejected_handles.record(niche_name, newly_rejected)
 
         logger.info(
             "'%s' so far: %d/%d qualified, %d/%d flagged "
@@ -1759,8 +1953,9 @@ def run_niche(
 
         counts = push_until_full(
             new_candidates,
-            lambda c: process_candidate(
-                c, external_handles, blocklist, niche_config, scraper, enricher
+            lambda c, has_room: process_candidate(
+                c, external_handles, blocklist, niche_config, scraper, enricher,
+                has_room=has_room,
             ),
             table_name,
             qualified_headroom - pushed_qualified,

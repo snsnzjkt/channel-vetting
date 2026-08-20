@@ -852,12 +852,21 @@ def get_recent_video_performance(
     performance_count = 0
     video_languages = []
     video_descriptions = []
+    # Video TITLES over the same wide window. Already fetched — the duplicate
+    # filter below reads them off this very response — and previously dropped on
+    # the floor. Returned because a title is the single best free evidence of
+    # what a channel actually PUBLISHES, which is a different question from what
+    # its bio CLAIMS: four tracked channels have no usable bio at all ("Hi!", a
+    # bare email address), and a bio is written once while titles are written
+    # every upload. See main.off_target_reason.
+    video_titles = []
     durations = []
     for v in video_items:
         snippet = v.get("snippet", {})
         # Every fetched video feeds the email scan — that's the whole
         # point of pulling EMAIL_SCAN_SAMPLE_SIZE of them.
         video_descriptions.append(snippet.get("description", ""))
+        video_titles.append(snippet.get("title", ""))
         # Shorts detection reads the WIDE window (every fetched video, up to
         # EMAIL_SCAN_SAMPLE_SIZE) rather than the 10-video performance
         # window: more videos means more chances to see a long-form upload,
@@ -1035,6 +1044,10 @@ def get_recent_video_performance(
         # descriptions — a stronger signal than a single mention anywhere.
         "repeated_email": find_repeated_email(video_descriptions),
         "video_descriptions": video_descriptions,
+        # The wide window's titles, newest first. Free (see the collection
+        # above) and read by main.off_target_reason to judge what the channel
+        # consistently publishes.
+        "video_titles": video_titles,
         # Where the newest-EMAIL_SCAN_SAMPLE_SIZE window ended, so
         # scan_older_videos_for_email() can continue from here instead of
         # re-fetching page 1 (2 wasted units) to find the same place.

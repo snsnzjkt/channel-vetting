@@ -19,6 +19,8 @@ import pytest
 
 import enrichment
 import main
+import niches
+import search_zones
 
 # Imported by NAME rather than reached through the module: three tests below
 # bind a LOCAL dict called `niches`, which would shadow the module and turn an
@@ -486,8 +488,25 @@ def test_the_niche_filters_reach_the_vendor_payload(monkeypatch):
     sent = seen["filters"]
     assert sent["gender"] == "male"
     assert sent["profile_language"] == ["en"]
-    assert sent["number_of_subscribers"] == {"min": 5000}
     assert "keywords_not_in_description" in sent
+
+    # Asserted as the DERIVATION rather than as a literal. The literal (5,000
+    # under the old 0.5 ratio) went stale the moment the ratio was retuned on
+    # 2026-08-20, and a stale literal here fails the run rather than catching a
+    # bug. What must not drift is that the floor tracks this niche's own view
+    # floor — see DISCOVERY_SUBSCRIBER_FLOOR_RATIO.
+    assert sent["number_of_subscribers"] == {
+        "min": int(niche_config["min_avg_views"] * niches.DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
+    }
+
+    # The server-side half of the search-zone gate must be derived from the SAME
+    # allowed_country_codes the local gate enforces, or the two disagree about
+    # which zone the niche runs on and the vendor is paid for creators
+    # location_drop_reason() will discard.
+    assert sent["location"] == search_zones.vendor_locations_for(
+        niche_config["allowed_country_codes"]
+    )
+    assert sent["location"], "ZONE_CORE must have verified vendor location names"
 
 
 def test_the_quota_ceiling_stops_enrichment(monkeypatch):

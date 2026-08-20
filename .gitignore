@@ -2,6 +2,7 @@
 search_cache.json
 quota_log.json
 credit_log.json
+rejected_handles.json*
 external_handles_cache.json*
 venv/
 .venv/

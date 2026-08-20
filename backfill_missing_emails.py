@@ -31,7 +31,7 @@ from collections import Counter
 # through with UnicodeEncodeError (this bit an earlier full run).
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from airtable_client import get_records_missing_email, push_record
+from airtable_client import get_records_missing_email, push_record, table_has_field
 from browser_email import BrowserEmailScraper, null_scraper
 from influencers import InfluencersClient
 from enrichment import (
@@ -39,7 +39,12 @@ from enrichment import (
     get_recent_video_performance,
     FREEMAIL_DOMAINS,
 )
-from main import csv_safe, resolve_email_with_source
+from main import (
+    EMAIL_SOURCE_INFLUENCERS,
+    _email_miss_note,
+    csv_safe,
+    resolve_email_with_source,
+)
 from config import API_SLEEP_SECONDS, AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -49,6 +54,40 @@ TABLES = {
     "Home Theater": AIRTABLE_TABLE_HOME_THEATER,
     "Lifestyle Sofa": AIRTABLE_TABLE_LIFESTYLE_SOFA,
 }
+
+
+def _email_patch(table_name: str, channel_id: str, email: str, source: str, enricher) -> dict:
+    """
+    The Airtable patch for one channel's email result.
+
+    Mirrors what main.process_candidate writes on the normal path, and is guarded
+    the same way: push_record sends field names as-is and Airtable rejects the
+    WHOLE record for one unknown field, so an optional column is probed before it
+    is sent (table_has_field caches per table per run). Importing main's helper
+    rather than restating the "none found (...)" wording keeps the two paths from
+    drifting into two different vocabularies in the same column.
+
+    An empty `email` deliberately omits the Email key altogether instead of
+    sending "": a backfill that wrote an empty string would erase an address a
+    reviewer had typed in by hand.
+    """
+    patch = {"Channel ID": channel_id}
+    if email:
+        # csv_safe() for the same reason main.py applies it on the normal path:
+        # this address can come from browser_email.py scraping an arbitrary
+        # third-party site, and a value starting with =/+/-/@ becomes a live
+        # formula when the reviewer exports the table to CSV and opens it in
+        # Excel. Airtable itself is not a formula context, so this looks
+        # unnecessary right up until someone exports.
+        patch["Email"] = csv_safe(email)
+    if table_has_field(table_name, "Email Source"):
+        patch["Email Source"] = csv_safe(source or _email_miss_note(enricher))
+    if table_has_field(table_name, "Email Type"):
+        patch["Email Type"] = csv_safe(
+            (getattr(enricher, "last_email_type", "") or "")
+            if source == EMAIL_SOURCE_INFLUENCERS else ""
+        )
+    return patch
 
 
 def backfill_table(
@@ -124,11 +163,24 @@ def backfill_table(
             # CSV and opens it in Excel. Airtable itself is not a formula
             # context, so this looks unnecessary right up until someone
             # exports.
-            push_record(table_name, {"Channel ID": channel_id, "Email": csv_safe(email)})
+            push_record(table_name, _email_patch(table_name, channel_id, email, source, enricher))
             found += 1
             print(f"[{niche_name}] {i}/{total} [FOUND] {title} -> {email}  ({source})")
         else:
-            print(f"[{niche_name}] {i}/{total} [no email] {title}")
+            # A MISS is written too, which is the point of the source columns:
+            # a blank Email beside a blank Email Source cannot tell a reviewer
+            # "we looked and the address does not exist" from "this row predates
+            # the column". Verified live 2026-08-20 — the vendor answers
+            # "not found" for 7 of the 8 email-less rows and
+            # "invalid_or_expired" for the other, and those are different facts.
+            # No Email key is sent, so a miss can never blank an address that a
+            # human filled in by hand between runs.
+            patch = _email_patch(table_name, channel_id, "", source, enricher)
+            if len(patch) > 1:
+                push_record(table_name, patch)
+            note = (getattr(enricher, "last_email_note", "") or "").strip()
+            print(f"[{niche_name}] {i}/{total} [no email] {title}"
+                  f"{f'  (vendor: {note})' if note else ''}")
 
         time.sleep(API_SLEEP_SECONDS)
 

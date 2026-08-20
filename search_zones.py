@@ -131,6 +131,67 @@ EUROPE_COUNTRY_CODES = frozenset({
 # niche cannot silently inherit this wider default.
 ALLOWED_COUNTRY_CODES = ZONE_CORE | EUROPE_COUNTRY_CODES
 
+# influencers.club's OWN spelling of a country, for the server-side `location`
+# discovery filter. Keyed on our country code so the filter is derived from the
+# niche's `allowed_country_codes` and cannot drift from the local zone gate.
+#
+# EVERY NAME HERE IS VERIFIED LIVE against the vendor's discovery endpoint, and
+# that is the entry requirement for this table — not a guess at their spelling.
+# Verified 2026-08-20 (Home Theater / Lifestyle Sofa totals, one name per
+# request at limit=1):
+#
+#     United States ....  544 / 2199
+#     Canada ..........   64 /  254
+#     United Kingdom ..  100 /  443
+#     Australia .......   26 /  106
+#     all four ........  734 / 3002   <- exactly the sum of the singles
+#
+# The sum matching the combined total is the check that matters: it proves the
+# filter PARTITIONS the pool rather than being silently ignored. The vendor also
+# accepts an `average_views` filter and ignores it completely (total unchanged at
+# min=100,000,000), so "the request returned 200" is not evidence a filter works.
+# An invalid name is a hard 400 ("Invalid location: 'Atlantis' is not a valid
+# location"), which is why an UNVERIFIED name must never be added here: a 400
+# fails the whole discovery request, i.e. zero rows, where a missing filter only
+# costs credits.
+#
+# EUROPE IS DELIBERATELY ABSENT. No niche admits it as of 2026-08-20 (see
+# EUROPE_COUNTRY_CODES above), and guessing 30 vendor spellings would trade a
+# credit leak for a run-killing 400. If Europe is restored to a niche,
+# vendor_locations_for() below returns nothing for it and the filter is skipped
+# with a warning rather than sent half-populated — verify the names, add them
+# here, and the filter switches itself back on.
+VENDOR_LOCATION_NAMES = {
+    "US": "United States",
+    "CA": "Canada",
+    "GB": "United Kingdom",
+    "AU": "Australia",
+}
+
+
+def vendor_locations_for(allowed_codes) -> list[str]:
+    """
+    The vendor `location` values for a niche's zone, or [] if any code is unmapped.
+
+    ALL-OR-NOTHING, and that is the whole point. Sending the subset we happen to
+    have names for would silently EXCLUDE creators the niche allows — a zone of
+    {US, CA, GB, AU, DE} with no "DE" name would filter German creators out
+    server-side while the local gate still admitted them, and the only symptom
+    would be a quieter table. Returning [] instead leaves the filter off, which
+    is the previous behaviour: it costs credits on out-of-zone creators that
+    location_drop_reason() then discards, and costs no reachable prospect.
+
+    So the failure direction is deliberately the expensive one, not the lossy one.
+    """
+    codes = sorted(allowed_codes or ())
+    if not codes:
+        return []
+    names = [VENDOR_LOCATION_NAMES.get(code) for code in codes]
+    if any(name is None for name in names):
+        return []
+    # dict.fromkeys, not set(), so the order is stable for tests and log lines.
+    return list(dict.fromkeys(names))
+
 # The About panel renders a country NAME, so names need their own lookup.
 # Keys are lowercased and stripped; aliases matter because the panel's
 # wording varies by YouTube locale and by era ("Czechia" vs "Czech

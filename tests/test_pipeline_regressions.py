@@ -252,7 +252,8 @@ def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
         flagged_headroom=5,
     )
 
-    assert result == {"qualified": 0, "flagged": 0, "skipped": 1, "pushed_ids": set()}
+    assert result == {"qualified": 0, "flagged": 0, "skipped": 1,
+                      "pushed_ids": set(), "rejected_handles": set()}
 
 
 # --- M13: the email chain must be called WITH the scraper -----------------
@@ -634,7 +635,8 @@ def test_none_record_counts_as_skipped_not_flagged(monkeypatch):
         flagged_headroom=5,
     )
 
-    assert result == {"qualified": 0, "flagged": 0, "skipped": 1, "pushed_ids": set()}
+    assert result == {"qualified": 0, "flagged": 0, "skipped": 1,
+                      "pushed_ids": set(), "rejected_handles": set()}
 
 
 # --- MINOR 3: --daily-cap must cap the flagged budget too, not just qualified --

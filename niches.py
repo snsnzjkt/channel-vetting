@@ -9,8 +9,12 @@ Playwright — into a process whose only job is sending an email.
 `main.py` re-exports NICHES from here, so this stays the single source of
 truth: adding a niche in one place is still enough.
 """
+import logging
+
 from config import AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA
-from search_zones import ZONE_CORE
+from search_zones import ZONE_CORE, vendor_locations_for
+
+logger = logging.getLogger(__name__)
 
 # One entry per niche: its search keywords (drawn directly from the
 # "Types of Content Posting" > Primary section of each influencer
@@ -232,14 +236,43 @@ NICHES = {
 # view floor moved, and no test would catch the drift. Deriving it means the
 # floor tracks its own niche automatically.
 #
-# Why 0.5 and not 1.0: the two directions of error are not symmetric. Too high
-# is a FALSE NEGATIVE — a real prospect the vendor never shows us, invisible and
-# unrecoverable. Too low just costs credits, which the run summary now reports
-# per row. A 2x view-to-subscriber ratio is ordinary for an engaged niche
-# audience, so a channel with half the view floor in subscribers is a genuine
-# prospect and must stay reachable. Tune against the drop-reason counts in a run
-# summary, not by intuition.
-DISCOVERY_SUBSCRIBER_FLOOR_RATIO = 0.5
+# Why 1.0, RAISED FROM 0.5 on 2026-08-20 against measured drop-reason counts —
+# which is what the previous note here asked for ("tune against the drop-reason
+# counts in a run summary, not by intuition"). The asymmetry it described still
+# holds: too high is a FALSE NEGATIVE, a real prospect the vendor never shows us,
+# invisible and unrecoverable; too low only costs credits. The measurement is
+# what moved, and it showed the old floor screening out almost nothing.
+#
+# What forced it: a 40-creator sample of fresh Home Theater discovery, run
+# through the real gates, produced ZERO rows, and 45% of it died on
+# `below_view_minimum`. At 0.5 the floor was 5,000 subscribers against a 10,000
+# average-view requirement — a 2x ratio, which is ordinary, so nearly every
+# under-performing channel in the niche cleared it and was billed for.
+#
+# Why 1.0 and not higher, calibrated on the rows that ACTUALLY QUALIFIED (60
+# Home Theater, 84 Lifestyle Sofa) rather than on the ratio argument alone:
+#
+#     floor    HT qualifiers kept   LS qualifiers kept   HT pool
+#      5,000          98%                 100%            2,619
+#     10,000          95%                  99%            1,985   <- this
+#     20,000          88%                  94%            1,425
+#     30,000          72%                  92%            1,158
+#     50,000          63%                  76%              864
+#
+# 10,000 is the last floor that costs almost no reachable prospect (95% / 99%
+# retained) while removing a quarter of the pool. 20,000 removes 46% of the pool
+# but gives up 12% of real Home Theater qualifiers, and false negatives are the
+# unrecoverable direction — so the pool reduction beyond this point is not worth
+# buying. Measured medians for context: avg_views/subscribers is 0.405 (Home
+# Theater) and 0.218 (Lifestyle Sofa), i.e. a typical qualifier has FAR more
+# subscribers than its view floor, which is why this floor can rise this far
+# without cutting into the real population.
+#
+# NOTE the view floor itself cannot be filtered server-side: the vendor accepts
+# an `average_views` filter and silently ignores it (verified — total unchanged
+# at min=100,000,000). The subscriber floor is the only lever the vendor honours,
+# which is why it carries this much weight.
+DISCOVERY_SUBSCRIBER_FLOOR_RATIO = 1.0
 
 
 # Whole categories a brand-partnership run must never surface, however well a
@@ -462,6 +495,40 @@ def wire_discovery_filters(niches: dict) -> None:
             filters["number_of_subscribers"] = {
                 "min": int(niche_config["min_avg_views"] * DISCOVERY_SUBSCRIBER_FLOOR_RATIO)
             }
+
+        # The SERVER-SIDE half of the search-zone gate, derived from the same
+        # `allowed_country_codes` that location_drop_reason() enforces locally,
+        # so the two can never disagree about which zone a niche runs on.
+        #
+        # Added 2026-08-20. Until now the zone existed only as a local gate: the
+        # vendor was asked for creators anywhere on earth and 72% of what it
+        # returned for Home Theater was out of zone (2,619 -> 734 once the filter
+        # is applied; Lifestyle Sofa 7,647 -> 3,002). Every one of those was
+        # billed at 0.01 and then discarded by location_drop_reason() or by
+        # `no_declared_country` — in a measured 40-creator sample, 5% died on the
+        # country check alone, and the out-of-zone share of the pool is far
+        # larger than that because relevancy sorting front-loads the in-zone ones.
+        #
+        # vendor_locations_for() is ALL-OR-NOTHING: a zone containing a code with
+        # no verified vendor spelling yields [] and the filter is skipped, which
+        # is the old behaviour. See its docstring — sending a partial list would
+        # exclude creators the niche allows, and an unverified name would 400 the
+        # whole request. Skipping is the safe failure, so the warning is what
+        # makes it visible rather than a silent narrowing.
+        allowed_codes = niche_config.get("allowed_country_codes")
+        if allowed_codes:
+            locations = vendor_locations_for(allowed_codes)
+            if locations:
+                filters["location"] = locations
+            else:
+                logger.warning(
+                    "Niche zone %s has no verified influencers.club location name for "
+                    "every code, so the server-side `location` filter is OFF for it. "
+                    "Out-of-zone creators will be returned and billed at 0.01 each "
+                    "before location_drop_reason() discards them. Add the verified "
+                    "spellings to search_zones.VENDOR_LOCATION_NAMES to switch it on.",
+                    sorted(allowed_codes),
+                )
 
 
 # The local excluded_topic_reason() gate in process_candidate STAYS as the

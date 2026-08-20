@@ -199,7 +199,15 @@ jobs:
       # credits_left — see InfluencerDiscovery.credits_left_reported); until
       # then, treat INFLUENCERS_MAX_CREDITS_PER_MONTH as advisory on CI and
       # check the vendor dashboard for the authoritative figure.
-      - name: Restore quota + search + external-handles + credit cache
+      # rejected_handles.json is the one entry here whose MISS costs money
+      # rather than time: without it the vendor re-returns creators this
+      # pipeline already examined and rejected, at 0.01 each, and the same
+      # relevancy order means it is the SAME creators every run (measured: 28%
+      # of a live page). It degrades exactly like credit_log.json — a cache miss
+      # is fail-open, the run behaves like a first run, and the only cost is
+      # credits. Never a correctness gate: DO NOT CONTACT screening and
+      # process_candidate's own checkpoints are untouched by it.
+      - name: Restore quota + search + external-handles + credit + reject cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
@@ -207,6 +215,7 @@ jobs:
             search_cache.json
             external_handles_cache.json
             credit_log.json
+            rejected_handles.json
           # The exact key intentionally never hits (github.run_id is unique
           # per run) — it exists so the SAVE step below always has a fresh,
           # unclaimed key to write to. A cache key is immutable once
@@ -308,7 +317,7 @@ jobs:
       # FAILED run: an abort after discovery has paged means the money is gone
       # whether or not the run produced a row, and a ledger dropped there lets
       # the next run spend a second full allowance believing nothing was spent.
-      - name: Save quota + search + external-handles + credit cache
+      - name: Save quota + search + external-handles + credit + reject cache
         if: always()
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -317,4 +326,5 @@ jobs:
             search_cache.json
             external_handles_cache.json
             credit_log.json
+            rejected_handles.json
           key: channel-vetting-state-${{ github.run_id }}

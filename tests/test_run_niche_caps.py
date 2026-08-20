@@ -158,4 +158,5 @@ def test_zero_headroom_pushes_nothing(monkeypatch):
         qualified_headroom=0,
         flagged_headroom=0,
     )
-    assert result == {"qualified": 0, "flagged": 0, "skipped": 0, "pushed_ids": set()}
+    assert result == {"qualified": 0, "flagged": 0, "skipped": 0,
+                      "pushed_ids": set(), "rejected_handles": set()}

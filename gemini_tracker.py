@@ -282,12 +282,16 @@ def can_afford(*, video: bool, model: str = "") -> bool:
         return False
     total = int(entry.get("total", 0))
     if total + 1 > GEMINI_MAX_REQUESTS_PER_DAY:
-        logger.warning(
-            "Gemini day cap reached: %d/%d requests today (Pacific). Verification "
-            "is paused until the Pacific day rolls over; candidates keep the "
-            "verdict the existing gates gave them. Raise "
-            "GEMINI_MAX_REQUESTS_PER_DAY only if the free tier can carry it.",
-            total, GEMINI_MAX_REQUESTS_PER_DAY,
+        # INFO, not WARNING, when a model is named: the caps are per model and
+        # the fallback chain simply moves to the next free one, so this is routine
+        # rather than a problem. The caller logs a WARNING only when EVERY model
+        # in the chain is out, which is the state that actually needs attention.
+        (logger.info if model else logger.warning)(
+            "Gemini day cap reached for %s: %d/%d requests today (Pacific).%s",
+            model or "the configured model", total, GEMINI_MAX_REQUESTS_PER_DAY,
+            " Trying the next FREE model in the chain." if model else
+            " Verification is paused until the Pacific day rolls over; candidates "
+            "keep the verdict the existing gates gave them.",
         )
         return False
     if video:

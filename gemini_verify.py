@@ -797,8 +797,13 @@ class GeminiVerifier:
                 "continues.", self.video_requests, self.max_video_requests,
             )
             return "video_run_cap_reached"
-        import gemini_tracker
-        if not gemini_tracker.can_afford(video=video):
+        # DAY caps are PER MODEL, so this must ask "can ANY free model in the
+        # chain still afford it", not "can the global counter". Getting that wrong
+        # was a real bug, caught by a live run and not by the mocks: with
+        # gemini-3.5-flash-lite over its cap and two untouched models behind it,
+        # a global check returned day_cap_reached and the fallback never ran. The
+        # unit tests lift the day ceilings, so only production shape found it.
+        if not any(self._affordable_on(m, video=video) for m in self._active_models()):
             return "day_cap_reached"
         return None
 

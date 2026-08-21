@@ -827,3 +827,45 @@ def test_both_niches_mark_the_brand_criterion_required():
         req = [c for c in cfg["video_criteria"] if c.get("required")]
         assert len(req) == 1, f"{name}: expected exactly one required criterion"
         assert "brand" in req[0]["name"], f"{name}: {req[0]['name']}"
+
+
+def test_a_model_over_its_day_cap_does_not_block_the_others(monkeypatch, verifier,
+                                                            tmp_path):
+    """
+    REGRESSION, and it was found by a live run rather than by these mocks.
+
+    Day caps are PER MODEL. `_may_request` used to ask the tracker "can afford?"
+    with no model, which reads the GLOBAL counter — so with the preferred model
+    over its cap and two untouched models behind it, judge() returned
+    `day_cap_reached` and the fallback never ran at all. The mocks missed it
+    because the isolation fixture lifts the day ceilings, so only production
+    shape exercised the path.
+
+    The gate must refuse only when NO model in the chain can afford it.
+    """
+    monkeypatch.setattr(gemini_tracker, "GEMINI_MAX_REQUESTS_PER_DAY", 5)
+    monkeypatch.setattr(gemini_tracker, "GEMINI_MAX_VIDEO_REQUESTS_PER_DAY", 5)
+    # Spend the preferred model past its cap, leaving the rest untouched.
+    for _ in range(6):
+        gemini_tracker.record_request(video=True, model="gemini-3.5-flash-lite")
+    assert gemini_tracker.can_afford(video=True, model="gemini-3.5-flash-lite") is False
+    assert gemini_tracker.can_afford(video=True, model="gemini-3.1-flash-lite") is True
+
+    assert verifier._may_request(video=True) is None, \
+        "one spent model must not read as a day-cap refusal"
+    calls = stub_post(monkeypatch, FakeResponse(200, body_for(matches=True, confidence=0.9)))
+    j = verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert j.rescued is True, "the fallback should have served this"
+    assert "gemini-3.1-flash-lite" in calls[0]["url"], calls[0]["url"]
+
+
+def test_the_gate_refuses_only_when_every_model_is_over_its_cap(monkeypatch, verifier):
+    monkeypatch.setattr(gemini_tracker, "GEMINI_MAX_REQUESTS_PER_DAY", 2)
+    monkeypatch.setattr(gemini_tracker, "GEMINI_MAX_VIDEO_REQUESTS_PER_DAY", 2)
+    for m in verifier.model_chain:
+        for _ in range(3):
+            gemini_tracker.record_request(video=True, model=m)
+    assert verifier._may_request(video=True) == "day_cap_reached"
+    calls = stub_post(monkeypatch, FakeResponse(200, body_for()))
+    assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is False
+    assert calls == [], "zero requests when every model is over its cap"

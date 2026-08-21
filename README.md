@@ -293,7 +293,22 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `INFLUENCERS_API_KEY` | _(unset)_ | Enables influencers.club **discovery** (replacing `search.list`) and email chain **step 4** (enrich-by-handle). Unset means both are skipped and discovery falls back to `search.list` — the pipeline runs fine without it |
 | `INFLUENCERS_BASE_URL` | `https://api-dashboard.influencers.club` | API host override |
 | `INFLUENCERS_MAX_LOOKUPS_PER_RUN` | 100 | Hard cap on step-4 email lookups per run, bounding credit spend. Only channels the free steps missed consume one, and a lookup that finds no address is not billed |
-| `INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN` | 50 | Per-run credit ceiling for discovery (0.01 credits per creator returned). A runaway guard, not a normal-use limit |
+| `INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN` | 6 | Per-run credit ceiling for discovery (0.01 credits per creator returned). A runaway guard, not a normal-use limit |
+| `GEMINI_ENABLED` | `false` | Master switch for relevance verification. Only the literal `true` enables it |
+| `GEMINI_FREE_ONLY` | `true` | Enforces the hardcoded free-tier model allowlist. Only the literal `false` disables it |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Must be in `GEMINI_FREE_TIER_MODELS`; anything else switches verification off for the run with a loud error |
+| `GEMINI_BASE_URL` | Google's endpoint | Override only to point at a local stub |
+| `GEMINI_TIMEOUT` | 60 | Longer than other timeouts: Google fetches and decodes the clip server-side |
+| `GEMINI_MAX_RETRIES` | 1 | 5xx/network only. Never a 429 — that is the free-tier wall |
+| `GEMINI_MIN_CONFIDENCE` | 0.6 | **Provisional.** Below this a candidate is not rescued. Raising it never causes a drop, only fewer rescues |
+| `GEMINI_MAX_REQUESTS_PER_RUN` | 300 | Both tiers, all niches, per process. `MAX_GEMINI_REQUESTS_PER_RUN` is accepted as an alias |
+| `GEMINI_MAX_VIDEO_REQUESTS_PER_RUN` | 60 | The only cap that touches the free tier's 8h/day YouTube allowance |
+| `GEMINI_MAX_REQUESTS_PER_DAY` | 600 | Persisted in `gemini_log.json`, keyed on the **Pacific** day (Google's quota day) |
+| `GEMINI_MAX_VIDEO_REQUESTS_PER_DAY` | 120 | As above, video only |
+| `GEMINI_MAX_SECONDS_PER_RUN` | 900 | Wall-clock brake. Keep below the workflow's `timeout-minutes` |
+| `GEMINI_CLIP_SECONDS` / `_MIN_START_SECONDS` / `_START_FRACTION` | 25 / 90 / 0.25 | Which 25 seconds. Not the opening — that is intro, branding and the sponsor read |
+| `GEMINI_VERDICT_VERSION` | 1 | Bump to invalidate every cached verdict by hand after a prompt change |
+| `GEMINI_CACHE_RETENTION_DAYS` | 30 | Shorter than the 90 used elsewhere: `GEMINI_MODEL` is a floating alias |
 
 ### 5. Edit your keywords / niches
 
@@ -327,6 +342,138 @@ whole new niche, add a new `NICHES` entry with all four keys, plus a
 matching env var and Airtable table — a niche entry missing either
 threshold key is skipped (with a logged error) rather than crashing the
 run.
+
+### 5b. Optional: Gemini relevance verification (free tier only)
+
+**What it does.** Step 4b (the title-based relevance gate) discards a candidate
+whose recent video titles are dominated by an off-target vertical. It is free and
+deterministic, and it rejects ~46% of Home Theater candidates — but it has a
+known false-negative mode: a genuine prospect whose titles happen to use none of
+the anticipated vocabulary. This feature attaches a **rescue ladder** to that
+drop, and does nothing else:
+
+1. **Text tier** reads the channel bio plus up to 50 video titles and 50 video
+   descriptions — all of which enrichment already fetched, for free, on every
+   candidate. It scores every candidate that reaches the gate.
+2. **Video tier** sends ~25 seconds of one representative long-form upload and
+   asks whether the criteria are actually satisfied on screen.
+
+A candidate the title gate **flagged** is re-admitted only if **both** tiers
+confirm it. A candidate the gate let through is scored and continues **whatever
+the score says** — the score is recorded for you, never used as a gate.
+
+> **This cannot reduce your row count.** There is no new drop reason. Every
+> failure path — feature off, no key, quota reached, timeout, malformed reply,
+> no suitable video — leaves the candidate exactly where today's pipeline leaves
+> it. Nothing here is ever written to `rejected_handles.json`.
+
+**Step 1 — mint a key that cannot be billed.** This is the whole cost guarantee,
+and it is not in the code. Per Google's API terms the Gemini API is a "Paid
+Service" *only* through a Cloud project with an active billing account.
+
+1. https://aistudio.google.com/apikey → **Create API key** → create it in a
+   **new** Google Cloud project used for nothing else.
+2. Open
+   `https://console.cloud.google.com/billing/linkedaccount?project=YOUR_PROJECT`.
+   It must read **"This project has no billing account."** *That sentence is the
+   guarantee.* An unbilled project returns `429 RESOURCE_EXHAUSTED` past the free
+   ceiling and cannot be charged.
+3. Restrict the key to the **Generative Language API** — same reasoning as the
+   YouTube key in step 2, and it matters more here because this key sits in the
+   Actions job env alongside `AIRTABLE_TOKEN` for the whole run.
+4. **Re-check step 2 after every rotation.** No API reports billing status, so
+   nothing in this repo can check it for you.
+
+Also worth knowing before you enable it: the free tier is "Unpaid Services" under
+those terms, so Google may train on and human-review what is submitted. What this
+pipeline submits is a public YouTube URL, public titles and descriptions, and
+your own niche criteria — never a creator's email address, never Airtable data.
+
+**Step 2 — prove it works before wiring it in.** One request, ~10 seconds, no
+discovery credits, no YouTube quota, no Airtable writes:
+
+```bash
+python verify_video.py --niche "Home Theater" "https://www.youtube.com/watch?v=VIDEO_ID" --duration 1800
+```
+
+It prints the exact request body, the model requested, the model Google says
+actually **served** it (`modelVersion`), the token count, and the parsed verdict.
+Two things to look at:
+
+- **`served allowlisted: True`** — your proof you are on a free-tier model, from
+  Google's own response rather than from our code.
+- **`tokens/second` near 100** — confirms only the 25-second clip was processed,
+  not the whole upload. If this jumps by an order of magnitude, stop: the request
+  shape has drifted and the whole video is being ingested.
+
+**Step 3 — add four columns to *both* niche tables.** All four are optional: the
+pipeline probes once per table per run and silently skips any that are missing, so
+you can add them later with no code change. Exact names, exact case:
+
+```
+Relevance State        Single select   (options: scored, rescued, unavailable)
+Relevance Detail       Single line text
+Relevance Notes        Long text
+Verified Video URL     URL
+```
+
+> `Relevance State` is the **only** one that may be a Single select, and only
+> because its options are a closed set. `push_record` sends `typecast=True`,
+> which silently *creates* a missing option — harmless for three fixed values,
+> but if you make `Relevance Detail` a select it will mint a new option for every
+> unique string (`score 78 (on-niche, 0.90)`, `score 79 (...)`, …) and your saved
+> views will fill with one-off options. Keep the other three as text/URL.
+>
+> Easiest way to keep the two tables in sync: add them to one, then right-click
+> its tab → **Duplicate table → Duplicate table structure only**.
+
+Example cell values after a first run: `rescued` / `rescued 0.88 (video
+confirmed)`, `scored` / `score 78 (on-niche, 0.90)`, `unavailable` /
+`unavailable (quota_exhausted)`. `Verified Video URL` is the video that was
+judged, with a `&t=` offset — click it to check the AI's work in one step.
+
+**Step 4 — write your criteria.** `text_criteria` and `video_criteria` live per
+niche in `niches.py`, beside `on_target_terms`. Two rules:
+
+- A **video** criterion must be answerable from ~25 seconds of footage alone.
+  *"Is a person presenting to camera"* works; *"does the creator own their home"*
+  does not.
+- Keep each list to **2-4 entries**. Every entry is a separate judgement the
+  model must produce evidence for, and a long list dilutes all of them.
+
+Editing either list invalidates every cached verdict for that niche
+automatically — the criteria are hashed into the cache key — so retuning costs
+requests, never correctness.
+
+**Step 5 — turn it on.** Locally, `GEMINI_ENABLED=true` in `.env`. For the
+scheduled run you need **both** a `GEMINI_API_KEY` repository secret **and** a
+`GEMINI_ENABLED` secret set to the literal `true`; the workflow reads them
+explicitly and CI does not use `.env` at all.
+
+**What you will see in the run summary:**
+
+```
+gemini relevance:  model=gemini-3.5-flash-lite (served: gemini-3.5-flash-lite,
+                   allowlisted) — 41 request(s) this run (7 video), 41/300 run cap,
+                   121/600 requests today (7/120 video), 6 cache hit(s), ~98k tokens, 84s
+gemini verdicts:   34 scored, 3 RESCUED, 4 unavailable
+```
+
+These print on **every** run, zeros included — a line that hid itself when the
+count was zero would be missing in exactly the case worth noticing. **`RESCUED`
+is the number to watch:** it is whether the feature is earning anything. If it
+sits at 0 across a week, either the criteria are too strict or the title gate has
+no false negatives worth recovering, and you should retune or switch it off. If
+`cache hit(s)` is pinned at 0 on CI while non-zero locally, `gemini_cache.json`
+is not persisting between runs — check the `actions/cache` paths in the workflow.
+
+**When the free quota runs out:** verification stops for the rest of the run, one
+warning is logged, every remaining candidate keeps the verdict the existing gates
+gave it, and the rest of the pipeline finishes normally. There is no retry, no
+switch to another model, and no paid fallback — by construction, not by policy.
+
+**To turn it off:** `GEMINI_ENABLED=false`. No deploy, no revert, no schema
+change. The pipeline returns to exactly its previous behaviour.
 
 ### 6. Run the test flow first
 

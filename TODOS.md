@@ -134,3 +134,58 @@ Deferred work, with the reason it was deferred. Created 2026-08-14 by the
   **568**.
 - Stale comment at `main.py:172-176` — says "neutral midpoint (50/100)" while
   the constant is `70.0`.
+
+## Deferred from the Gemini relevance-verification review (2026-08-21)
+
+- **Wire the Tier 1 relevance score into `Overall Score`.** This is the
+  "Relevance classifier" item above, and `GEMINI_VERIFY_PLAN.md` is the step that
+  makes it possible — but it is gated on **measurement, not effort**. Changing
+  what `DEFAULT_NICHE_MATCH = 70.0` contributes changes the meaning of a column
+  reviewers already use, and this repo has an explicit precedent that scores
+  written before and after such a change are **not comparable** (see the
+  `avg_views` long-form comment in `enrichment.py`). Revisit only after the
+  backtest in `GEMINI_VERIFY_PLAN.md` §2.14 step 7 reports whether Tier 1's
+  `on_niche` separates Approved from Rejected across the 146 labelled rows in
+  `PROSPECT_AUDIT_2026-08-20.md`. If it does not separate them, this item dies
+  the same way the per-niche cadence floor did.
+
+- **Multi-window video sampling (3 × 8s instead of 1 × 25s).** Directly attacks
+  the weakest remaining premise in the plan — that one 25-second window
+  represents a channel — and the free-tier token budget allows it. Deferred for
+  one reason only: passing three `videoMetadata` parts that reference the same
+  YouTube URL in a single request is **unverified**, and the plan's own rule is
+  that unverified request shapes do not ship. `verify_video.py` is where it gets
+  proven; if it works, this is a ~20-minute change.
+
+- **"Zero rows, exit code 0" — the observability hole this plan did NOT fix.**
+  Raised by the CEO review voice as in-scope-non-negotiable; kept out of scope
+  because it is a real, separate bug that predates this plan, and because the
+  plan's rescue-only architecture removes this plan's own contribution to it
+  (nothing in it can reduce row count). It remains the **next-best observability
+  fix in the repo**: count push failures in `push_until_full`, and warn or exit
+  non-zero when candidates were examined and zero rows were written. A run that
+  burns a day's discovery credits and writes nothing should not report green.
+
+- **Install the Codex CLI.** Every phase of the 2026-08-21 `/autoplan` review ran
+  `[subagent-only]` because `codex` is not on this machine, so no finding in that
+  review is CONFIRMED in the two-voice sense — each one is single-voice and was
+  verified against the code by hand instead. `npm i -g @openai/codex` then
+  `codex login` restores the second independent model for the next review.
+
+- **Migrate Gemini calls to the Interactions API when `video_metadata` lands
+  there.** `GEMINI_VERIFY_PLAN.md` deliberately targets `POST
+  /v1beta/models/{model}:generateContent`, which Google's own docs now label
+  **Legacy**, because the recommended successor (`POST /v1beta/interactions`,
+  header `Api-Revision: 2026-05-20`) does **not yet support `video_metadata`** —
+  the clipping field the entire 25-second design depends on. Google states this
+  limitation explicitly. Until it lifts, Interactions would mean sending whole
+  videos, which violates the brief and burns the 8h/day free YouTube ceiling
+  ~48x faster on a 20-minute source.
+  **Trigger:** re-check the Interactions video-understanding docs for
+  `start_offset` / `end_offset`. When present, migrate both tiers together:
+  flat `input` array of `{"type": ...}` objects instead of `contents[].parts[]`,
+  top-level `response_format` array, `steps[]` instead of `candidates[]`, and set
+  `store=false` (Interactions retains server-side by default — 1 day free, 55
+  days paid; we use neither `previous_interaction_id` nor `background=true`, so
+  opting out is free). No sunset date has been announced for `generateContent`,
+  so this is debt to watch, not an emergency.

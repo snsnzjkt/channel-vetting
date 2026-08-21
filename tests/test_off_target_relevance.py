@@ -24,6 +24,20 @@ from niches import NICHES
 HT = NICHES["Home Theater"]
 LS = NICHES["Lifestyle Sofa"]
 
+# Home Theater restricted itself to the toys_and_kids category on 2026-08-22,
+# because a backtest against the reviewer's own verdicts showed the gaming /
+# phones_and_pcs / generic_gadgets / ai_and_crypto vocabulary was dropping 14 of
+# his 21 APPROVED channels while catching only 9 of 31 he rejected.
+#
+# The vocabulary and the share arithmetic are still correct and still used by any
+# niche that does not restrict, so the cases below keep testing them — against
+# this unrestricted config rather than against live Home Theater. What changed is
+# WHICH NICHE APPLIES THEM, not whether they work.
+#
+# The niche-level policy is asserted separately, from the labels, in
+# test_off_target_toys.py.
+ALL_CATEGORIES = {k: v for k, v in HT.items() if k != "off_target_categories"}
+
 
 def _titles(*specs):
     """Expand ("text", n) pairs into a title list, so shares are exact."""
@@ -39,7 +53,7 @@ def _titles(*specs):
 def test_a_fortnite_channel_is_rejected():
     """@grxnt, in the Home Theater table: 76% of titles are Fortnite."""
     reason, detail = main.off_target_reason(
-        HT, "I make Fortnite family friendly content and live streams.",
+        ALL_CATEGORIES, "I make Fortnite family friendly content and live streams.",
         _titles(("NEW FORTNITE *SEASON 4* UPDATE RIGHT NOW!! NEW MAP, BATTLE PASS", 38),
                 ("Some other video", 12)),
     )
@@ -50,7 +64,7 @@ def test_a_fortnite_channel_is_rejected():
 def test_a_pc_building_channel_is_rejected():
     """@dankamyouknow: 86% PC builds. The brief names PC hardware explicitly."""
     reason, _ = main.off_target_reason(
-        HT, "Collab: dankamcontact@gmail.com",
+        ALL_CATEGORIES, "Collab: dankamcontact@gmail.com",
         _titles(("Building a DOUBLE DECKER PC in the Thermaltake Capo X!", 43),
                 ("Watch until the end", 7)),
     )
@@ -61,7 +75,7 @@ def test_a_phone_and_camera_reviewer_is_rejected():
     """@paulantill was IN the Home Theater table reviewing Pixels and DJI gear.
     The brief's own bad-match example."""
     reason, _ = main.off_target_reason(
-        HT, "Tech and camera reviews",
+        ALL_CATEGORIES, "Tech and camera reviews",
         _titles(("Google Pixel 11 Pro Fold is $200 Cheaper vs Galaxy Z Fold 8", 21),
                 ("DJI Osmo Pocket 4P vs Insta360 Luna Ultra Zoom", 15),
                 ("A home cinema video", 14)),
@@ -72,7 +86,7 @@ def test_a_phone_and_camera_reviewer_is_rejected():
 def test_an_ai_and_crypto_channel_is_rejected():
     """@cryptonfttigers_spoton reached the Home Theater table."""
     reason, _ = main.off_target_reason(
-        HT, "#1 Crypto Youtuber, NFT TIGERS SPOTON",
+        ALL_CATEGORIES, "#1 Crypto Youtuber, NFT TIGERS SPOTON",
         _titles(("Fetra AI Review 2026: Best AI Automation Platform Demo", 17),
                 ("Unrelated upload", 33)),
     )
@@ -83,7 +97,7 @@ def test_a_generic_gadget_channel_is_rejected():
     """@banetech: treadmills, dehumidifiers, earbuds, phone cases. Its own bio
     says "sharing my experiences about technology"."""
     reason, _ = main.off_target_reason(
-        HT, "Simply sharing my experiences about technology.",
+        ALL_CATEGORIES, "Simply sharing my experiences about technology.",
         _titles(("UREVO Strol 2E Pro Review: Smart Treadmill for Working From Home?", 5),
                 ("Southern Humidity CRUSHED: Why You Need This Dehumidifier", 5),
                 ("Neutral upload title", 40)),
@@ -101,7 +115,7 @@ def test_a_gaming_bio_convicts_a_channel_the_share_alone_would_miss():
     channel — see the next test, which scores almost the same and is KEPT.
     """
     reason, detail = main.off_target_reason(
-        HT, "I post the most up to date money glitches on games such as Forza Horizon 5",
+        ALL_CATEGORIES, "I post the most up to date money glitches on games such as Forza Horizon 5",
         _titles(("*LIVE* Clearing House on Rainbow Six Siege", 2),
                 ("Some driving video", 48)),
     )

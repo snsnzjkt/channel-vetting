@@ -117,34 +117,65 @@ def test_room_and_furniture_vocabulary_reaches_home_theater():
 
 # --- widening on-target must not re-admit gaming ---------------------------
 
-def test_widening_on_target_did_not_re_admit_gaming_channels():
+def test_home_theater_applies_only_the_toys_category():
     """
-    on_target_terms only RESCUE, so widening them makes the gate MORE
-    permissive. This repo has been burned by that exact move before: "gaming
-    setup" in the discovery query made 45% of a niche's rows gaming channels.
+    The niche-level policy, asserted from the reviewer's labels.
 
-    A gamer who films his setup now matches "room tour" — he must still drop,
-    because off_share > on_share does the real work.
+    MEASURED 2026-08-22 over 21 approved and 31 rejected Home Theater rows,
+    using each channel's real recent titles:
+
+        whole gate    drops 67% of APPROVED, 29% of REJECTED   (-38%)
+        gaming              48% approved vs 16% rejected
+        phones_and_pcs      52%          vs 19%
+        generic_gadgets     43%          vs 13%
+        ai_and_crypto       19%          vs  6%
+
+    Every category was more likely to kill a channel the reviewer wanted than
+    to catch one he did not. The gate's own docstring named Bane Tech,
+    DanKamYouKnow, Paul Antill and NFT TIGERS as "hand-verified off-target";
+    the reviewer approved all four.
+
+    Re-enabling a category here without a fresh backtest re-breaks this.
     """
-    gamer_with_setup = [
-        "My Gaming Room Tour 2026",
-        "Fortnite Victory Royale Montage",
-        "New Gaming PC Build - RTX 5090",
-        "Room Tour: RGB Setup Reveal",
-        "Call of Duty Warzone Gameplay",
-    ]
-    reason, _ = main.off_target_reason(HT, "", gamer_with_setup)
-    assert reason == main.DROP_OFF_TARGET, "a gaming channel was rescued by room-tour terms"
+    assert niches.NICHES["Home Theater"]["off_target_categories"] == ["toys_and_kids"]
 
 
-def test_a_genuine_home_theater_channel_with_one_gaming_video_is_kept():
-    """The other side of the same threshold: one console video is not a verdict."""
-    titles = [
-        "Our Basement Home Theater Reveal",
-        "Klipsch vs Polk - Surround Comparison",
-        "Best Recliner Seating for a Media Room",
-        "Projector Screen Install",
-        "Playing Xbox on the new projector",
-    ]
-    reason, detail = main.off_target_reason(HT, "", titles)
-    assert reason is None, f"dropped a genuine home theater channel: {detail!r}"
+def test_the_approved_tech_profile_survives_the_home_theater_gate():
+    """
+    The four channels the old calibration named as verified off-target are all
+    approved by the reviewer. None may be dropped now.
+    """
+    profiles = {
+        "DanKamYouKnow (PC builds)": ["Building a DOUBLE DECKER PC in the Thermaltake Capo X!"] * 43,
+        "Paul Antill (phones)": ["Google Pixel 11 Pro Fold is $200 Cheaper vs Galaxy Z Fold 8"] * 21,
+        "NFT TIGERS (crypto)": ["Fetra AI Review 2026: Best AI Automation Platform Demo"] * 17,
+        "Bane Tech (gadgets)": ["Southern Humidity CRUSHED: Why You Need This Dehumidifier"] * 10,
+    }
+    for name, titles in profiles.items():
+        reason, detail = main.off_target_reason(HT, "sharing my experiences about technology", titles)
+        assert reason is None, f"{name} was dropped, but the reviewer approved it: {detail!r}"
+
+
+def test_toy_content_still_drops_for_home_theater_despite_the_restriction():
+    """The restriction must not disarm the reviewer's explicit instruction."""
+    reason, detail = main.off_target_reason(HT, "", BRICKSIE)
+    assert reason == main.DROP_OFF_TARGET
+    assert "toys_and_kids" in detail
+
+
+def test_a_niche_without_the_key_still_applies_every_category():
+    """Backward compatibility: absent the key, historical behaviour is unchanged."""
+    unrestricted = {k: v for k, v in HT.items() if k != "off_target_categories"}
+    gaming = ["NEW FORTNITE *SEASON 4* UPDATE RIGHT NOW!! NEW MAP, BATTLE PASS"] * 38
+    reason, detail = main.off_target_reason(unrestricted, "", gaming)
+    assert reason == main.DROP_OFF_TARGET
+    assert "gaming" in detail
+
+
+def test_toy_story_is_not_a_term():
+    """
+    Removed 2026-08-22: it matched "Toy Story Gaming Laptop! MSI Cyborg 15
+    Special Edition" on Paul Antill, a channel the reviewer APPROVED. A film
+    brand appears on branded merchandise and is not evidence of kids' content.
+    """
+    assert "toy story" not in niches.OFF_TARGET_TERMS["toys_and_kids"]

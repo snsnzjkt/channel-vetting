@@ -81,6 +81,7 @@ NICHES = {
         # That is exactly the "not all content is like that" case.
         "on_target_terms": [
             "room tour", "house tour", "home tour", "apartment tour",
+            "setup tour", "setup reveal",
             "basement tour", "basement finish", "room makeover", "room reveal",
             "room setup", "entertainment center", "entertainment room",
             "tv stand", "tv wall", "tv mount", "media console", "media cabinet",
@@ -226,6 +227,40 @@ NICHES = {
         # measure_discovery_pool.py probes, and flipping this back to
         # "influencers" must stay a one-word change once the pool recovers (the
         # reject cache ages out at REJECTED_HANDLES_RETENTION_DAYS = 90).
+        # MEASURED 2026-08-22 against the reviewer's own verdicts, and this is
+        # the single biggest yield finding in the repo.
+        #
+        # off_target_reason was dropping 14 of the 21 Home Theater channels the
+        # reviewer APPROVED (67%), while catching only 9 of 31 he rejected
+        # (29%). Discrimination -38%: more than twice as likely to kill a good
+        # channel as a bad one. Every category was individually harmful:
+        #
+        #   category           kills APPROVED   catches REJECTED
+        #   gaming                48%               16%
+        #   phones_and_pcs        52%               19%
+        #   generic_gadgets       43%               13%
+        #   ai_and_crypto         19%                6%
+        #
+        # The gate's own docstring named Bane Tech, DanKamYouKnow, Paul Antill
+        # and NFT TIGERS as "hand-verified off-target". The reviewer approved
+        # ALL FOUR. The calibration was verified against an engineer's idea of
+        # on-niche, never against the labels — the same inversion the 96-row
+        # relevance backtest found in 2026-08-21.
+        #
+        # What the labels actually say: for Home Theater the reviewer buys
+        # general tech / gadget / setup creators (an AUDIENCE for home
+        # entertainment furniture) and rejects the dedicated AV specialists
+        # (Zero Fidelity, New Record Day, Forever Analog), the manufacturer
+        # accounts (ADAM Audio, Dolby) and the media brands (HGTV, Apartment
+        # Therapy, Drew & Jonathan). Excluding "gaming, phones/PCs, gadgets"
+        # from this niche excludes precisely the approved profile.
+        #
+        # So this niche keeps ONLY the toys_and_kids category, which exists on
+        # explicit reviewer instruction ("remove channels related to Lego",
+        # "we cannot accept channels like this for HT"). Re-enable a category
+        # here only with a backtest that shows it catches more rejections than
+        # approvals.
+        "off_target_categories": ["toys_and_kids"],
         "discovery_source": "search_list",
         "discovery_filters": {
             "profile_language": ["en"],
@@ -831,7 +866,11 @@ OFF_TARGET_TERMS = {
         "barbie", "baby doll", "dollhouse", "doll house", "doll room",
         "doll story", "doll makeover", "squishmallow", "squishy", "slime",
         "play doh", "play-doh", "playdough", "playset",
-        "toy review", "toy unboxing", "toy haul", "toy story", "kids toy",
+        # "toy story" was here and was REMOVED 2026-08-22: it matched
+        # "Toy Story Gaming Laptop! MSI Cyborg 15 Special Edition" on Paul
+        # Antill, a channel the reviewer APPROVED. A film brand shows up on
+        # branded merchandise, so it is not evidence of kids' content.
+        "toy review", "toy unboxing", "toy haul", "kids toy",
         "surprise egg", "blind bag", "action figure", "funko",
         "poor vs rich", "rich vs poor", "gacha", "kids cartoon",
         "nursery rhyme",

@@ -111,7 +111,7 @@ replaces.
 
 ## Tests
 
-**1186 passing, 2.4s. Baseline was 1106 — 80 added, 0 regressions.**
+**1202 passing, 2.5s. Baseline was 1106 — 96 added, 0 regressions.**
 
 The one existing signature that moved is `_make_session`, which gains a `total=`
 parameter so this session can have its own retry budget. `YOUTUBE`, `AIRTABLE`,

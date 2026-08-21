@@ -96,6 +96,16 @@ STATUS_APPROVED = "Approved"
 STATUS_CONTACTED = "Contacted"
 SOURCE_LABEL = "YouTube Discovery Pipeline"
 
+# The per-video view floor, as a fraction of the JUDGEABLE long-form videos in the
+# performance window that must clear the niche's min_avg_views.
+#
+# LOWERED 0.50 -> 0.30 on 2026-08-21 at the operator's direction: the pipeline was
+# returning too few rows and sometimes none at all for Home Theater. At
+# PERFORMANCE_SAMPLE_SIZE 10 that moves the rule from "at least 5 of 10" to "at
+# least 3 of 10". The full rationale, the measured evidence on both sides, and how
+# to retune it live at MIN_VIEWS_PER_VIDEO_RATIO in main.py.
+MIN_VIEWS_PER_VIDEO_RATIO = float(os.getenv("MIN_VIEWS_PER_VIDEO_RATIO", 0.30))
+
 # --- Daily prospect caps ---
 # "Prospect" = a record successfully pushed to Airtable. Counted per niche
 # per day from Airtable's own "Date Added" field, so a second run on the

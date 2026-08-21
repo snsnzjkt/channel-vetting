@@ -298,6 +298,7 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `GEMINI_FREE_ONLY` | `true` | Enforces the hardcoded free-tier model allowlist. Only the literal `false` disables it |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Must be in `GEMINI_FREE_TIER_MODELS`; anything else switches verification off for the run with a loud error |
 | `GEMINI_BASE_URL` | Google's endpoint | Override only to point at a local stub |
+| `MIN_VIEWS_PER_VIDEO_RATIO` | 0.30 | Fraction of judgeable long-form videos that must clear the view floor. Lowered from 0.50 on 2026-08-21 for yield; raise it back if weak channels reach the queue |
 | `GEMINI_VIDEO_ALWAYS` | `true` | Video-check every candidate, not just flagged ones. One request each — the main budget consumer |
 | `GEMINI_TEXT_TIER` | `false` | The advisory 0-100 text score. Off on evidence: measured as non-predictive (see plan §2.16). Never gates a rescue |
 | `GEMINI_FALLBACK_ENABLED` | `true` | On a per-day quota refusal, rotate to the next model on the **free** allowlist. Free RPD is per-model, so this is free-tier rotation, not a paid fallback |

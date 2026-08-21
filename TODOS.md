@@ -240,3 +240,37 @@ Deferred work, with the reason it was deferred. Created 2026-08-14 by the
   Sampling 2-3 videos, or 3 short windows in one request, can. Blocked only on
   verifying that multiple `videoMetadata` parts referencing the same URL work in
   one request — `verify_video.py` is where that gets proven.
+
+## Yield levers, measured 2026-08-21 (from the "too few records" investigation)
+
+`audit_prospects.py` re-checked 107 tracked rows against current rules: 78 pass,
+29 fail. The failure distribution, which is the map of where yield is going:
+
+```
+  outside_search_zone        11   <- biggest single lever, DECLINED for now
+  no_declared_country         5   <- second biggest, DECLINED for now
+  broadcast_tv                3
+  below_view_minimum          3
+  too_few_longform_videos     2
+  shorts_only                 2
+  excluded_topic              1
+  video_below_view_minimum    1   <- the one that WAS lowered (0.50 -> 0.30)
+  upload_cadence_too_low      1
+```
+
+- **The volume constraint is not strictness.** `INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN`
+  = 6 buys 600 creators examined, and measured yield is 1 row per 100-150
+  creators. That is **4-6 rows per run across BOTH niches**, so zero for one niche
+  in one run is normal variance rather than a bug. Raising the discovery budget is
+  the only lever that costs money and costs nothing in lead quality; it was
+  declined on 2026-08-21 to avoid extra credit spend. Revisit first if yield is
+  still short.
+- **Restore Europe for Home Theater** — `ZONE_CORE | EUROPE_COUNTRY_CODES`.
+  Declined for now, but worth knowing the code comment says the narrowing came
+  from an instruction that **named Lifestyle**, and was carried to Home Theater by
+  the standing "keep the niches unified" rule. It is the largest single failure
+  bucket above (11 of 29). This may be restoring original intent rather than
+  loosening.
+- **Keep channels that declare no country** rather than dropping them (5 of 29).
+  Currently a deliberate break from the repo's own "absent data never
+  disqualifies" rule.

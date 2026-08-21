@@ -62,6 +62,7 @@ from influencers import InfluencersClient, null_client
 from influencer_discovery import InfluencerDiscovery
 from do_not_contact import BlocklistUnavailable, fetch_blocklist
 from config import (
+    MIN_VIEWS_PER_VIDEO_RATIO as CONFIG_MIN_VIEWS_PER_VIDEO_RATIO,
     API_SLEEP_SECONDS,
     DEFAULT_STATUS,
     SOURCE_LABEL,
@@ -311,7 +312,36 @@ MIN_VIEWS_PER_VIDEO = 10_000
 # upload still climbing toward 10k, or one with no public view count, is unknown
 # rather than failing, and enrichment already excludes both from
 # `settled_views`. So the rule reads "50% of the videos we can actually judge".
-MIN_VIEWS_PER_VIDEO_RATIO = 0.50
+# LOWERED 0.50 -> 0.30 on 2026-08-21, at the operator's direction, because the
+# pipeline was returning too few rows and sometimes none at all for Home Theater.
+# At PERFORMANCE_SAMPLE_SIZE 10 the rule moves from "at least 5 of the newest 10
+# judgeable long-form videos cleared 10k" to "at least 3 of 10".
+#
+# WHAT THIS COSTS, stated plainly so the next reader can undo it knowingly. The
+# gate exists to catch a channel whose average is propped up by one viral upload
+# while the rest flopped, and 0.30 lets more of exactly that through: a channel
+# with 3 hits and 7 flops now passes. That is the trade the operator chose, and
+# the reviewer is the backstop.
+#
+# EVIDENCE THIS IS THE RIGHT DIAL IS MIXED, and both readings are worth having:
+#   - Against FRESH candidates it is the main limiter. The measured note in this
+#     repo's learnings: the 0.50 ratio "rejects channels with a strong average
+#     but uneven uploads (e.g. 116k subs / 26k avg views dropped)", at a measured
+#     1 row per 100-150 creators.
+#   - Against ALREADY-TRACKED rows it is nearly irrelevant. audit_prospects.py on
+#     2026-08-21 re-checked 107 rows: 78 pass, 29 fail, and only ONE of those 29
+#     failed on video_below_view_minimum. The dominant failures there are
+#     outside_search_zone (11) and no_declared_country (5).
+# Those are consistent: existing rows were mostly written before the 2026-08-20
+# zone narrowing, so they now fail on zone, while fresh candidates die earlier on
+# the ratio. If yield is still short after this, the zone is the bigger lever.
+#
+# The VALUE lives in config.py, not here: .env.example states that config.py is
+# the only module that reads environment variables, and an os.getenv() in this
+# file would quietly falsify that. Retune it the way the comment above says: run
+# audit_prospects.py and look at where the reviewers' own Approved/Rejected calls
+# actually fall.
+MIN_VIEWS_PER_VIDEO_RATIO = CONFIG_MIN_VIEWS_PER_VIDEO_RATIO
 
 # ...and below this many judgeable videos the ratio is SKIPPED, not applied.
 #

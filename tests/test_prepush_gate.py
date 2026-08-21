@@ -376,15 +376,23 @@ def _views(above: int, below: int) -> list[int]:
 
 
 def test_drops_a_channel_when_too_much_of_the_sample_is_weak():
-    """4 of 10 clearing is under the 50% bar."""
-    assert drop_reason(settled_views=_views(4, 6)) == "video_below_view_minimum"
+    """
+    Retuned for the 0.30 ratio (was 0.50). ceil(0.30 * 10) == 3, so 4 of 10 now
+    PASSES and it takes 2 of 10 to fail.
+    """
+    assert drop_reason(settled_views=_views(4, 6)) is None
+    assert drop_reason(settled_views=_views(2, 8)) == "video_below_view_minimum"
 
 
-def test_exactly_fifty_percent_of_the_sample_is_kept():
+def test_the_thirty_percent_boundary_is_kept():
     from main import MIN_VIEWS_PER_VIDEO, MIN_VIEWS_PER_VIDEO_RATIO
 
     assert MIN_VIEWS_PER_VIDEO == 10_000
-    assert MIN_VIEWS_PER_VIDEO_RATIO == 0.50
+    # LOWERED 0.50 -> 0.30 on 2026-08-21 at the operator's direction; the
+    # pipeline was returning too few rows and sometimes none for Home Theater.
+    assert MIN_VIEWS_PER_VIDEO_RATIO == 0.30
+    # 3 of 10 is the new boundary and must pass.
+    assert drop_reason(settled_views=_views(3, 7)) is None
     # 5 of 10 is the boundary and must PASS. This is the live case the
     # recalibration was for: Bane Tech (5/10, 23,914 avg) had been marked
     # Approved by a reviewer and was still being discarded at 0.60, where
@@ -403,12 +411,21 @@ def test_the_per_video_floor_still_catches_a_shorts_inflated_channel():
     """
     The reason this gate exists at all, and the live case that proved it:
     "Explore With Jasir" reported a 140,885-view average with 0 of 10 long-form
-    videos over 10k. A 3-of-10 channel (Kat and Sourabh, 57,234 avg) is caught
-    at 50% too — the bar came down twice without letting these through, which
-    is the whole reason 0.50 is safe.
+    videos over 10k. That is still caught, and always will be — 0 clears nothing.
+
+    WHAT THE 0.30 RETUNE GAVE UP, named rather than quietly dropped from this
+    test. The live "Kat and Sourabh" case (3 of 10, 57,234 average) was caught at
+    0.50 and now PASSES, because ceil(0.30 * 10) == 3. That is precisely the
+    shape this gate was built to catch: an average propped up by a few strong
+    uploads while most flopped. It is the accepted cost of the retune, and the
+    human reviewer is the backstop. If Shorts-inflated channels start reaching
+    the queue, this is the first number to put back.
     """
     assert drop_reason(avg_views=140_000, settled_views=_views(0, 10)) == "video_below_view_minimum"
-    assert drop_reason(avg_views=57_000, settled_views=_views(3, 7)) == "video_below_view_minimum"
+    # Kat and Sourabh, previously caught, now admitted:
+    assert drop_reason(avg_views=57_000, settled_views=_views(3, 7)) is None
+    # A notch weaker still fails, so the gate is loosened rather than disabled.
+    assert drop_reason(avg_views=57_000, settled_views=_views(2, 8)) == "video_below_view_minimum"
 
 
 def test_a_single_weak_video_does_not_sink_a_strong_channel():
@@ -422,23 +439,24 @@ def test_a_single_weak_video_does_not_sink_a_strong_channel():
 
 def test_the_ratio_rounds_up_on_a_partial_video():
     """
-    ceil(0.50 * 7) == 4, so a 7-video sample needs four, not three. Rounding up
-    keeps a thin sample from being judged more leniently than a full one.
-    Pins the live Adrianne MG case (2 of 7), which must still fail — the
+    ceil(0.30 * 7) == 3, so a 7-video sample needs three. Rounding up still keeps
+    a thin sample from being judged more leniently than a full one.
+    Pins the live Adrianne MG case (2 of 7), which must STILL fail — the
     small-sample skip below is NOT a way for her to get in.
     """
     assert drop_reason(settled_views=_views(4, 3)) is None
-    assert drop_reason(settled_views=_views(3, 4)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(3, 4)) is None      # was a fail at 0.50
     assert drop_reason(settled_views=_views(2, 5)) == "video_below_view_minimum"
 
 
-def test_a_nine_video_sample_still_needs_five():
+def test_a_nine_video_sample_still_needs_three():
     """
-    ceil(0.50 * 9) == 5, so a sample short one video does not get an easier
-    bar. Pins the live Diva Angel case (2 of 9), which must still fail.
+    ceil(0.30 * 9) == 3, so a sample short one video still does not get an easier
+    bar. Pins the live Diva Angel case (2 of 9), which must STILL fail — the
+    retune moved the bar, it did not remove it.
     """
     assert drop_reason(settled_views=_views(5, 4)) is None
-    assert drop_reason(settled_views=_views(4, 5)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(3, 6)) is None      # was a fail at 0.50
     assert drop_reason(settled_views=_views(2, 7)) == "video_below_view_minimum"
 
 
@@ -446,8 +464,8 @@ def test_a_sample_too_small_to_judge_is_skipped_not_failed():
     """
     Below MIN_SETTLED_SAMPLE_FOR_RATIO judgeable videos the ceil quantises so
     hard that a single upload decides the channel — a measurement artefact, not
-    a verdict. Pins the live Kaitlyn :) case (1 of 3): at 0.50, ceil(0.50 * 3)
-    is 2, so she would have been discarded on the strength of two videos.
+    a verdict. Pins the live Kaitlyn :) case (1 of 3): at 0.30, ceil(0.30 * 3)
+    is 1, so the skip is what keeps a 3-video sample from being judged at all.
 
     Unknown is not a failure, the same rule an unreported video_count follows.
     """
@@ -456,9 +474,10 @@ def test_a_sample_too_small_to_judge_is_skipped_not_failed():
     assert MIN_SETTLED_SAMPLE_FOR_RATIO == 5
     assert drop_reason(settled_views=_views(1, 2)) is None
     assert drop_reason(settled_views=_views(0, 4)) is None
-    # 5 is the first size that IS judged, and 2 of 5 fails it.
-    assert drop_reason(settled_views=_views(2, 3)) == "video_below_view_minimum"
-    assert drop_reason(settled_views=_views(3, 2)) is None
+    # 5 is the first size that IS judged. ceil(0.30 * 5) == 2, so 1 of 5 fails
+    # and 2 of 5 now passes (it failed at 0.50).
+    assert drop_reason(settled_views=_views(1, 4)) == "video_below_view_minimum"
+    assert drop_reason(settled_views=_views(2, 3)) is None
 
 
 def test_the_small_sample_skip_does_not_rescue_a_shorts_factory():

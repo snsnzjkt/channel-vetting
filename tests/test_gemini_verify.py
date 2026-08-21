@@ -55,6 +55,11 @@ def verifier(tmp_path):
         max_seconds_per_run=900,
         min_confidence=0.6,
         verdict_version=1,
+        # The real chain, or the free-model fallback has nowhere to fall to and
+        # every quota test would pass for the wrong reason.
+        model_chain=("gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                     "gemini-3.7-flash"),
+        min_criteria_ratio=1.0,   # aggregate-only unless a test opts into the ratio
     )
 
 
@@ -254,7 +259,7 @@ def test_low_confidence_never_rescues(monkeypatch, verifier):
     stub_post(monkeypatch, FakeResponse(200, body_for(matches=True, confidence=0.41)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is False
-    assert "did not confirm" in j.detail
+    assert "below confidence" in j.detail
 
 
 def test_confident_true_with_no_evidence_does_not_rescue(monkeypatch, verifier):
@@ -311,19 +316,32 @@ def test_timeout_is_survivable(monkeypatch, verifier):
 
 # --- 7/8. rate limit and quota ------------------------------------------
 
-def test_a_429_is_never_retried(monkeypatch, verifier):
-    calls = stub_post(monkeypatch, FakeResponse(429, text="RESOURCE_EXHAUSTED PerDay"))
+def test_the_same_model_is_never_retried_after_a_429(monkeypatch, verifier):
+    """
+    THE invariant, stated precisely. Retrying the same model against the same
+    wall is the one behaviour this integration must never have. Moving to a
+    DIFFERENT free model is the fallback and is allowed — so the assertion is
+    about uniqueness, not about the call count.
+    """
+    calls = stub_post(monkeypatch, *[FakeResponse(429, text="RESOURCE_EXHAUSTED PerDay")] * 9)
     verifier.judge(NICHE, STATS, PERF, flagged=True)
-    assert len(calls) == 1, "exactly one attempt — retrying the wall is the one thing we must not do"
+    urls = [c["url"] for c in calls]
+    assert len(urls) == len(set(urls)), f"a model was retried: {urls}"
+    assert len(urls) <= len(verifier.model_chain), "at most one attempt per free model"
 
 
-def test_per_day_429_latches_the_run_and_pins_the_ledger(monkeypatch, verifier):
-    stub_post(monkeypatch, FakeResponse(429, text="quota exceeded PerDay limit"))
+def test_per_day_429_pins_that_model_in_the_ledger(monkeypatch, verifier):
+    """
+    Pins the MODEL, not the whole day — the other free models have their own
+    quotas. The ledger must remember, so a same-day re-run skips it without
+    spending a request to rediscover the wall.
+    """
+    stub_post(monkeypatch, *[FakeResponse(429, text="quota exceeded PerDay limit")] * 6)
     verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert "gemini-3.5-flash-lite" in gemini_tracker.exhausted_models()
+    assert gemini_tracker.can_afford(video=True, model="gemini-3.5-flash-lite") is False
+    # Whole chain spent in this test, so the run latches too.
     assert verifier.wall == gv.QUOTA_EXHAUSTED
-    total, _ = gemini_tracker.requests_today()
-    assert total >= gemini_tracker.GEMINI_MAX_REQUESTS_PER_DAY, \
-        "a same-day re-run must short-circuit without a request"
 
 
 def test_per_minute_429_pauses_but_does_not_latch(monkeypatch, verifier):
@@ -333,14 +351,14 @@ def test_per_minute_429_pauses_but_does_not_latch(monkeypatch, verifier):
     assert verifier.rate_limited_until > 0
 
 
-def test_after_the_wall_no_further_request_is_issued(monkeypatch, verifier):
-    calls = stub_post(monkeypatch, FakeResponse(429, text="PerDay quota"))
+def test_after_the_whole_chain_is_spent_no_further_request_is_issued(monkeypatch, verifier):
+    calls = stub_post(monkeypatch, *[FakeResponse(429, text="PerDay quota")] * 9)
     verifier.judge(NICHE, STATS, PERF, flagged=True)
-    assert len(calls) == 1
+    spent = len(calls)
+    assert spent == len(verifier.model_chain), "one attempt per free model, then stop"
     for _ in range(3):
-        j = verifier.judge(NICHE, STATS, PERF, flagged=True)
-        assert j.rescued is False
-    assert len(calls) == 1, "zero requests after the wall, for the rest of the run"
+        assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is False
+    assert len(calls) == spent, "zero requests once every free model is spent"
 
 
 # --- 9/10. cache ---------------------------------------------------------
@@ -647,3 +665,120 @@ def test_a_text_shaped_reply_does_not_satisfy_the_video_tier(monkeypatch, verifi
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.state == gv.STATE_UNAVAILABLE, "a text-shaped reply is not a video verdict"
     assert j.rescued is False
+
+
+# --- the free-model fallback chain --------------------------------------
+#
+# Google's free RPD is PER MODEL (measured: gemini-3.5-flash-lite refused at ~106
+# requests while the others were untouched), so when one is spent the chain moves
+# to the next FREE one. These tests pin that it is free-models-only and that it is
+# not the forbidden "retry a 429" behaviour.
+
+def test_a_per_day_429_falls_through_to_the_next_free_model(monkeypatch, verifier):
+    calls = stub_post(monkeypatch,
+                      FakeResponse(429, text="PerDay quota exceeded"),
+                      FakeResponse(200, body_for(matches=True, confidence=0.9)))
+    j = verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert len(calls) == 2, "the spent model, then the next free one"
+    assert calls[0]["url"] != calls[1]["url"], "a DIFFERENT model, never a retry"
+    assert "gemini-3.5-flash-lite" in calls[0]["url"]
+    assert "gemini-3.1-flash-lite" in calls[1]["url"]
+    assert j.rescued is True, "the fallback produced a usable verdict"
+    assert verifier.wall is None, "one spent model must not latch the run"
+
+
+def test_every_model_in_the_chain_is_free_tier(monkeypatch, verifier):
+    """The chain can never contain a paid model, whatever config says."""
+    calls = stub_post(monkeypatch, *[FakeResponse(429, text="PerDay")] * 6)
+    verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert calls, "must have tried something"
+    for c in calls:
+        assert any(m in c["url"] for m in config.GEMINI_FREE_TIER_MODELS), c["url"]
+    assert len(calls) == len(verifier.model_chain), "each free model tried once, no more"
+
+
+def test_the_run_latches_only_when_every_free_model_is_spent(monkeypatch, verifier):
+    calls = stub_post(monkeypatch, *[FakeResponse(429, text="PerDay")] * 6)
+    verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert verifier.wall == gv.QUOTA_EXHAUSTED
+    before = len(calls)
+    for _ in range(3):
+        assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is False
+    assert len(calls) == before, "zero further requests once the whole chain is spent"
+
+
+def test_a_per_minute_429_does_not_burn_the_chain(monkeypatch, verifier):
+    """
+    A per-minute limit clears on its own, so it must PAUSE rather than fall
+    through and mark a model spent for the day.
+    """
+    calls = stub_post(monkeypatch, FakeResponse(429, text="PerMinute limit"))
+    verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert len(calls) == 1, "no fallthrough on a per-minute limit"
+    assert verifier.models_spent == set(), "no model marked spent for the day"
+    assert verifier.wall is None
+    assert verifier.rate_limited_until > 0
+
+
+def test_an_off_allowlist_chain_entry_is_dropped_not_tried(monkeypatch):
+    class Cfg:
+        GEMINI_MODEL = "gemini-3.5-flash-lite"
+        GEMINI_FALLBACK_ENABLED = True
+        GEMINI_MODEL_CHAIN = ("gemini-3.1-flash-lite", "gemini-9-ultra-paid")
+    chain = gv.GeminiVerifier._build_chain(Cfg)
+    assert "gemini-9-ultra-paid" not in chain
+    assert set(chain) <= config.GEMINI_FREE_TIER_MODELS
+
+
+def test_fallback_off_means_a_single_model(monkeypatch):
+    class Cfg:
+        GEMINI_MODEL = "gemini-3.5-flash-lite"
+        GEMINI_FALLBACK_ENABLED = False
+        GEMINI_MODEL_CHAIN = ("gemini-3.1-flash-lite", "gemini-3.7-flash")
+    assert gv.GeminiVerifier._build_chain(Cfg) == ("gemini-3.5-flash-lite",)
+
+
+# --- the strictness knob that does not touch the criteria ---------------
+
+def test_partial_criteria_match_confirms_at_the_configured_ratio(monkeypatch, verifier):
+    """
+    The model's aggregate says NO, but half the criteria matched. At ratio 0.5
+    that confirms; at 1.0 it does not. Same criteria text either way.
+    """
+    payload = body_for(matches=False, confidence=0.9)
+    payload["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+        "matches": False, "confidence": 0.9, "reason": "r",
+        "criteria_results": [{"criterion": "a", "matches": True, "evidence": "e"},
+                             {"criterion": "b", "matches": False, "evidence": "e"}]})
+    verifier.min_criteria_ratio = 0.5
+    stub_post(monkeypatch, FakeResponse(200, payload))
+    j = verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert j.rescued is True
+    assert "partly confirmed" in j.detail and "1/2 criteria" in j.detail
+
+    verifier.min_criteria_ratio = 1.0
+    verifier._cache = {}
+    stub_post(monkeypatch, FakeResponse(200, payload))
+    j = verifier.judge(NICHE, dict(STATS, channel_id="UC2"), PERF, flagged=True)
+    assert j.rescued is False, "ratio 1.0 restores aggregate-only strictness"
+
+
+def test_confidence_still_gates_the_partial_route(monkeypatch, verifier):
+    """Loosening the criteria bar must not loosen the conviction bar."""
+    payload = body_for(matches=False, confidence=0.2)
+    payload["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+        "matches": False, "confidence": 0.2, "reason": "r",
+        "criteria_results": [{"criterion": "a", "matches": True, "evidence": "e"},
+                             {"criterion": "b", "matches": True, "evidence": "e"}]})
+    verifier.min_criteria_ratio = 0.5
+    stub_post(monkeypatch, FakeResponse(200, payload))
+    j = verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert j.rescued is False
+    assert "below confidence" in j.detail
+
+
+def test_an_empty_criteria_breakdown_never_confirms(monkeypatch):
+    """No evidence at all must not sneak through the ratio route."""
+    ok, why = gv.verdict_confirms(
+        {"matches": False, "confidence": 1.0, "criteria_results": []}, 0.6, 0.0)
+    assert ok is False

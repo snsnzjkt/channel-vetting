@@ -250,6 +250,48 @@ def build_prompt(criteria) -> str:
     return "\n".join(lines)
 
 
+def verdict_confirms(payload: dict, min_confidence: float,
+                     min_criteria_ratio: float) -> tuple[bool, str]:
+    """
+    Whether a video verdict confirms, and the reason in one phrase.
+
+    TWO ROUTES, and the second is the strictness knob that does NOT touch the
+    criteria text:
+
+      1. The model's own aggregate `matches` is true. That requires every
+         criterion to have satisfied it.
+      2. At least `min_criteria_ratio` of the INDIVIDUAL criteria matched, even
+         when the aggregate said no. With two criteria and a ratio of 0.5, one is
+         enough.
+
+    Route 2 exists because the criteria were repeatedly the right questions asked
+    at too high a bar: a channel whose clip clearly shows a real creator but whose
+    sampled video wandered off-topic failed on the aggregate while matching half
+    the criteria. Raising the ratio to 1.0 restores aggregate-only behaviour.
+
+    Confidence gates BOTH routes. It is the only thing standing between a
+    low-conviction guess and an action.
+    """
+    conf = float(payload.get("confidence", 0.0) or 0.0)
+    if conf < min_confidence:
+        return False, f"below confidence ({conf:.2f})"
+
+    if payload.get("matches") is True:
+        return True, f"video confirmed {conf:.2f}"
+
+    results = [c for c in (payload.get("criteria_results") or [])
+               if isinstance(c, dict)]
+    if not results:
+        return False, f"video did not confirm ({conf:.2f})"
+    matched = sum(1 for c in results if c.get("matches") is True)
+    ratio = matched / len(results)
+    if ratio >= min_criteria_ratio:
+        return True, (f"video partly confirmed {conf:.2f} "
+                      f"({matched}/{len(results)} criteria)")
+    return False, (f"video did not confirm ({conf:.2f}, "
+                   f"{matched}/{len(results)} criteria)")
+
+
 def _classify_error(resp) -> str:
     """
     Map a non-200 to a named reason.
@@ -519,7 +561,8 @@ class GeminiVerifier:
     def __init__(self, model, cache_path, max_requests_per_run,
                  max_video_requests_per_run, max_seconds_per_run,
                  min_confidence, verdict_version,
-                 video_always=True, text_tier=False):
+                 video_always=True, text_tier=False,
+                 model_chain=(), min_criteria_ratio=1.0):
         self.model = model
         self.cache_path = cache_path
         self.max_requests = max_requests_per_run
@@ -530,6 +573,12 @@ class GeminiVerifier:
         # See config.py for why these default the way they do.
         self.video_always = video_always
         self.text_tier = text_tier
+        # The fallback chain is FREE MODELS ONLY — see config.GEMINI_MODEL_CHAIN.
+        # `model` stays the preferred one; this is what we fall through to when
+        # Google refuses it for the day.
+        self.model_chain = tuple(model_chain) or (model,)
+        self.min_criteria_ratio = min_criteria_ratio
+        self.models_spent = set()
 
         # Per-run counters and observability. Reported by main's run summary,
         # which prints UNCONDITIONALLY when enabled — a conditional line would
@@ -600,6 +649,8 @@ class GeminiVerifier:
             verdict_version=cfg.GEMINI_VERDICT_VERSION,
             video_always=cfg.GEMINI_VIDEO_ALWAYS,
             text_tier=cfg.GEMINI_TEXT_TIER,
+            model_chain=cls._build_chain(cfg),
+            min_criteria_ratio=cfg.GEMINI_MIN_CRITERIA_RATIO,
         )
         # Fail closed on a corrupt ledger, but do NOT abort the run: this feature
         # is optional and the pipeline is fully functional without it.
@@ -612,12 +663,38 @@ class GeminiVerifier:
         logger.info(
             "Gemini relevance verification: ENABLED (model=%s, free-only=%s, "
             "video=%s, text tier=%s, run caps %d total / %d video)",
-            v.model, cfg.GEMINI_FREE_ONLY,
+            " -> ".join(v.model_chain), cfg.GEMINI_FREE_ONLY,
             "every candidate" if v.video_always else "rescue path only",
             "on (advisory)" if v.text_tier else "off",
             v.max_requests, v.max_video_requests,
         )
         return v
+
+    @staticmethod
+    def _build_chain(cfg) -> tuple:
+        """
+        The ordered list of models to try, preferred first.
+
+        EVERY entry is filtered against GEMINI_FREE_TIER_MODELS, so a chain
+        cannot smuggle in a paid model even if config is edited: an off-list
+        entry is dropped with an error rather than tried. With fallback off the
+        chain is exactly one model, which is the pre-fallback behaviour.
+        """
+        chain = [cfg.GEMINI_MODEL]
+        if cfg.GEMINI_FALLBACK_ENABLED:
+            for m in cfg.GEMINI_MODEL_CHAIN:
+                if m not in chain:
+                    chain.append(m)
+        kept = []
+        for m in chain:
+            if model_is_allowed(m):
+                kept.append(m)
+            else:
+                logger.error(
+                    "Dropping %r from the Gemini fallback chain: it is not in "
+                    "GEMINI_FREE_TIER_MODELS. The chain is free models only.", m,
+                )
+        return tuple(kept)
 
     # --- cache ------------------------------------------------------------
 
@@ -708,9 +785,14 @@ class GeminiVerifier:
             return "day_cap_reached"
         return None
 
-    def _record(self, verdict, *, video: bool, elapsed: float) -> None:
+    def _affordable_on(self, model, *, video: bool) -> bool:
+        import gemini_tracker
+        return gemini_tracker.can_afford(video=video, model=model)
+
+    def _record(self, verdict, *, video: bool, elapsed: float, model="") -> None:
         """Account for one issued request and act on a terminal reason."""
         import gemini_tracker
+        model = model or self.model
         self.requests += 1
         if video:
             self.video_requests += 1
@@ -718,18 +800,22 @@ class GeminiVerifier:
         self.seconds += elapsed
         if verdict.model_version:
             self.served_models.add(verdict.model_version)
-        gemini_tracker.record_request(video=video)
+        gemini_tracker.record_request(video=video, model=model)
 
         if verdict.reason_code == QUOTA_EXHAUSTED:
-            self.wall = QUOTA_EXHAUSTED
-            gemini_tracker.exhaust_day(video=video)
-            logger.warning(
-                "Gemini free daily allowance is exhausted (Google said so, not "
-                "us). Verification is OFF for the rest of this run — no retry, no "
-                "other model, no paid fallback. Expected once the day's free "
-                "allowance is spent; no action needed. Candidates keep the "
-                "verdict the existing gates gave them."
-            )
+            # Pin THIS MODEL, not the whole run: the fallback in _call_cached
+            # moves to the next FREE model in the chain, and the run only latches
+            # once every free model is spent. No paid model is ever tried.
+            gemini_tracker.exhaust_day(video=video, model=model)
+            self.models_spent.add(model)
+            if not self._active_models():
+                self.wall = QUOTA_EXHAUSTED
+                logger.warning(
+                    "Every FREE Gemini model in the chain is out of daily quota. "
+                    "Verification is off for the rest of this run: no retry, no "
+                    "paid model, and no fallback beyond the free allowlist. "
+                    "Candidates keep the verdict the existing gates gave them."
+                )
         elif verdict.reason_code == RATE_LIMITED:
             import time
             self.rate_limited_until = time.monotonic() + 65.0
@@ -756,8 +842,36 @@ class GeminiVerifier:
         else:
             self.reasons.pop("consecutive_400", None)
 
+    def _active_models(self) -> list:
+        """
+        Models in the chain still worth trying today, preferred first.
+
+        Skips anything Google already refused with a PerDay 429 — this run OR an
+        earlier one today, because the ledger remembers. That is what stops a
+        second run spending one request per model rediscovering the same wall.
+        """
+        import gemini_tracker
+        spent = self.models_spent | gemini_tracker.exhausted_models()
+        return [m for m in self.model_chain if m not in spent]
+
     def _call_cached(self, key, body, *, video: bool, verdict_key="matches") -> Verdict:
-        """One request, or a cached verdict. Budget is checked by the caller."""
+        """
+        One verdict: from cache, or from the first free model that will serve us.
+
+        THE FALLBACK IS FREE MODELS ONLY. On a PerDay 429 the spent model is
+        marked and the loop moves to the next entry of the chain, every one of
+        which _build_chain() filtered through GEMINI_FREE_TIER_MODELS. There is
+        no paid model in the chain and none can be added.
+
+        This is also NOT the "retry a 429" behaviour the session forbids: the
+        same request is never re-sent to the same model, and a PER-MINUTE limit
+        still pauses rather than falling through, because that one clears itself.
+
+        The cache key holds the PREFERRED model deliberately. A verdict is a
+        verdict whichever free model produced it, and keying on whichever one
+        happened to answer would miss the cache every time the chain shifted.
+        The entry records the serving modelVersion, so it stays auditable.
+        """
         import time
         cache = self._load_cache()
         hit = cache.get(key)
@@ -765,9 +879,26 @@ class GeminiVerifier:
             self.cache_hits += 1
             return Verdict(hit.get("reason_code", MALFORMED), hit.get("payload"),
                            hit.get("model_version", ""), 0)
-        started = time.monotonic()
-        verdict = call(body, model=self.model, verdict_key=verdict_key)
-        self._record(verdict, video=video, elapsed=time.monotonic() - started)
+
+        verdict = None
+        for model in self._active_models():
+            if not self._affordable_on(model, video=video):
+                continue
+            started = time.monotonic()
+            verdict = call(body, model=model, verdict_key=verdict_key)
+            self._record(verdict, video=video, elapsed=time.monotonic() - started,
+                         model=model)
+            if verdict.reason_code != QUOTA_EXHAUSTED:
+                break
+            self.models_spent.add(model)
+            nxt = self._active_models()
+            logger.warning(
+                "Gemini free daily quota is exhausted for %s. %s", model,
+                f"Falling back to the next FREE model: {nxt[0]}." if nxt else
+                "No free model has quota left today; no paid model is ever tried.",
+            )
+        if verdict is None:
+            return Verdict(QUOTA_EXHAUSTED)
         # Only successful verdicts are cached. A transient failure must not be
         # remembered for 30 days — that would convert a blip into a standing
         # answer, which is the mistake the plan's rejected-handle analysis was
@@ -840,15 +971,13 @@ class GeminiVerifier:
                     self.unavailable += 1
                     return Judgement(STATE_UNAVAILABLE,
                                      f"unavailable ({vv.reason_code})", video_url=url)
-                vconf = float(vv.payload.get("confidence", 0.0))
-                confirms = vv.payload.get("matches") is True and vconf >= self.min_confidence
+                confirms, why = verdict_confirms(
+                    vv.payload, self.min_confidence, self.min_criteria_ratio)
                 if flagged and confirms:
                     rescued = True
-                    detail = f"rescued {vconf:.2f} (video confirmed)"
-                elif confirms:
-                    detail = f"video confirmed {vconf:.2f}"
+                    detail = f"rescued ({why})"
                 else:
-                    detail = f"video did not confirm ({vconf:.2f})"
+                    detail = why
         elif not video_criteria:
             detail = "no video_criteria"
         else:

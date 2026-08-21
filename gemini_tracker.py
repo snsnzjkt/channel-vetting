@@ -176,6 +176,22 @@ def _today_entry(log: dict) -> dict:
     return (log.get("days") or {}).get(today_pacific()) or {}
 
 
+def _model_entry(day_entry: dict, model: str) -> dict:
+    """
+    Per-model counters inside a day.
+
+    WHY PER MODEL. Google's free RPD is per model, not per project — measured
+    2026-08-21: `gemini-3.5-flash-lite` answered a PerDay 429 after ~106
+    requests while the other allowlisted models were untouched. So a single flat
+    day counter cannot express "this model is spent but that one is not", which
+    is exactly what the fallback in gemini_verify needs to know.
+
+    Top-level `total` / `text` / `video` are kept alongside for the run summary
+    and for the older flat shape, so an existing ledger stays readable.
+    """
+    return (day_entry.setdefault("models", {})).setdefault(model, {})
+
+
 def requests_today() -> tuple[int, int]:
     """
     (total, video) requests recorded today (Pacific). (0, 0) if unreadable.
@@ -191,7 +207,22 @@ def requests_today() -> tuple[int, int]:
     return int(entry.get("total", 0)), int(entry.get(KIND_VIDEO, 0))
 
 
-def record_request(*, video: bool, detail: str = "") -> None:
+def exhausted_models() -> set:
+    """
+    Models Google has already refused today with a PerDay 429.
+
+    The fallback chain skips these without issuing a request, so a second run on
+    the same day does not spend one request per model rediscovering what the
+    first run already learned.
+    """
+    try:
+        entry = _today_entry(load_log())
+    except GeminiLedgerUnavailable:
+        return set()
+    return {m for m, v in (entry.get("models") or {}).items() if v.get("exhausted")}
+
+
+def record_request(*, video: bool, model: str = "", detail: str = "") -> None:
     """
     Add one request to today's counts and persist.
 
@@ -209,6 +240,11 @@ def record_request(*, video: bool, detail: str = "") -> None:
     entry["total"] = int(entry.get("total", 0)) + 1
     kind = KIND_VIDEO if video else KIND_TEXT
     entry[kind] = int(entry.get(kind, 0)) + 1
+    if model:
+        me = _model_entry(entry, model)
+        me["total"] = int(me.get("total", 0)) + 1
+        if video:
+            me[KIND_VIDEO] = int(me.get(KIND_VIDEO, 0)) + 1
     try:
         _save_log(log)
     except OSError as exc:
@@ -220,7 +256,7 @@ def record_request(*, video: bool, detail: str = "") -> None:
     )
 
 
-def can_afford(*, video: bool) -> bool:
+def can_afford(*, video: bool, model: str = "") -> bool:
     """
     Whether one more request of this kind stays inside today's ceilings.
 
@@ -233,7 +269,17 @@ def can_afford(*, video: bool) -> bool:
     except GeminiLedgerUnavailable as exc:
         logger.warning("Refusing a Gemini request: %s", exc)
         return False
-    entry = _today_entry(log)
+    day = _today_entry(log)
+    # Caps are counted PER MODEL, mirroring Google's own per-model RPD. A single
+    # project-wide counter would let one spent model lock out two healthy ones,
+    # which is the opposite of what the fallback chain is for.
+    entry = (day.get("models") or {}).get(model, {}) if model else day
+    if model and (day.get("models") or {}).get(model, {}).get("exhausted"):
+        logger.warning(
+            "Skipping %s: Google already refused it today with a PerDay 429. "
+            "The fallback chain moves to the next allowlisted FREE model.", model,
+        )
+        return False
     total = int(entry.get("total", 0))
     if total + 1 > GEMINI_MAX_REQUESTS_PER_DAY:
         logger.warning(
@@ -257,7 +303,7 @@ def can_afford(*, video: bool) -> bool:
     return True
 
 
-def exhaust_day(*, video: bool) -> None:
+def exhaust_day(*, video: bool, model: str = "") -> None:
     """
     Write today's counter straight to its ceiling.
 
@@ -273,19 +319,24 @@ def exhaust_day(*, video: bool) -> None:
         return
     day = today_pacific()
     entry = (log.setdefault("days", {})).setdefault(day, {})
-    entry["total"] = max(int(entry.get("total", 0)), GEMINI_MAX_REQUESTS_PER_DAY)
-    if video:
-        entry[KIND_VIDEO] = max(
-            int(entry.get(KIND_VIDEO, 0)), GEMINI_MAX_VIDEO_REQUESTS_PER_DAY
-        )
+    # Pin the MODEL that was refused, not the whole day: the other allowlisted
+    # free models have their own quotas and are still usable.
+    if model:
+        me = _model_entry(entry, model)
+        me["total"] = max(int(me.get("total", 0)), GEMINI_MAX_REQUESTS_PER_DAY)
+        me["exhausted"] = True
+    else:
+        entry["total"] = max(int(entry.get("total", 0)), GEMINI_MAX_REQUESTS_PER_DAY)
     entry["quota_exhausted"] = True
     try:
         _save_log(log)
     except OSError:
         return
     logger.warning(
-        "Google reported the free daily allowance exhausted; today's Gemini "
-        "counter is pinned to its ceiling so a re-run today issues no requests."
+        "Google reported the free daily allowance exhausted for %s; that MODEL is "
+        "pinned for today so a re-run skips it without spending a request. Other "
+        "models on the free allowlist have their own quotas and are still tried.",
+        model or "the configured model",
     )
 
 

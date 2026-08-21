@@ -300,6 +300,8 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `GEMINI_BASE_URL` | Google's endpoint | Override only to point at a local stub |
 | `GEMINI_VIDEO_ALWAYS` | `true` | Video-check every candidate, not just flagged ones. One request each — the main budget consumer |
 | `GEMINI_TEXT_TIER` | `false` | The advisory 0-100 text score. Off on evidence: measured as non-predictive (see plan §2.16). Never gates a rescue |
+| `GEMINI_FALLBACK_ENABLED` | `true` | On a per-day quota refusal, rotate to the next model on the **free** allowlist. Free RPD is per-model, so this is free-tier rotation, not a paid fallback |
+| `GEMINI_MIN_CRITERIA_RATIO` | 0.5 | Fraction of individual criteria that must match when the model's aggregate says no. `1.0` = all of them (strictest). Loosens the bar without editing the criteria |
 | `GEMINI_TIMEOUT` | 60 | Longer than other timeouts: Google fetches and decodes the clip server-side |
 | `GEMINI_MAX_RETRIES` | 1 | 5xx/network only. Never a 429 — that is the free-tier wall |
 | `GEMINI_MIN_CONFIDENCE` | 0.6 | **Provisional.** Below this a candidate is not rescued. Raising it never causes a drop, only fewer rescues |

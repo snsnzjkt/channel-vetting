@@ -488,6 +488,41 @@ GEMINI_MAX_SECONDS_PER_RUN = float(os.getenv("GEMINI_MAX_SECONDS_PER_RUN", 900))
 # turning it off returns to rescue-path-only video.
 GEMINI_VIDEO_ALWAYS = env_flag("GEMINI_VIDEO_ALWAYS", default=True)
 
+# FALLBACK when a model's free daily quota runs out.
+#
+# READ THIS BEFORE ASSUMING IT VIOLATES THE NO-PAID-FALLBACK RULE — IT DOES NOT.
+# Google's free RPD is per MODEL, not per project (measured 2026-08-21:
+# gemini-3.5-flash-lite refused at ~106 requests while the other allowlisted
+# models were untouched). So when one model is spent, the fallback moves to the
+# next model ON THE HARDCODED FREE-TIER ALLOWLIST and keeps going. Every model in
+# the chain is free-of-charge; there is no paid model anywhere in it, and none can
+# be added, because the chain is built from GEMINI_FREE_TIER_MODELS and nothing
+# else. A project with no billing account cannot be charged for any of them.
+#
+# The order is deliberate: cheapest-quota-first is meaningless when everything is
+# free, so it runs lightest-model-first to keep latency and token use down, with
+# the most capable model last as the final free option.
+GEMINI_FALLBACK_ENABLED = env_flag("GEMINI_FALLBACK_ENABLED", default=True)
+GEMINI_MODEL_CHAIN = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
+)
+
+# HOW STRICT the verdict is, WITHOUT touching the criteria text.
+#
+# The model returns an overall `matches` boolean plus a per-criterion breakdown.
+# Trusting `matches` alone means EVERY criterion must satisfy the model before a
+# candidate confirms. This ratio is the second, looser route: a candidate also
+# confirms when at least this fraction of its individual criteria matched, even
+# if the model's own aggregate said no.
+#
+# 0.5 with two criteria means one is enough. Raise it to 1.0 to require all of
+# them again, which is the pre-2026-08-21 behaviour. This is the knob to move
+# when the criteria are right but the bar is too high — it changes the judgement,
+# never the question.
+GEMINI_MIN_CRITERIA_RATIO = float(os.getenv("GEMINI_MIN_CRITERIA_RATIO", 0.5))
+
 # The TEXT tier is OFF by default, and that is an evidence-based decision rather
 # than a cost one. Measured 2026-08-21 across 96 reviewer-labelled rows
 # (GEMINI_VERIFY_PLAN.md 2.16): its on_niche verdict is NOT predictive of the

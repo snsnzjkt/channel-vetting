@@ -179,3 +179,33 @@ class _NullBlocklist:
 
     def is_blocked(self, *a, **k):
         return False
+
+
+def test_the_metrics_log_is_isolated_from_production():
+    """
+    The autouse `isolate_run_metrics` fixture must be in force.
+
+    Without it the run() tests append fixture records to the repo's real
+    run_metrics.jsonl — which happened: ~35 junk records, mostly a "Test Niche"
+    with every counter zero. Readers of this file average across runs, so
+    zero-row fixture records drag every before/after toward zero. A polluted
+    metrics file does not look broken; it looks like bad results.
+    """
+    assert run_metrics.RUN_METRICS_FILE != "run_metrics.jsonl", (
+        "the autouse isolation fixture is not active — a run() test would "
+        "append fixture rows to the production metrics log"
+    )
+
+
+def test_production_metrics_log_has_no_fixture_records():
+    """Guards the cleanup: 'Test Niche' is not a real niche."""
+    import pathlib
+
+    path = pathlib.Path("run_metrics.jsonl")
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        niches_seen = json.loads(line).get("niches") or {}
+        assert "Test Niche" not in niches_seen, "fixture records are back in the log"

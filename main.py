@@ -2598,9 +2598,12 @@ def run(
             "itself worked — this is a yield result, not a crash. Check, in this "
             "order: (1) the drop-reason counts printed above, which say which gate "
             "consumed the candidates; (2) whether the niche's discovery pool is "
-            "simply exhausted — a limit=1 probe costs 0.01 credits and Home "
-            "Theater's whole pool measured 208 creators on 2026-08-21, of which "
-            "most were already tracked; (3) TODOS.md 'Yield levers', which ranks "
+            "exhausted, which applies ONLY to a niche still on influencers.club "
+            "discovery — run `measure_discovery_pool.py --net` for the real "
+            "figure, because gross totals ignore exclude_handles and overstate "
+            "it (Home Theater measured 334 gross but 279 net on 2026-08-22). A "
+            "niche on discovery_source='search_list' cannot run dry this way, "
+            "so read its drop reasons instead; (3) TODOS.md 'Yield levers', which ranks "
             "the gates by how many rows each is actually costing.",
             total_discovered,
         )

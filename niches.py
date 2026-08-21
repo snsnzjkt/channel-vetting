@@ -63,7 +63,30 @@ NICHES = {
         # "OCM Reviews" (DACs, IEMs, Atmos soundbars) scores 0.06 off / 0.60 on
         # and is rescued; "DragsterTV" (Forza money glitches) scores 0.04 off /
         # 0.00 on and is dropped. No single signal separates those two.
+        # WIDENED 2026-08-22 toward ROOM and FURNITURE vocabulary, on reviewer
+        # instruction: accept a channel that "did a room tour or mostly home
+        # furniture type of content", even when not all of its content is that.
+        #
+        # The old list was pure AV EQUIPMENT — projector, soundbar, atmos, DAC,
+        # IEM. That is a narrower reading of the niche than the reviewer's, and
+        # the earlier backtest said so out loud: across 96 labelled rows an
+        # equipment-focus score was INVERTED against the verdict (27% approved
+        # vs a 38% base rate; the five most equipment-focused channels were all
+        # rejected). The reviewer is buying an AUDIENCE for home-entertainment
+        # FURNITURE, not gear-review expertise.
+        #
+        # These terms only ever RESCUE — see main.off_target_reason. Adding one
+        # can never admit a channel on its own; it can only raise on_share so
+        # that a partly-off-topic channel is not dropped for the off-topic part.
+        # That is exactly the "not all content is like that" case.
         "on_target_terms": [
+            "room tour", "house tour", "home tour", "apartment tour",
+            "basement tour", "basement finish", "room makeover", "room reveal",
+            "room setup", "entertainment center", "entertainment room",
+            "tv stand", "tv wall", "tv mount", "media console", "media cabinet",
+            "sectional", "sofa", "couch", "seating", "furniture",
+            "living room", "family room", "game room", "bonus room",
+            "home renovation", "home improvement", "interior",
             "home theater", "home theatre", "home cinema", "projector",
             "projection screen", "projector screen", "soundbar", "atmos",
             "surround", "speaker", "subwoofer", "amplifier", "av receiver",
@@ -782,6 +805,36 @@ OFF_TARGET_TERMS = {
         "fitness tracker", "earbuds", "electric scooter", "3d printer",
         "drone review", "action camera", "osmo pocket", "insta360", "dash cam",
         "massage gun",
+    ],
+    # Toys, construction-brick and kids' doll/roleplay content. ADDED 2026-08-22
+    # from reviewer feedback: Victor rejected "Bricksie" (a LEGO City channel)
+    # and "Baby Doll Stories" for Home Theater, and neither was visible to this
+    # gate at all — both scored 0.00 off-target and sailed through.
+    #
+    # Baby Doll Stories is the more instructive one. Its titles say "Room
+    # Makeover" and "DIY Cardboard ... Doll Room", so it scores ON-TARGET for
+    # Lifestyle Sofa ("makeover", "diy"). A kids' doll channel was reading as a
+    # home-decor prospect. That is why this category is global rather than
+    # Home-Theater-only.
+    #
+    # SUBSTRING SAFETY IS THE WHOLE DIFFICULTY HERE — matching is plain
+    # `term in title.lower()`, so the obvious words are traps:
+    #   "brick" matches "brick wall" / "exposed brick fireplace"  <- real decor
+    #   "doll"  matches "dollar store decor"                      <- real decor
+    #   "toy"   matches "toy storage ideas" and "Toyota"          <- real, and a car
+    #   "figure" matches "figure out"
+    # So every entry below is either a brand ("lego", "barbie", "funko") or a
+    # multi-word phrase. Do not "simplify" these to their root words; there is a
+    # test that fails if you do.
+    "toys_and_kids": [
+        "lego", "minifigure", "minifig", "brickheadz", "bricklink",
+        "barbie", "baby doll", "dollhouse", "doll house", "doll room",
+        "doll story", "doll makeover", "squishmallow", "squishy", "slime",
+        "play doh", "play-doh", "playdough", "playset",
+        "toy review", "toy unboxing", "toy haul", "toy story", "kids toy",
+        "surprise egg", "blind bag", "action figure", "funko",
+        "poor vs rich", "rich vs poor", "gacha", "kids cartoon",
+        "nursery rhyme",
     ],
     "ai_and_crypto": [
         "crypto", "bitcoin", "ethereum", "nft", "altcoin", "web3", "blockchain",

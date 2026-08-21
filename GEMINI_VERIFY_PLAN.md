@@ -1110,6 +1110,147 @@ no retry, no model switch, the day counter pinned to its ceiling so a re-run
 short-circuits, 36 remaining candidates marked `unavailable`, and **no bill** —
 the project has no billing account, so a charge was structurally impossible.
 
+## 2.18 VIDEO ON EVERY CANDIDATE, LOOSER CRITERIA, AND WHAT THAT REVEALED (2026-08-21)
+
+Two operator requests: run the video check on every candidate rather than only on
+rescues, and loosen the criteria. Both done, and testing them produced a sharper
+diagnosis than either change.
+
+**What changed.**
+- `GEMINI_VIDEO_ALWAYS=true` (new, default on). The video tier now runs on every
+  candidate reaching the relevance gate, so **every row carries a video-checked
+  verdict** instead of only the rescued ones.
+- **The video tier alone decides a rescue.** It used to be gated behind the text
+  tier's `on_niche`, which made a signal since measured as non-predictive a
+  precondition for every rescue. That gate is gone.
+- `GEMINI_TEXT_TIER=false` (new, default off). The text score is advisory and now
+  opt-in, because §2.16 measured it as worse than the base rate and it costs half
+  of a ~100/day request budget.
+- Criteria cut from three per niche to two, each widened: the *space* counts as
+  much as the equipment, voiceover-over-own-footage counts as an on-camera
+  creator, the duplicate "not gaming / not generic gadgets" test is gone (it
+  double-penalised what `off_target_reason` already does on keywords), and
+  Lifestyle's strictest test — *"would a sofa brand recognise its own product
+  category"* — is gone, since it ruled out kitchen, bedroom, organising and
+  cooking content from creators whose audience is exactly the target.
+
+**Measured effect on 8 channels (6 Approved, 2 Rejected):**
+
+```
+  Nuno Silva          Approved  NOT confirmed  median video is a Premiere Pro / Lumion tutorial
+  Sean's World        Approved  NOT confirmed  unboxing a copper container in a yard
+  DaBuild             Approved  NOT confirmed  sanding a prop helmet in a garage
+  Jason Witmer        Approved  CONFIRMED      router review in his home office
+  Jsky                Approved  CONFIRMED      DisplayPort cable review at his desk
+  Paul Antill         Approved  CONFIRMED      monitor and desk setup in a living space
+  Apartment Therapy   Rejected  CONFIRMED      room tour of a pink kitchen
+  ADAM Audio          Rejected  CONFIRMED      walkthrough of a listening studio
+
+  Approved confirmed 3/6   (was ~0/5 under the strict criteria)
+  Rejected confirmed 2/2
+```
+
+**They fire far more often, which is what was asked for. Discrimination did not
+improve — and the failures now say exactly why.**
+
+1. **The two Rejected channels that passed are genuinely on-topic.** Apartment
+   Therapy really is touring a kitchen; ADAM Audio really is walking through a
+   listening room. They were rejected for **what the account IS** — a media
+   publisher and a manufacturer — not for what the video shows. **No criterion
+   about video CONTENT can separate them from Jason Witmer, because both post
+   on-topic home content.** The axis the reviewer is actually using is
+   independent-creator versus brand/publisher, and that *is* answerable from
+   video. It is not currently asked.
+2. **The three Approved channels that failed are a SAMPLING problem, not a
+   criteria problem.** All three are broad creators whose catalogue includes home
+   content, and the single median-view video landed elsewhere in it. Widening the
+   criteria cannot fix that; sampling more than one video can. This is the
+   deferred multi-window / multi-video item in §4, and it now has evidence behind
+   it rather than a hunch.
+
+**Recommended next criterion, for the operator to confirm rather than for me to
+guess a third time:** add an *independent creator, not a brand* test —
+"is this an individual creator's own channel, rather than a company, publisher,
+manufacturer or TV brand posting produced marketing content?" That is the one
+signal that would have caught both false positives above, and the two current
+criteria stay as they are.
+
+**Budget consequence of video-on-every-candidate:** one request per candidate, so
+against the measured ~100/day ceiling roughly 80 candidates a day across both
+niches. That fits the caps in §2.17. It does mean the text tier and video tier
+cannot both run on everything within the free tier, which is the second reason
+the text tier defaults off.
+
+## 2.19 FREE-MODEL FALLBACK, AND A STRICTNESS DIAL THAT DOES NOT TOUCH THE CRITERIA (2026-08-21)
+
+### The fallback is free-tier rotation, not a paid fallback
+
+Google's free RPD is **per model, not per project** — measured 2026-08-21:
+`gemini-3.5-flash-lite` refused at ~106 requests while the other allowlisted
+models were untouched. So when one model is spent for the day, the chain moves to
+the next model **on the hardcoded free-tier allowlist**:
+
+```
+gemini-3.5-flash-lite  ->  gemini-3.1-flash-lite  ->  gemini-3.7-flash
+```
+
+Every entry is free of charge. `_build_chain()` filters the chain through
+`GEMINI_FREE_TIER_MODELS` and **drops anything off-list with an ERROR rather than
+trying it**, so a paid model cannot enter the chain even by editing config. On a
+project with no billing account none of them can be charged regardless. A test
+asserts every URL the fallback ever touches names an allowlisted model.
+
+**It is also not the forbidden "retry a 429".** The distinction is exact and
+tested: the same request is never re-sent to the **same** model, and a
+**per-minute** 429 still pauses (it clears itself) rather than burning a model for
+the day. Only a **PerDay** 429 advances the chain, and only once per model.
+
+The ledger became **per-model** to support this: `days[day].models[model]` carries
+its own counters and an `exhausted` flag, so a second run the same day skips a
+spent model without spending a request to rediscover the wall. The run latches
+only when **every free model** is out.
+
+### The strictness dial: `GEMINI_MIN_CRITERIA_RATIO`
+
+Requested: less strict, *without changing the criteria themselves*. So the
+criteria text is untouched and the **judgement** loosened instead.
+
+The model returns an aggregate `matches` plus a per-criterion breakdown. Trusting
+the aggregate means every criterion must satisfy it. `verdict_confirms()` adds a
+second route: confirm when at least `GEMINI_MIN_CRITERIA_RATIO` of the individual
+criteria matched, even if the aggregate said no. **Confidence gates both routes** —
+loosening the criteria bar must not loosen the conviction bar.
+
+Measured on the same 8 channels:
+
+```
+  ratio 1.0 (aggregate only, previous behaviour)   Approved 3/6    Rejected 2/2
+  ratio 0.5 (any one of two criteria)              Approved 6/6    Rejected 2/2
+```
+
+**Now the honest part.** With two criteria, 0.5 means *one is enough*, so in
+practice almost anything showing a real creator confirms. It delivers "less
+strict" completely — every Approved channel now passes — but it does **not**
+improve discrimination, because the thing separating your Approved from your
+Rejected is not content strictness at all. It is the **brand-versus-independent-
+creator** axis identified in §2.18: Apartment Therapy and ADAM Audio confirm at
+*any* ratio because their clips genuinely are on-topic.
+
+So the practical effect of the default 0.5 is: **the rescue path will re-admit
+most flagged candidates.** Under rescue-only that cannot lose a prospect, and it
+converts the title gate's ~46% rejection into rows a human reviews — which is a
+real yield increase bought with review time. That trade is the operator's to make,
+and the dial is one env var:
+
+| `GEMINI_MIN_CRITERIA_RATIO` | Behaviour |
+|---|---|
+| `1.0` | Every criterion must match. Strictest; the pre-2026-08-21 bar. |
+| `0.5` (default) | Any one of two criteria. Loosest useful setting; rescues most flagged candidates. |
+
+The setting that would actually separate Approved from Rejected is not on this
+dial — it is the extra creator-vs-brand criterion in `TODOS.md`, awaiting the
+operator's confirmation that it is the real screen.
+
 ## 3. Tests
 
 All Gemini HTTP mocked — `tests/conftest.py` already hard-fails any real request

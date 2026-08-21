@@ -246,10 +246,8 @@ def test_real_verifier_rescues_a_flagged_candidate(monkeypatch, real_verifier):
     rename in either direction fails this test rather than silently producing an
     unavailable verdict forever.
     """
-    seq = [_Resp(_gemini_body(on_niche=True, confidence=0.9)),
-           _Resp(_gemini_body(matches=True, confidence=0.88))]
     monkeypatch.setattr(gv.HTTP, "post",
-                        lambda *a, **k: seq.pop(0) if seq else _Resp(_gemini_body()))
+                        lambda *a, **k: _Resp(_gemini_body(matches=True, confidence=0.88)))
     record, _ = _record_real(
         monkeypatch, real_verifier, off_target=main.DROP_OFF_TARGET,
         performance_extra={
@@ -260,7 +258,8 @@ def test_real_verifier_rescues_a_flagged_candidate(monkeypatch, real_verifier):
     assert record["Relevance State"] == gv.STATE_RESCUED
     assert "vX" in record["Verified Video URL"]
     assert real_verifier.rescued == 1
-    assert real_verifier.requests == 2
+    assert real_verifier.requests == 1, "video decides; the text tier is off by default"
+    assert real_verifier.video_requests == 1
 
 
 def test_real_verifier_reads_a_stub_performance_dict_without_crashing(monkeypatch,
@@ -273,9 +272,10 @@ def test_real_verifier_reads_a_stub_performance_dict_without_crashing(monkeypatc
     _stub_performance() with no overrides is exactly that dict.
     """
     monkeypatch.setattr(gv.HTTP, "post",
-                        lambda *a, **k: _Resp(_gemini_body(on_niche=True, confidence=0.9)))
+                        lambda *a, **k: _Resp(_gemini_body(matches=True, confidence=0.9)))
     record, reason = _record_real(monkeypatch, real_verifier, off_target=None)
     assert record is not None, "must not crash on a dict with no video keys"
     assert record["Relevance State"] == gv.STATE_SCORED
     # No settled_longform on the stub, so the video tier must not have been tried.
     assert real_verifier.video_requests == 0
+    assert "no long-form video" in record["Relevance Detail"]

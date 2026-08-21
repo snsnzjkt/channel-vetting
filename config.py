@@ -96,6 +96,39 @@ STATUS_APPROVED = "Approved"
 STATUS_CONTACTED = "Contacted"
 SOURCE_LABEL = "YouTube Discovery Pipeline"
 
+# The per-video view floor, as a fraction of the JUDGEABLE long-form videos in the
+# performance window that must clear the niche's min_avg_views.
+#
+# LOWERED 0.50 -> 0.30 on 2026-08-21 at the operator's direction: the pipeline was
+# returning too few rows and sometimes none at all for Home Theater. At
+# PERFORMANCE_SAMPLE_SIZE 10 that moves the rule from "at least 5 of 10" to "at
+# least 3 of 10". The full rationale, the measured evidence on both sides, and how
+# to retune it live at MIN_VIEWS_PER_VIDEO_RATIO in main.py.
+MIN_VIEWS_PER_VIDEO_RATIO = float(os.getenv("MIN_VIEWS_PER_VIDEO_RATIO", 0.30))
+
+# The discovery-side SUBSCRIBER floor, as a fraction of the niche's own
+# min_avg_views. Lowered 1.0 -> 0.25 on 2026-08-21, so a 10,000-average-views
+# niche asks the vendor for 2,500+ subscribers instead of 10,000+.
+#
+# THIS LOOSENS NO QUALITY GATE. Subscribers are a proxy; the real requirement is
+# 10,000 AVERAGE VIEWS, and that gate is untouched and still applied to every
+# candidate. A channel with 6,000 subscribers and 15,000 average views passes
+# every hard requirement this pipeline has and was simply never surfaced.
+#
+# MEASURED with limit=1 probes on 2026-08-21 (0.01 credits each), which is what
+# made the real problem visible: the Home Theater pool at a 10,000 floor is only
+# **208 creators in total**. At the measured 1 row per 100-150 creators the entire
+# addressable universe yields 1-2 rows, and roughly 64 of those 208 are already
+# tracked or rejected — so Home Theater had essentially run out of pool. That, not
+# gate strictness, is why it returned no records. Lifestyle's pool is 1,498, which
+# is exactly why it kept producing rows.
+#
+#   Home Theater    208 -> 334 (+61%)
+#   Lifestyle     1,498 -> 2,846 (+90%)
+DISCOVERY_SUBSCRIBER_FLOOR_RATIO = float(
+    os.getenv("DISCOVERY_SUBSCRIBER_FLOOR_RATIO", 0.25)
+)
+
 # --- Daily prospect caps ---
 # "Prospect" = a record successfully pushed to Airtable. Counted per niche
 # per day from Airtable's own "Date Added" field, so a second run on the
@@ -479,6 +512,64 @@ GEMINI_MAX_SECONDS_PER_RUN = float(os.getenv("GEMINI_MAX_SECONDS_PER_RUN", 900))
 # Always reachable: every candidate video is drawn from a long-form set that
 # requires a parseable duration > SHORTS_MAX_SECONDS (180), so a video shorter
 # than the window is impossible by construction, not merely rare.
+# Run the VIDEO tier on every candidate that reaches the relevance gate, not
+# only on the ones the title gate flagged. Requested 2026-08-21: the operator
+# wants a video-checked verdict on every row, not just on rescues.
+#
+# It costs one request per candidate, which against the MEASURED ~100/day free
+# ceiling is the single biggest consumer of the budget — so it is a flag, and
+# turning it off returns to rescue-path-only video.
+GEMINI_VIDEO_ALWAYS = env_flag("GEMINI_VIDEO_ALWAYS", default=True)
+
+# FALLBACK when a model's free daily quota runs out.
+#
+# READ THIS BEFORE ASSUMING IT VIOLATES THE NO-PAID-FALLBACK RULE — IT DOES NOT.
+# Google's free RPD is per MODEL, not per project (measured 2026-08-21:
+# gemini-3.5-flash-lite refused at ~106 requests while the other allowlisted
+# models were untouched). So when one model is spent, the fallback moves to the
+# next model ON THE HARDCODED FREE-TIER ALLOWLIST and keeps going. Every model in
+# the chain is free-of-charge; there is no paid model anywhere in it, and none can
+# be added, because the chain is built from GEMINI_FREE_TIER_MODELS and nothing
+# else. A project with no billing account cannot be charged for any of them.
+#
+# The order is deliberate: cheapest-quota-first is meaningless when everything is
+# free, so it runs lightest-model-first to keep latency and token use down, with
+# the most capable model last as the final free option.
+GEMINI_FALLBACK_ENABLED = env_flag("GEMINI_FALLBACK_ENABLED", default=True)
+GEMINI_MODEL_CHAIN = (
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.7-flash",
+)
+
+# HOW STRICT the verdict is, WITHOUT touching the criteria text.
+#
+# The model returns an overall `matches` boolean plus a per-criterion breakdown.
+# Trusting `matches` alone means EVERY criterion must satisfy the model before a
+# candidate confirms. This ratio is the second, looser route: a candidate also
+# confirms when at least this fraction of its individual criteria matched, even
+# if the model's own aggregate said no.
+#
+# 0.5 with two criteria means one is enough. Raise it to 1.0 to require all of
+# them again, which is the pre-2026-08-21 behaviour. This is the knob to move
+# when the criteria are right but the bar is too high — it changes the judgement,
+# never the question.
+GEMINI_MIN_CRITERIA_RATIO = float(os.getenv("GEMINI_MIN_CRITERIA_RATIO", 0.5))
+
+# The TEXT tier is OFF by default, and that is an evidence-based decision rather
+# than a cost one. Measured 2026-08-21 across 96 reviewer-labelled rows
+# (GEMINI_VERIFY_PLAN.md 2.16): its on_niche verdict is NOT predictive of the
+# reviewer's Approved/Rejected — 27% against a 38% base rate, and 0 of 5 in Home
+# Theater. Spending half of a ~100/day request budget on a signal measured as
+# non-predictive is the wrong trade, so it is opt-in until the criteria are
+# rewritten and re-measured with backtest_relevance.py.
+#
+# When on it is ADVISORY ONLY: it records a 0-100 relevance score for the
+# reviewer and never gates a rescue. That changed on 2026-08-21 too — it used to
+# gate the video tier, which made a non-predictive signal a precondition for
+# every rescue.
+GEMINI_TEXT_TIER = env_flag("GEMINI_TEXT_TIER", default=False)
+
 GEMINI_CLIP_SECONDS = int(os.getenv("GEMINI_CLIP_SECONDS", 25))
 GEMINI_CLIP_MIN_START_SECONDS = int(os.getenv("GEMINI_CLIP_MIN_START_SECONDS", 90))
 GEMINI_CLIP_START_FRACTION = float(os.getenv("GEMINI_CLIP_START_FRACTION", 0.25))

@@ -194,10 +194,24 @@ def table_has_field(table_name: str, field_name: str) -> bool:
                 field_name, table_name, resp.status_code,
             )
     except requests.RequestException as e:
+        # DO NOT CACHE A TRANSIENT FAILURE. This function memoises per table per
+        # run, so caching a network blip as "absent" suppressed the field for the
+        # WHOLE run: every optional column silently stopped being written, and
+        # with the Gemini verdict columns that means a full run's worth of
+        # verdicts computed, requests spent, and every answer thrown on the floor
+        # — with nothing but one WARNING to show for it.
+        #
+        # Returning False for THIS call is still right (we genuinely do not know,
+        # and writing an unknown field would have Airtable reject the whole
+        # record). Not caching it means the next candidate re-probes and a
+        # one-off blip costs one column write instead of a run.
         logger.warning(
-            "Could not probe for field %r in '%s' (%s) — assuming absent.",
+            "Could not probe for field %r in '%s' (%s) — treating it as absent for "
+            "this record only, and re-probing on the next one rather than "
+            "suppressing the column for the whole run.",
             field_name, table_name, e,
         )
+        return False
 
     _FIELD_PRESENCE[key] = present
     return present

@@ -1,0 +1,298 @@
+"""
+Tracks Gemini free-tier REQUEST counts in a local JSON log that survives the run.
+
+**Why this exists.** The per-run counters live on the `GeminiVerifier` instance,
+which is right for them: they describe one run and should vanish with the process
+(see influencers.py for the same argument). But a *daily* ceiling cannot live
+there. Two runs on the same day would each get a full allowance, which is the
+exact bug `credit_tracker`'s docstring was written about, and a `workflow_dispatch`
+fired minutes after the cron would re-issue requests into a quota it already
+knew was exhausted.
+
+**THE CLOCK IS PACIFIC, AND THAT IS DELIBERATE.** `credit_tracker` keys on
+`prospect_day.today_iso()` (Toronto) with an explicit argument: credits buy rows
+stamped with a prospect day and counted against a prospect-day cap, so a day's
+spend and a day's row count must be readable side by side. **That argument does
+not transfer here.** These caps brake *Google's* free-tier RPD, and Google's
+quota day resets at midnight Pacific — which is `quota_tracker`'s entire
+documented reason for existing. Keying on Toronto would offset our window ~3
+hours from the limit it protects, so a late-evening manual dispatch could spend
+into a fresh local allowance against a Google day that had not turned over. This
+is not a fourth clock: it is the existing Google-quota clock, used for a Google
+quota.
+
+**Two ceilings, because two different things are scarce.** Total requests bound
+the RPD; VIDEO requests separately bound the free tier's 8-hours-of-YouTube-per-
+day allowance, which the text tier never touches. A run can therefore exhaust its
+video budget while the text tier keeps scoring.
+
+**Failure direction: CLOSED**, like `credit_tracker` and unlike `quota_tracker`.
+An unreadable `quota_log.json` returns `{}` and reads as "0 spent" — fine for
+free quota that resets nightly and is only ever spent by us. Here a corrupt read
+would authorise a fresh allowance against requests already made. Closing costs
+almost nothing in this design: verification switching off means candidates keep
+whatever verdict the existing gates gave them, which is exactly the pipeline's
+behaviour without this feature at all. There is no reason to take the fail-open
+risk for a benefit that small.
+
+**NOTE FOR CI.** This file is only a real daily ceiling if it PERSISTS between
+runs. In GitHub Actions that requires `gemini_log.json` in the workflow's
+`actions/cache` path lists — same as `credit_log.json`. Without it every run
+starts from an empty ledger and the day cap silently degrades to a per-run cap.
+That is fail-OPEN in the one place this file exists to fail closed, and it is why
+the workflow is a first-class file in GEMINI_VERIFY_PLAN.md rather than "docs".
+
+**Deliberate duplication.** This is ~70% the shape of `credit_tracker.py` and is
+kept separate on purpose rather than factored into a shared ledger: generalising
+would mean editing a *money* ledger whose exact failure direction is hardened and
+heavily commented, for the benefit of a non-money counter. See credit_tracker.py
+for the other half of this pair.
+"""
+import json
+import logging
+import os
+from datetime import datetime, timedelta
+
+from config import (
+    GEMINI_LOG_FILE,
+    GEMINI_MAX_REQUESTS_PER_DAY,
+    GEMINI_MAX_VIDEO_REQUESTS_PER_DAY,
+)
+from quota_tracker import PACIFIC_TZ, _replace_with_retry, today_pacific
+
+logger = logging.getLogger(__name__)
+
+# Request kinds, so the log answers "what did we spend it on?" and not merely
+# "how much?". Only VIDEO consumes the 8h/day YouTube allowance.
+KIND_TEXT = "text"
+KIND_VIDEO = "video"
+
+# Daily detail is pruned to keep the file small. Longer than quota_tracker's 7
+# days because a human debugging "why did verification stop last Thursday" has no
+# other record — there is no vendor dashboard for this that we can read.
+RETENTION_DAYS = 30
+
+
+class GeminiLedgerUnavailable(RuntimeError):
+    """
+    The request ledger could not be read.
+
+    Raised only by `assert_readable()`, at run start. Mid-run the public helpers
+    return False instead, so one corrupt read disables verification without
+    unwinding a run that has already spent YouTube quota and vendor credits.
+    """
+
+
+def _empty() -> dict:
+    return {"days": {}}
+
+
+def load_log() -> dict:
+    """
+    The ledger, or raise if it exists and cannot be read.
+
+    A MISSING file returns an empty ledger — that is a first run, and a truthful
+    "nothing spent yet". A file that exists and does not parse is a different
+    thing, and guessing zero there is what overspends.
+    """
+    if not os.path.exists(GEMINI_LOG_FILE):
+        return _empty()
+    try:
+        with open(GEMINI_LOG_FILE, "r", encoding="utf-8") as f:
+            log = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise GeminiLedgerUnavailable(
+            f"Gemini ledger {GEMINI_LOG_FILE} is unreadable ({exc}). Refusing to "
+            "issue requests against an unknown count — inspect or delete the file."
+        ) from exc
+    if not isinstance(log, dict):
+        raise GeminiLedgerUnavailable(
+            f"Gemini ledger {GEMINI_LOG_FILE} is not a JSON object."
+        )
+    log.setdefault("days", {})
+    return log
+
+
+def assert_readable() -> None:
+    """
+    Fail loudly NOW if the ledger is corrupt, rather than deep inside a call site.
+
+    Called once from `run()` beside `credit_tracker.assert_readable()`. Unlike
+    that one this does NOT abort the run — verification is optional and the
+    pipeline is fully functional without it — so the caller logs and disables.
+    """
+    load_log()
+
+
+def _prune(log: dict) -> dict:
+    cutoff = datetime.now(PACIFIC_TZ).date() - timedelta(days=RETENTION_DAYS)
+    kept = {}
+    for key, value in (log.get("days") or {}).items():
+        try:
+            day = datetime.strptime(key, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            # Unparseable keys are KEPT, not discarded: this file is
+            # hand-inspectable and silently deleting a key we don't understand
+            # is worse than carrying it. Same rule as quota_tracker._prune.
+            kept[key] = value
+            continue
+        if day >= cutoff:
+            kept[key] = value
+    log["days"] = kept
+    return log
+
+
+def _save_log(log: dict) -> None:
+    """
+    Persist atomically: write a `.tmp` sibling, fsync, then os.replace().
+
+    The fsync is load-bearing — os.replace() orders the rename but not the data,
+    so without it a crash can leave the renamed file present and empty, which
+    `load_log()` would then raise on. Raising is the safe direction here, but a
+    ledger that raises every run needs a human, so don't create that state
+    casually. `_replace_with_retry` is borrowed from quota_tracker for the
+    Windows file-lock case documented there.
+    """
+    log = _prune(log)
+    tmp_path = f"{GEMINI_LOG_FILE}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(log, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        _replace_with_retry(tmp_path, GEMINI_LOG_FILE)
+    except BaseException:
+        # BaseException, not Exception, so a KeyboardInterrupt doesn't leave a
+        # stale .tmp for the next run to trip over. The real log is safe either
+        # way — os.replace() hasn't run.
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _today_entry(log: dict) -> dict:
+    return (log.get("days") or {}).get(today_pacific()) or {}
+
+
+def requests_today() -> tuple[int, int]:
+    """
+    (total, video) requests recorded today (Pacific). (0, 0) if unreadable.
+
+    Returns zeros rather than raising because every mid-run caller treats a
+    failure to read as "do not spend" via `can_afford()` — this is the reporting
+    path, and a run summary that cannot print is worse than one printing zeros.
+    """
+    try:
+        entry = _today_entry(load_log())
+    except GeminiLedgerUnavailable:
+        return 0, 0
+    return int(entry.get("total", 0)), int(entry.get(KIND_VIDEO, 0))
+
+
+def record_request(*, video: bool, detail: str = "") -> None:
+    """
+    Add one request to today's counts and persist.
+
+    Called AFTER a response is received, successful or not — a 4xx or a 429 still
+    consumed the request as far as Google is concerned, and counting only
+    successes is how a ledger drifts under exactly the conditions it exists for.
+    """
+    try:
+        log = load_log()
+    except GeminiLedgerUnavailable as exc:
+        logger.warning("Not recording a Gemini request: %s", exc)
+        return
+    day = today_pacific()
+    entry = (log.setdefault("days", {})).setdefault(day, {})
+    entry["total"] = int(entry.get("total", 0)) + 1
+    kind = KIND_VIDEO if video else KIND_TEXT
+    entry[kind] = int(entry.get(kind, 0)) + 1
+    try:
+        _save_log(log)
+    except OSError as exc:
+        logger.warning("Could not persist the Gemini ledger (%s).", exc)
+        return
+    logger.debug(
+        "Gemini request recorded (%s%s) -> %d today (%d video)",
+        kind, f", {detail}" if detail else "", entry["total"], entry.get(KIND_VIDEO, 0),
+    )
+
+
+def can_afford(*, video: bool) -> bool:
+    """
+    Whether one more request of this kind stays inside today's ceilings.
+
+    Returns **False** on an unreadable ledger — fail closed. A refusal here means
+    the candidate keeps whatever verdict the existing gates gave it, i.e. exactly
+    today's pipeline behaviour, so closing is cheap.
+    """
+    try:
+        log = load_log()
+    except GeminiLedgerUnavailable as exc:
+        logger.warning("Refusing a Gemini request: %s", exc)
+        return False
+    entry = _today_entry(log)
+    total = int(entry.get("total", 0))
+    if total + 1 > GEMINI_MAX_REQUESTS_PER_DAY:
+        logger.warning(
+            "Gemini day cap reached: %d/%d requests today (Pacific). Verification "
+            "is paused until the Pacific day rolls over; candidates keep the "
+            "verdict the existing gates gave them. Raise "
+            "GEMINI_MAX_REQUESTS_PER_DAY only if the free tier can carry it.",
+            total, GEMINI_MAX_REQUESTS_PER_DAY,
+        )
+        return False
+    if video:
+        used = int(entry.get(KIND_VIDEO, 0))
+        if used + 1 > GEMINI_MAX_VIDEO_REQUESTS_PER_DAY:
+            logger.warning(
+                "Gemini VIDEO day cap reached: %d/%d video requests today "
+                "(Pacific). This is the cap that guards the free tier's 8h/day "
+                "YouTube allowance. The text tier is unaffected.",
+                used, GEMINI_MAX_VIDEO_REQUESTS_PER_DAY,
+            )
+            return False
+    return True
+
+
+def exhaust_day(*, video: bool) -> None:
+    """
+    Write today's counter straight to its ceiling.
+
+    Called when Google returns a PerDay 429: we now know the real allowance is
+    gone, which our own counter had no way to predict (Google stopped publishing
+    per-model free RPD — it is per-project and only visible in AI Studio). Writing
+    the ceiling means a second run today short-circuits at `can_afford()` without
+    issuing a request to rediscover the same fact.
+    """
+    try:
+        log = load_log()
+    except GeminiLedgerUnavailable:
+        return
+    day = today_pacific()
+    entry = (log.setdefault("days", {})).setdefault(day, {})
+    entry["total"] = max(int(entry.get("total", 0)), GEMINI_MAX_REQUESTS_PER_DAY)
+    if video:
+        entry[KIND_VIDEO] = max(
+            int(entry.get(KIND_VIDEO, 0)), GEMINI_MAX_VIDEO_REQUESTS_PER_DAY
+        )
+    entry["quota_exhausted"] = True
+    try:
+        _save_log(log)
+    except OSError:
+        return
+    logger.warning(
+        "Google reported the free daily allowance exhausted; today's Gemini "
+        "counter is pinned to its ceiling so a re-run today issues no requests."
+    )
+
+
+def spend_summary() -> str:
+    """One line for the run summary: today's counts against today's ceilings."""
+    total, video = requests_today()
+    return (
+        f"{total}/{GEMINI_MAX_REQUESTS_PER_DAY} requests today "
+        f"({video}/{GEMINI_MAX_VIDEO_REQUESTS_PER_DAY} video)"
+    )

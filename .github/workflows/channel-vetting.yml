@@ -100,7 +100,14 @@ jobs:
     # the job would sit on a runner for GitHub's 6-hour default, and with
     # `cancel-in-progress: false` above it would also block every queued
     # run behind it for those 6 hours.
-    timeout-minutes: 60
+    # Raised from 60 for Gemini relevance verification: GEMINI_TIMEOUT (60s) x
+    # the run request cap is minutes of new SERIAL latency, since Google fetches
+    # and decodes each YouTube segment server-side before the model sees a frame.
+    # A killed run prints NO run summary at all, which is the least legible
+    # failure this pipeline can produce — so the job ceiling must sit above
+    # GEMINI_MAX_SECONDS_PER_RUN (900s), which is the brake that actually bounds
+    # it and which degrades gracefully by marking candidates unavailable.
+    timeout-minutes: 90
 
     # Identical for both run steps below, so it lives here rather than
     # being repeated (and kept in sync) twice.
@@ -116,6 +123,18 @@ jobs:
       # one degraded by datacenter IP reputation. An unset secret is still a
       # valid configuration (the step just skips), so this is not gated.
       INFLUENCERS_API_KEY: ${{ secrets.INFLUENCERS_API_KEY }}
+      # Gemini relevance verification. BOTH are required for the feature to run
+      # here: .env is not used in CI, so an unlisted var means the feature is
+      # silently 100% inert on every scheduled run while working locally — the
+      # same class of bug as the USE_PLAYWRIGHT_STEALTH null-vs-"true" comparison
+      # fixed below. GEMINI_ENABLED is read via config.env_flag(default=False),
+      # so ONLY the literal "true" switches it on; an unset secret leaves it off.
+      #
+      # THE COST GUARANTEE IS NOT HERE. It is that the key's Cloud project has no
+      # billing account, which makes a charge structurally impossible. Nothing in
+      # this workflow can verify that. See the config.py header.
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_ENABLED: ${{ secrets.GEMINI_ENABLED }}
       # ON for scheduled runs, and overridable on a manual dispatch.
       #
       # `github.event.inputs` is NULL on a schedule event — a workflow_dispatch
@@ -216,6 +235,8 @@ jobs:
             external_handles_cache.json
             credit_log.json
             rejected_handles.json
+            gemini_log.json
+            gemini_cache.json
           # The exact key intentionally never hits (github.run_id is unique
           # per run) — it exists so the SAVE step below always has a fresh,
           # unclaimed key to write to. A cache key is immutable once
@@ -327,4 +348,6 @@ jobs:
             external_handles_cache.json
             credit_log.json
             rejected_handles.json
+            gemini_log.json
+            gemini_cache.json
           key: channel-vetting-state-${{ github.run_id }}

@@ -345,6 +345,163 @@ INFLUENCERS_MAX_CREDITS_PER_MONTH = float(
 )
 
 
+# --- Gemini relevance verification (FREE TIER ONLY) -----------------------
+#
+# READ THIS FIRST. The cost guarantee for this integration is NOT in this file.
+# Per Google's API terms, the Gemini API is a "Paid Service" *only* when reached
+# through a Cloud project with an active billing account. The key in .env belongs
+# to project 208204240231, which has NO billing account linked — so an
+# over-quota request returns 429 RESOURCE_EXHAUSTED and CANNOT be billed. There
+# is no API that reports a project's billing status, so nothing below can verify
+# this; it is a property of which key is pasted in. Re-check after any rotation:
+#   https://console.cloud.google.com/billing/linkedaccount?project=208204240231
+#
+# Everything below is the SECOND layer. See GEMINI_VERIFY_PLAN.md.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# The endpoint is `:generateContent`, which Google's docs now label LEGACY. That
+# is deliberate and it is the whole reason this integration exists in this shape:
+# the newer Interactions API (POST /v1beta/interactions) does NOT yet support
+# `video_metadata`, the clipping field that lets us analyse 25 seconds instead of
+# a whole 20-minute upload. Google states that limitation explicitly. Sending
+# whole videos would burn the free tier's 8h/day YouTube allowance ~48x faster.
+# TODOS.md carries the trigger to migrate once clipping lands there.
+GEMINI_BASE_URL = os.getenv(
+    "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+)
+
+# Both flags go through env_flag, which is DIRECTIONAL: with default=True only
+# the literal "false" disables, so a typo ("ture", "0", "no") leaves the safe
+# value in place. That asymmetry is the point here — the competing raw
+# `os.getenv(...) == "true"` idiom used by USE_PLAYWRIGHT_STEALTH would let
+# GEMINI_FREE_ONLY=ture silently switch off the model allowlist below.
+#
+# GEMINI_ENABLED defaults FALSE: this is a new unattended outbound call inside a
+# scheduled CI job, so it is opt-in, the same way OUTREACH_DEMO_MODE defaults to
+# the harmless direction.
+GEMINI_ENABLED = env_flag("GEMINI_ENABLED", default=False)
+GEMINI_FREE_ONLY = env_flag("GEMINI_FREE_ONLY", default=True)
+
+# Hardcoded, never read from the environment: an operator-overridable allowlist
+# is not an allowlist.
+#
+# WHAT THIS ACTUALLY PREVENTS is an operator TYPO, not a charge — see the header
+# above for where the real guarantee lives. Do not read this constant as a cost
+# control and relax the billing discipline that is doing the work.
+#
+# It also freezes a support snapshot dated 2026-08-21 with no expiry. Verified
+# against Google's own `gemini-interactions-api` skill, which struck four models
+# an earlier read of the pricing page had accepted:
+#   gemini-2.5-flash, gemini-2.5-flash-lite -> "legacy and deprecated. Never use."
+#   gemini-3.6-flash, gemini-3.5-flash      -> active legacy; use gemini-3.7-flash
+# A pricing page proves a model is billed at zero, NOT that it is supported.
+GEMINI_FREE_TIER_MODELS = frozenset({
+    "gemini-3.7-flash",        # latest Flash
+    "gemini-3.5-flash-lite",   # DEFAULT — latest Flash-Lite
+    "gemini-3.1-flash-lite",   # prior Flash-Lite; upgrading to 3.5 is recommended
+})
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
+# Longer than any other timeout in this pipeline because Google fetches and
+# decodes the YouTube segment server-side before the model sees a frame.
+GEMINI_TIMEOUT = float(os.getenv("GEMINI_TIMEOUT", 60))
+
+# One retry, and only for 5xx/network. NEVER for 429 (that is the free-tier wall,
+# and retrying it is the one behaviour this integration must not have) and never
+# for other 4xx (a stale request field would just fail identically).
+GEMINI_MAX_RETRIES = int(os.getenv("GEMINI_MAX_RETRIES", 1))
+
+# PROVISIONAL — the one threshold in this file with no measurement behind it,
+# and it is labelled so rather than dressed up as tuned. Every other number here
+# cites its provenance; this one cannot until there are verdicts to read.
+#
+# HOW TO TUNE IT: "Relevance Detail" records the confidence on every verdict.
+# After ~2 weeks, set this just below the lowest confidence a human reviewer
+# agreed with. Raising it only converts rescues into non-rescues, never into
+# drops, so it is safe to move in either direction.
+GEMINI_MIN_CONFIDENCE = float(os.getenv("GEMINI_MIN_CONFIDENCE", 0.6))
+
+# Request ceilings. Sized on CANDIDATES EXAMINED, not rows written: a request is
+# spent per candidate reaching the gate, while the daily row caps only advance on
+# a successful push, so the two diverge. Both niches run in ONE process
+# (main.run loops NICHES), so these are per-process totals across all niches.
+#
+# The VIDEO sub-caps are the only ones that touch the free tier's 8h/day YouTube
+# allowance; the text tier is bounded by tokens alone.
+#
+# The brief's own spellings (MAX_GEMINI_REQUESTS_PER_RUN / _PER_DAY) are read as
+# fallbacks so the operator's notes stay true, but the GEMINI_-prefixed names are
+# canonical: every other vendor ceiling in this file is vendor-prefix-first
+# (INFLUENCERS_MAX_*, OUTREACH_MAX_*) and there is no bare MAX_* var anywhere.
+# MEASURED 2026-08-21, and this is the one number in this block that is not a
+# guess. A backtest run issued 106 requests (103 text + 3 video) on
+# gemini-3.5-flash-lite and Google answered the 107th with a PerDay 429. So the
+# free-tier RPD for this model on this project is ~100/day — NOT the 600 an
+# earlier revision defaulted to, which could never bind because Google's own
+# limit hit first. Google no longer publishes per-model free RPD (it is
+# per-project, visible only in AI Studio), so measurement is the only way to
+# know, and the number may differ on another project.
+#
+# 80/day leaves headroom to stop BEFORE Google does, which matters: our own cap
+# is a clean pause that marks candidates unavailable, whereas walking into
+# Google's limit burns a request to discover it and latches the run.
+GEMINI_MAX_REQUESTS_PER_RUN = int(
+    os.getenv("GEMINI_MAX_REQUESTS_PER_RUN")
+    or os.getenv("MAX_GEMINI_REQUESTS_PER_RUN", 70)
+)
+GEMINI_MAX_REQUESTS_PER_DAY = int(
+    os.getenv("GEMINI_MAX_REQUESTS_PER_DAY")
+    or os.getenv("MAX_GEMINI_REQUESTS_PER_DAY", 80)
+)
+# Video is a SUBSET of the totals above, so these only bite when video would
+# otherwise crowd out the text tier. Also the only caps that touch the free
+# tier's separate 8h/day YouTube allowance.
+GEMINI_MAX_VIDEO_REQUESTS_PER_RUN = int(
+    os.getenv("GEMINI_MAX_VIDEO_REQUESTS_PER_RUN", 30)
+)
+GEMINI_MAX_VIDEO_REQUESTS_PER_DAY = int(
+    os.getenv("GEMINI_MAX_VIDEO_REQUESTS_PER_DAY", 40)
+)
+
+# Wall-clock brake. GEMINI_TIMEOUT x the run cap would exceed the workflow's own
+# timeout-minutes, and a killed run prints NO run summary at all — the least
+# legible failure this pipeline can produce.
+GEMINI_MAX_SECONDS_PER_RUN = float(os.getenv("GEMINI_MAX_SECONDS_PER_RUN", 900))
+
+# How many seconds of video to send, and where the window starts.
+#
+# NOT the first 25 seconds: the opening of a YouTube video is intro animation,
+# channel branding and the sponsor read — the least representative footage on the
+# timeline, and the segment most likely to show someone ELSE's product. The
+# window starts at least GEMINI_CLIP_MIN_START_SECONDS in, or 25% through for
+# longer uploads, whichever is later.
+#
+# Always reachable: every candidate video is drawn from a long-form set that
+# requires a parseable duration > SHORTS_MAX_SECONDS (180), so a video shorter
+# than the window is impossible by construction, not merely rare.
+GEMINI_CLIP_SECONDS = int(os.getenv("GEMINI_CLIP_SECONDS", 25))
+GEMINI_CLIP_MIN_START_SECONDS = int(os.getenv("GEMINI_CLIP_MIN_START_SECONDS", 90))
+GEMINI_CLIP_START_FRACTION = float(os.getenv("GEMINI_CLIP_START_FRACTION", 0.25))
+
+# Local state. Env-overridable so the test fixture can redirect them to tmp_path
+# — the credit ledger learned this the hard way by writing 10.14 real credits
+# into the repo's own log. Matches CREDIT_LOG_FILE rather than the bare-constant
+# QUOTA_LOG_FILE for exactly that reason.
+GEMINI_LOG_FILE = os.getenv("GEMINI_LOG_FILE", "gemini_log.json")
+GEMINI_CACHE_FILE = os.getenv("GEMINI_CACHE_FILE", "gemini_cache.json")
+
+# Manual cache-invalidation lever for a prompt or threshold change that the
+# criteria hash does not capture. Bump it and every stored verdict is a miss.
+GEMINI_VERDICT_VERSION = int(os.getenv("GEMINI_VERDICT_VERSION", 1))
+
+# Cached verdicts expire after this many days. NOT the 90 that
+# REJECTED_HANDLES_RETENTION_DAYS uses: generateContent is not deterministic, and
+# GEMINI_MODEL is a floating ALIAS that Google repoints at new snapshots, so a
+# long window would serve verdicts from a model that no longer exists. The stored
+# entry also records the response's own modelVersion and a mismatch is a miss.
+GEMINI_CACHE_RETENTION_DAYS = int(os.getenv("GEMINI_CACHE_RETENTION_DAYS", 30))
+
+
 # --- Outreach: review-to-send system ---
 # Tables created 2026-08-14 in the same base as the niche tables. IDs are the
 # defaults so a fresh clone works without a full .env; override per environment.

@@ -24,3 +24,15 @@ package-lock.json
 # --send-configured tree real addresses — creator PII that must not be
 # committed. Same reasoning as search_cache.json / quota_log.json.
 outreach_preview/
+
+# Gemini relevance-verification state. gemini_cache.json holds model-generated
+# text ABOUT NAMED CREATORS (the reason and per-criterion evidence for each
+# verdict) — the same class of content as outreach_preview/, and this repo is
+# public. gemini_log.json is a request counter, same shape as quota_log.json.
+gemini_log.json*
+gemini_cache.json*
+
+# Backtest run artefact. Holds creator names and reviewer verdicts —
+# same creator-PII reasoning as outreach_preview/. Regenerate with
+# `python backtest_relevance.py`.
+backtest_results.json*

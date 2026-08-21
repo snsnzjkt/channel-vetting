@@ -134,3 +134,86 @@ Deferred work, with the reason it was deferred. Created 2026-08-14 by the
   **568**.
 - Stale comment at `main.py:172-176` — says "neutral midpoint (50/100)" while
   the constant is `70.0`.
+
+## Deferred from the Gemini relevance-verification review (2026-08-21)
+
+- **Wire the Tier 1 relevance score into `Overall Score`.** This is the
+  "Relevance classifier" item above, and `GEMINI_VERIFY_PLAN.md` is the step that
+  makes it possible — but it is gated on **measurement, not effort**. Changing
+  what `DEFAULT_NICHE_MATCH = 70.0` contributes changes the meaning of a column
+  reviewers already use, and this repo has an explicit precedent that scores
+  written before and after such a change are **not comparable** (see the
+  `avg_views` long-form comment in `enrichment.py`). Revisit only after the
+  backtest in `GEMINI_VERIFY_PLAN.md` §2.14 step 7 reports whether Tier 1's
+  `on_niche` separates Approved from Rejected across the 146 labelled rows in
+  `PROSPECT_AUDIT_2026-08-20.md`. If it does not separate them, this item dies
+  the same way the per-niche cadence floor did.
+
+- **Multi-window video sampling (3 × 8s instead of 1 × 25s).** Directly attacks
+  the weakest remaining premise in the plan — that one 25-second window
+  represents a channel — and the free-tier token budget allows it. Deferred for
+  one reason only: passing three `videoMetadata` parts that reference the same
+  YouTube URL in a single request is **unverified**, and the plan's own rule is
+  that unverified request shapes do not ship. `verify_video.py` is where it gets
+  proven; if it works, this is a ~20-minute change.
+
+- **"Zero rows, exit code 0" — the observability hole this plan did NOT fix.**
+  Raised by the CEO review voice as in-scope-non-negotiable; kept out of scope
+  because it is a real, separate bug that predates this plan, and because the
+  plan's rescue-only architecture removes this plan's own contribution to it
+  (nothing in it can reduce row count). It remains the **next-best observability
+  fix in the repo**: count push failures in `push_until_full`, and warn or exit
+  non-zero when candidates were examined and zero rows were written. A run that
+  burns a day's discovery credits and writes nothing should not report green.
+
+- **Install the Codex CLI.** Every phase of the 2026-08-21 `/autoplan` review ran
+  `[subagent-only]` because `codex` is not on this machine, so no finding in that
+  review is CONFIRMED in the two-voice sense — each one is single-voice and was
+  verified against the code by hand instead. `npm i -g @openai/codex` then
+  `codex login` restores the second independent model for the next review.
+
+- **Migrate Gemini calls to the Interactions API when `video_metadata` lands
+  there.** `GEMINI_VERIFY_PLAN.md` deliberately targets `POST
+  /v1beta/models/{model}:generateContent`, which Google's own docs now label
+  **Legacy**, because the recommended successor (`POST /v1beta/interactions`,
+  header `Api-Revision: 2026-05-20`) does **not yet support `video_metadata`** —
+  the clipping field the entire 25-second design depends on. Google states this
+  limitation explicitly. Until it lifts, Interactions would mean sending whole
+  videos, which violates the brief and burns the 8h/day free YouTube ceiling
+  ~48x faster on a 20-minute source.
+  **Trigger:** re-check the Interactions video-understanding docs for
+  `start_offset` / `end_offset`. When present, migrate both tiers together:
+  flat `input` array of `{"type": ...}` objects instead of `contents[].parts[]`,
+  top-level `response_format` array, `steps[]` instead of `candidates[]`, and set
+  `store=false` (Interactions retains server-side by default — 1 day free, 55
+  days paid; we use neither `previous_interaction_id` nor `background=true`, so
+  opting out is free). No sunset date has been announced for `generateContent`,
+  so this is debt to watch, not an emergency.
+
+- **Rewrite the Gemini relevance criteria — they are measured as inverted.**
+  The 2026-08-21 backtest (`python backtest_relevance.py`, results in
+  `GEMINI_VERIFY_PLAN.md` §2.16) joined 96 reviewer-labelled rows to the text
+  tier's verdict. `P(Approved | model says on-niche)` is **27%** against a **38%**
+  base rate, and in Home Theater it is **0% (0 of 5)** — the five channels the
+  criteria rate most on-niche (Zero Fidelity 100, New Record Day 100, Lenny
+  Florentine 98, 5.1 Test & Clips 95, Forever Analog 95) were **all rejected**,
+  while Approved channels score a median of 10.
+  The model is answering accurately; the question is wrong. `text_criteria` asks
+  *"is this an AV-equipment review channel"*, and the reviewer appears to be
+  approving creators whose AUDIENCE would buy home-entertainment furniture while
+  rejecting established gear-review channels — a coherent commercial position
+  (sponsorship-saturated, electronics not furniture, or manufacturer-owned:
+  ADAM Audio and Dolby are both present and both Rejected).
+  **This needs the operator's commercial knowledge, not prompt engineering.**
+  Describe the creator profile actually wanted, then re-run the backtest — it is
+  free for channels already cached. `GEMINI_ENABLED` is back to `false` until then.
+  Nothing is at risk in the meantime: rescue-only means wrong criteria cost
+  reviewer attention, never prospects.
+
+- **Free-tier RPD is ~100/day, measured.** Google stopped us with a PerDay 429
+  after 106 requests on `gemini-3.5-flash-lite` (they no longer publish the
+  figure; it is per-project and only visible in AI Studio). Caps corrected to
+  80/day and 70/run. Consequence worth knowing before asking for more coverage:
+  the free tier carries the RESCUE path comfortably, but not scoring every
+  candidate in both niches daily on top of it. That would need a paid tier, and
+  per the brief the answer is to say so rather than implement it.

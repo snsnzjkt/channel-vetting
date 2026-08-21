@@ -117,7 +117,7 @@ def test_room_and_furniture_vocabulary_reaches_home_theater():
 
 # --- widening on-target must not re-admit gaming ---------------------------
 
-def test_home_theater_applies_only_the_toys_category():
+def test_home_theater_applies_only_the_measured_useful_categories():
     """
     The niche-level policy, asserted from the reviewer's labels.
 
@@ -137,7 +137,15 @@ def test_home_theater_applies_only_the_toys_category():
 
     Re-enabling a category here without a fresh backtest re-breaks this.
     """
-    assert niches.NICHES["Home Theater"]["off_target_categories"] == ["toys_and_kids"]
+    assert niches.NICHES["Home Theater"]["off_target_categories"] == [
+        "toys_and_kids",    # reviewer instruction: no Lego, no kids' doll channels
+        "story_recap",      # reviewer instruction: no manhwa recaps
+        "av_specialist",    # measured: catches 5 rejected, kills 0 approved
+    ]
+    # The four omitted categories were each measured MORE likely to kill an
+    # approved channel than to catch a rejected one. Do not add them back.
+    for harmful in ("gaming", "phones_and_pcs", "generic_gadgets", "ai_and_crypto"):
+        assert harmful not in niches.NICHES["Home Theater"]["off_target_categories"]
 
 
 def test_the_approved_tech_profile_survives_the_home_theater_gate():
@@ -179,3 +187,68 @@ def test_toy_story_is_not_a_term():
     brand appears on branded merchandise and is not evidence of kids' content.
     """
     assert "toy story" not in niches.OFF_TARGET_TERMS["toys_and_kids"]
+
+
+# --- criteria mined from the labels, 2026-08-22 ----------------------------
+
+def test_av_specialist_vocabulary_is_an_exclusion_not_a_rescue():
+    """
+    The inversion, pinned from both sides.
+
+    Measured over 21 approved / 31 rejected Home Theater rows:
+      as an exclusion  -> catches 5 rejected, kills 0 approved
+      as rescue vocab  -> rescued 6 rejected, 0 approved
+
+    So the same words must be OUT of on_target_terms and IN the category list.
+    Both halves matter: a term on both lists scores off == on, and the gate
+    only fires on off > on.
+    """
+    ht = niches.NICHES["Home Theater"]
+    assert "av_specialist" in ht["off_target_categories"]
+    for term in ("speaker", "audiophile", "hi-fi", "turntable", "klipsch"):
+        assert term not in ht["on_target_terms"], (
+            f"{term!r} is back in on_target_terms, where it only ever rescued "
+            "channels the reviewer rejected"
+        )
+
+
+def test_the_four_rejected_av_reviewers_are_caught():
+    """Zero Fidelity, Lenny Florentine, Forever Analog, New Record Day."""
+    titles = ["Why Waste your Money on Expensive Speakers?"] * 13 + ["Weekly update"] * 12
+    reason, detail = main.off_target_reason(HT, "Hi-Fi on a budget", titles)
+    assert reason == main.DROP_OFF_TARGET
+    assert "av_specialist" in detail
+
+
+def test_manhwa_recap_is_excluded_without_losing_the_keyword():
+    """
+    Reviewer instruction after "1221 Manhwa Recap" reached the table. The
+    "movie review and reaction" KEYWORD is kept — removing it would cost real
+    volume — so the content type is excluded instead of the query.
+    """
+    assert "movie review and reaction" in niches.NICHES["Home Theater"]["keywords"]
+    titles = ["I Became the Strongest | Manhwa Recap Ep 1-40"] * 20
+    reason, detail = main.off_target_reason(HT, "", titles)
+    assert reason == main.DROP_OFF_TARGET
+    assert "story_recap" in detail
+
+
+def test_lifestyle_states_its_categories_explicitly():
+    """
+    Explicit so that adding a category to OFF_TARGET_TERMS never silently
+    changes this niche. av_specialist is deliberately absent — measured for
+    Home Theater, untested here.
+    """
+    cats = niches.NICHES["Lifestyle Sofa"]["off_target_categories"]
+    assert "av_specialist" not in cats
+    for expected in ("property_showcase", "travel_vlog", "story_recap"):
+        assert expected in cats
+
+
+def test_realestate_listing_was_deliberately_not_shipped():
+    """
+    Tested and rejected: +2 rejected but -1 approved. A net of +1 is not worth
+    a lost prospect when the brief is "still want many output, not super
+    strict". Recorded so nobody re-adds it as an obvious improvement.
+    """
+    assert "realestate_listing" not in niches.OFF_TARGET_TERMS

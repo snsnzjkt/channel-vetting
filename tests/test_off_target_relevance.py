@@ -175,14 +175,29 @@ def test_a_niche_without_rescue_vocabulary_disables_the_gate():
     assert reason is None
 
 
-def test_an_on_niche_home_theater_channel_is_kept():
-    """@zerofidelity — a 34-character bio and unambiguous hi-fi titles."""
-    reason, _ = main.off_target_reason(
+def test_a_dedicated_hifi_reviewer_is_now_DROPPED_for_home_theater():
+    """
+    @zerofidelity. This test used to assert the opposite — that a hi-fi channel
+    is the on-niche case and must be kept. THE REVIEWER REJECTED ZERO FIDELITY,
+    and Lenny Florentine, Forever Analog, New Record Day and 5.1 Test & Clips
+    with it: every dedicated AV reviewer in the labelled set.
+
+    Measured over 21 approved / 31 rejected Home Theater rows, AV-specialist
+    vocabulary catches 5 rejected and 0 approved as an exclusion, and rescued 6
+    rejected and 0 approved when it sat in on_target_terms. "speakers" appears
+    in 0 of 21 approved channels and 8 of 31 rejected.
+
+    The reviewer buys an AUDIENCE for home-entertainment furniture, not gear
+    expertise. A budget hi-fi reviewer is the wrong creator for that, however
+    on-topic the vocabulary looks to an engineer.
+    """
+    reason, detail = main.off_target_reason(
         HT, "Hi-Fi on a budget",
         _titles(("Why Waste your Money on Expensive Speakers?", 25),
                 ("An Excellent, Reliable CD-Player for Audiophiles!", 25)),
     )
-    assert reason is None
+    assert reason == main.DROP_OFF_TARGET
+    assert "av_specialist" in detail
 
 
 def test_lifestyle_channels_are_untouched():

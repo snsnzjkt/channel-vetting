@@ -460,3 +460,58 @@ verdicts are worth more than any amount of further reasoning here.
 - Location / search zone — despite being 64% of drops.
 - Gender filter.
 - Credit budget.
+
+---
+
+## 12. Criteria optimization, 2026-08-22 — mined from the labels, not guessed
+
+Every candidate criterion was scored against the reviewer's own verdicts (21/31
+Home Theater, 37/53 Lifestyle) before shipping. A term ships only if it catches
+more REJECTED than it kills APPROVED.
+
+| candidate | kills approved | catches rejected | shipped? |
+|---|---|---|---|
+| `av_specialist` (HT) | 0/21 | 5/31 | **yes** |
+| `story_recap` (both) | 0 | 0 | yes — instruction, zero harm |
+| `property_showcase` (LS) | 0/37 | 2/53 | **yes** |
+| `travel_vlog` (LS) | 0/37 | 2/53 | **yes** |
+| `realestate_listing` (LS) | **1**/37 | 2/53 | **NO** — see below |
+| `reaction_farm`, `news_politics`, `sports_league`, `music_perf`, `food_only` | 0 | 0 | no — no effect |
+
+`realestate_listing` was rejected deliberately. Net +1 is not worth a lost
+prospect when the brief is "still want many output, not super strict".
+
+### The inversion that mattered
+
+`av_specialist` vocabulary was in Home Theater's **on_target_terms**, i.e. as
+RESCUE vocabulary. Measured there it rescued **0 approved and 6 rejected**
+channels — working exclusively for the channels the reviewer turns down.
+"speakers" appears in 0 of 21 approved titles and 8 of 31 rejected.
+
+It is an exclusion now, and removed from on_target_terms. Both halves are
+required: a term on both lists scores off == on, and the gate needs off > on.
+
+Caught: Zero Fidelity (66%), Lenny Florentine (62%), New Record Day (42%),
+Forever Analog (16%) — every dedicated AV reviewer the reviewer rejected.
+
+### Manhwa
+
+The `movie review and reaction` KEYWORD is kept. Removing it would cost real
+volume, and movie/reaction creators are a plausible home-entertainment
+audience. The content type is excluded instead of the query that found it.
+
+### Net effect on the gate
+
+```
+                        approved dropped     rejected caught
+  before this session   14/21  (67%)         9/31  (29%)     discrimination -38%
+  after                  0/21  ( 0%)         4/31  (13%)     discrimination +13%
+```
+
+Zero approved channels lost, and the gate now points the right way. Lifestyle
+went from completely inert (0/37, 0/53) to 0 approved / 1 rejected.
+
+### Still not strict
+Nothing here narrows discovery. Every change is a targeted exclusion measured
+to cost zero approved channels. Volume levers (geography, gender, budget)
+remain untouched by instruction.

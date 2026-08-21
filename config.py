@@ -433,19 +433,34 @@ GEMINI_MIN_CONFIDENCE = float(os.getenv("GEMINI_MIN_CONFIDENCE", 0.6))
 # fallbacks so the operator's notes stay true, but the GEMINI_-prefixed names are
 # canonical: every other vendor ceiling in this file is vendor-prefix-first
 # (INFLUENCERS_MAX_*, OUTREACH_MAX_*) and there is no bare MAX_* var anywhere.
+# MEASURED 2026-08-21, and this is the one number in this block that is not a
+# guess. A backtest run issued 106 requests (103 text + 3 video) on
+# gemini-3.5-flash-lite and Google answered the 107th with a PerDay 429. So the
+# free-tier RPD for this model on this project is ~100/day — NOT the 600 an
+# earlier revision defaulted to, which could never bind because Google's own
+# limit hit first. Google no longer publishes per-model free RPD (it is
+# per-project, visible only in AI Studio), so measurement is the only way to
+# know, and the number may differ on another project.
+#
+# 80/day leaves headroom to stop BEFORE Google does, which matters: our own cap
+# is a clean pause that marks candidates unavailable, whereas walking into
+# Google's limit burns a request to discover it and latches the run.
 GEMINI_MAX_REQUESTS_PER_RUN = int(
     os.getenv("GEMINI_MAX_REQUESTS_PER_RUN")
-    or os.getenv("MAX_GEMINI_REQUESTS_PER_RUN", 300)
+    or os.getenv("MAX_GEMINI_REQUESTS_PER_RUN", 70)
 )
 GEMINI_MAX_REQUESTS_PER_DAY = int(
     os.getenv("GEMINI_MAX_REQUESTS_PER_DAY")
-    or os.getenv("MAX_GEMINI_REQUESTS_PER_DAY", 600)
+    or os.getenv("MAX_GEMINI_REQUESTS_PER_DAY", 80)
 )
+# Video is a SUBSET of the totals above, so these only bite when video would
+# otherwise crowd out the text tier. Also the only caps that touch the free
+# tier's separate 8h/day YouTube allowance.
 GEMINI_MAX_VIDEO_REQUESTS_PER_RUN = int(
-    os.getenv("GEMINI_MAX_VIDEO_REQUESTS_PER_RUN", 60)
+    os.getenv("GEMINI_MAX_VIDEO_REQUESTS_PER_RUN", 30)
 )
 GEMINI_MAX_VIDEO_REQUESTS_PER_DAY = int(
-    os.getenv("GEMINI_MAX_VIDEO_REQUESTS_PER_DAY", 120)
+    os.getenv("GEMINI_MAX_VIDEO_REQUESTS_PER_DAY", 40)
 )
 
 # Wall-clock brake. GEMINI_TIMEOUT x the run cap would exceed the workflow's own

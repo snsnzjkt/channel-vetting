@@ -1013,6 +1013,103 @@ audio-visual hardware or entertainment spaces."* The criteria discriminate.
 backtest against the 146 labelled rows (rollout step 7), multi-window sampling,
 and wiring the text score into `Overall Score`.
 
+## 2.16 BACKTEST RESULT (2026-08-21) — READ THIS BEFORE ENABLING ANYTHING
+
+Rollout step 7 was run. **The relevance criteria as written do not predict the
+reviewer's verdict, and in the Home Theater niche they are inverted.** Recorded
+here in full because this is the measurement the repo's own culture demands, and
+because the answer is negative.
+
+Method: 96 rows with a reviewer `Status` of Approved or Rejected, joined to the
+Tier-1 text verdict for the same channel. Reads only, no writes.
+Reproduce with `python backtest_relevance.py`.
+
+```
+ALL NICHES  (n=96: 36 Approved / 60 Rejected)
+                       reviewer Approved   reviewer Rejected
+  model on_niche = T            6                  16
+  model on_niche = F           30                  44
+  P(Approved | model says ON-niche)  = 27%
+  P(Approved | model says OFF-niche) = 41%
+  base rate P(Approved)              = 38%      <- ON-niche is WORSE than chance
+
+HOME THEATER  (n=52: 21 Approved / 31 Rejected)
+  model on_niche = T            0                   5
+  model on_niche = F           21                  26
+  P(Approved | model says ON-niche)  =  0%      <- zero for five
+  P(Approved | model says OFF-niche) = 45%
+  base rate                          = 40%
+  Approved relevance: median 10, range 0-45
+  Rejected relevance: median 10, range 0-100
+
+LIFESTYLE SOFA  (n=44: 15 Approved / 29 Rejected)
+  P(Approved | ON-niche)  = 35%   P(Approved | OFF-niche) = 33%   base 34%
+                                              <- flat. no signal either way.
+```
+
+**The five most on-niche Home Theater channels by these criteria — Zero Fidelity
+(100), New Record Day (100), Lenny Florentine (98), 5.1 Test & Clips (95),
+Forever Analog (95) — were ALL rejected by the reviewer.** Meanwhile Approved
+channels score a median of 10.
+
+**Diagnosis.** The criteria ask *"is this an AV-equipment review channel?"* The
+operator is evidently approving something else: creators whose **audience** would
+buy home-entertainment furniture — builders, vloggers, home-focused lifestyle
+creators — and rejecting the established gear-review channels, which is a
+coherent commercial position (saturated with sponsorships, reviewing electronics
+rather than furniture, or manufacturer-owned like ADAM Audio and Dolby, both
+present and both Rejected). The model is answering the question it was asked
+accurately. **The question is wrong**, and rewriting it needs the operator's
+commercial knowledge, not more prompt engineering.
+
+**Consequences, and they are binding:**
+
+1. **Do NOT wire this score into `Overall Score`.** It is worse than the constant
+   it would replace. §4's deferral stands, now on evidence rather than caution.
+2. **Do not give the current criteria rescue authority in production.** With
+   `GEMINI_ENABLED=true` and these criteria the feature would rescue channels the
+   reviewer then rejects — wasted review attention.
+3. **The rescue-only architecture is vindicated.** A wrong criterion here costs
+   *reviewer attention*, not prospects: nothing is dropped, nothing is written to
+   `rejected_handles.json`, and switching the feature off restores today's
+   behaviour exactly. Under rev 1's drop-authority design this same discovery
+   would have arrived after a quarter of silently deleted prospects.
+4. **The next step is a criteria rewrite, not a code change.** The instrument
+   works — the plumbing, the parsing, the clipping, the caps and the audit trail
+   are all proven. What it is pointed at is wrong. A rewrite should describe the
+   creator profile the operator actually approves, then re-run
+   `backtest_relevance.py`, which now costs nothing new for already-cached
+   channels.
+
+## 2.17 MEASURED FREE-TIER CEILING (2026-08-21)
+
+The backtest also answered the question §1 finding 3 could not: **what the free
+tier will actually carry.**
+
+**106 requests** (103 text + 3 video) on `gemini-3.5-flash-lite`, then Google
+answered with a **PerDay 429**. So the free-tier RPD on this project is ~100/day.
+Google no longer publishes the figure — it is per-project and visible only in AI
+Studio — so measurement was the only way to learn it, and it may differ elsewhere.
+
+**Rev 2's defaults were wrong by ~6x** (600/day, 300/run) and could never bind,
+because Google's own limit hit first. Corrected to **80/day, 70/run** (video
+sub-caps 40/30), which stop *before* Google does — a clean pause that marks
+candidates `unavailable`, rather than burning a request to discover the wall and
+latching the run.
+
+**Answering the brief's question directly — "tell me clearly if the free tier
+cannot support the required volume":** at ~100 requests/day it supports the
+**rescue path** (the flagged subset, plus its video confirmations) comfortably.
+It does **not** support scoring every candidate in both niches every day on top
+of that. If the broad advisory score is wanted at full coverage, that needs a
+paid tier — and per the brief, the answer is to say so rather than implement it.
+Given §2.16, the broad score has not earned that anyway.
+
+**The guard behaved exactly as designed** when it hit the wall: one PerDay 429,
+no retry, no model switch, the day counter pinned to its ceiling so a re-run
+short-circuits, 36 remaining candidates marked `unavailable`, and **no bill** —
+the project has no billing account, so a charge was structurally impossible.
+
 ## 3. Tests
 
 All Gemini HTTP mocked — `tests/conftest.py` already hard-fails any real request

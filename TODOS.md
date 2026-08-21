@@ -189,3 +189,31 @@ Deferred work, with the reason it was deferred. Created 2026-08-14 by the
   days paid; we use neither `previous_interaction_id` nor `background=true`, so
   opting out is free). No sunset date has been announced for `generateContent`,
   so this is debt to watch, not an emergency.
+
+- **Rewrite the Gemini relevance criteria — they are measured as inverted.**
+  The 2026-08-21 backtest (`python backtest_relevance.py`, results in
+  `GEMINI_VERIFY_PLAN.md` §2.16) joined 96 reviewer-labelled rows to the text
+  tier's verdict. `P(Approved | model says on-niche)` is **27%** against a **38%**
+  base rate, and in Home Theater it is **0% (0 of 5)** — the five channels the
+  criteria rate most on-niche (Zero Fidelity 100, New Record Day 100, Lenny
+  Florentine 98, 5.1 Test & Clips 95, Forever Analog 95) were **all rejected**,
+  while Approved channels score a median of 10.
+  The model is answering accurately; the question is wrong. `text_criteria` asks
+  *"is this an AV-equipment review channel"*, and the reviewer appears to be
+  approving creators whose AUDIENCE would buy home-entertainment furniture while
+  rejecting established gear-review channels — a coherent commercial position
+  (sponsorship-saturated, electronics not furniture, or manufacturer-owned:
+  ADAM Audio and Dolby are both present and both Rejected).
+  **This needs the operator's commercial knowledge, not prompt engineering.**
+  Describe the creator profile actually wanted, then re-run the backtest — it is
+  free for channels already cached. `GEMINI_ENABLED` is back to `false` until then.
+  Nothing is at risk in the meantime: rescue-only means wrong criteria cost
+  reviewer attention, never prospects.
+
+- **Free-tier RPD is ~100/day, measured.** Google stopped us with a PerDay 429
+  after 106 requests on `gemini-3.5-flash-lite` (they no longer publish the
+  figure; it is per-project and only visible in AI Studio). Caps corrected to
+  80/day and 70/run. Consequence worth knowing before asking for more coverage:
+  the free tier carries the RESCUE path comfortably, but not scoring every
+  candidate in both niches daily on top of it. That would need a paid tier, and
+  per the brief the answer is to say so rather than implement it.

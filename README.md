@@ -301,10 +301,10 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `GEMINI_TIMEOUT` | 60 | Longer than other timeouts: Google fetches and decodes the clip server-side |
 | `GEMINI_MAX_RETRIES` | 1 | 5xx/network only. Never a 429 — that is the free-tier wall |
 | `GEMINI_MIN_CONFIDENCE` | 0.6 | **Provisional.** Below this a candidate is not rescued. Raising it never causes a drop, only fewer rescues |
-| `GEMINI_MAX_REQUESTS_PER_RUN` | 300 | Both tiers, all niches, per process. `MAX_GEMINI_REQUESTS_PER_RUN` is accepted as an alias |
-| `GEMINI_MAX_VIDEO_REQUESTS_PER_RUN` | 60 | The only cap that touches the free tier's 8h/day YouTube allowance |
-| `GEMINI_MAX_REQUESTS_PER_DAY` | 600 | Persisted in `gemini_log.json`, keyed on the **Pacific** day (Google's quota day) |
-| `GEMINI_MAX_VIDEO_REQUESTS_PER_DAY` | 120 | As above, video only |
+| `GEMINI_MAX_REQUESTS_PER_RUN` | 70 | Both tiers, all niches, per process. `MAX_GEMINI_REQUESTS_PER_RUN` is accepted as an alias |
+| `GEMINI_MAX_VIDEO_REQUESTS_PER_RUN` | 30 | The only cap that touches the free tier's 8h/day YouTube allowance |
+| `GEMINI_MAX_REQUESTS_PER_DAY` | 80 | Persisted in `gemini_log.json`, keyed on the **Pacific** day (Google's quota day) |
+| `GEMINI_MAX_VIDEO_REQUESTS_PER_DAY` | 40 | As above, video only |
 | `GEMINI_MAX_SECONDS_PER_RUN` | 900 | Wall-clock brake. Keep below the workflow's `timeout-minutes` |
 | `GEMINI_CLIP_SECONDS` / `_MIN_START_SECONDS` / `_START_FRACTION` | 25 / 90 / 0.25 | Which 25 seconds. Not the opening — that is intro, branding and the sponsor read |
 | `GEMINI_VERDICT_VERSION` | 1 | Bump to invalidate every cached verdict by hand after a prompt change |

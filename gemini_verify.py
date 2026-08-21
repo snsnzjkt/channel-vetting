@@ -251,7 +251,8 @@ def build_prompt(criteria) -> str:
 
 
 def verdict_confirms(payload: dict, min_confidence: float,
-                     min_criteria_ratio: float) -> tuple[bool, str]:
+                     min_criteria_ratio: float,
+                     required_names=()) -> tuple[bool, str]:
     """
     Whether a video verdict confirms, and the reason in one phrase.
 
@@ -276,11 +277,27 @@ def verdict_confirms(payload: dict, min_confidence: float,
     if conf < min_confidence:
         return False, f"below confidence ({conf:.2f})"
 
+    results = [c for c in (payload.get("criteria_results") or [])
+               if isinstance(c, dict)]
+
+    # REQUIRED criteria are a veto, and they are checked BEFORE the aggregate.
+    #
+    # Why this exists: the ratio route is meant to loosen how much CONTENT
+    # relevance is demanded, and it did — but it also loosened a criterion that
+    # should never be partially satisfied. Measured 2026-08-21: the
+    # creator-vs-brand test correctly caught ADAM Audio ("a branded watermark
+    # throughout and promotional marketing content from a manufacturer"), and the
+    # 0.5 ratio then re-admitted it at 2/3. A manufacturer is not two-thirds
+    # eligible. So a criterion marked required in niches.py disqualifies outright.
+    required = {c["name"] for c in (required_names or ())}
+    if required:
+        for c in results:
+            if c.get("criterion") in required and c.get("matches") is not True:
+                return False, f"failed a required criterion: {c.get('criterion')}"
+
     if payload.get("matches") is True:
         return True, f"video confirmed {conf:.2f}"
 
-    results = [c for c in (payload.get("criteria_results") or [])
-               if isinstance(c, dict)]
     if not results:
         return False, f"video did not confirm ({conf:.2f})"
     matched = sum(1 for c in results if c.get("matches") is True)
@@ -972,7 +989,8 @@ class GeminiVerifier:
                     return Judgement(STATE_UNAVAILABLE,
                                      f"unavailable ({vv.reason_code})", video_url=url)
                 confirms, why = verdict_confirms(
-                    vv.payload, self.min_confidence, self.min_criteria_ratio)
+                    vv.payload, self.min_confidence, self.min_criteria_ratio,
+                    required_names=[c for c in video_criteria if c.get("required")])
                 if flagged and confirms:
                     rescued = True
                     detail = f"rescued ({why})"

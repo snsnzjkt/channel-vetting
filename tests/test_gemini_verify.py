@@ -782,3 +782,48 @@ def test_an_empty_criteria_breakdown_never_confirms(monkeypatch):
     ok, why = gv.verdict_confirms(
         {"matches": False, "confidence": 1.0, "criteria_results": []}, 0.6, 0.0)
     assert ok is False
+
+
+# --- required criteria are a veto, not a score ---------------------------
+
+REQ = [{"name": "brand", "required": True, "test": "x"}]
+
+
+def _breakdown(brand_ok, other_ok, conf=0.9):
+    return {"matches": False, "confidence": conf, "criteria_results": [
+        {"criterion": "brand", "matches": brand_ok},
+        {"criterion": "a", "matches": other_ok},
+        {"criterion": "b", "matches": other_ok}]}
+
+
+def test_a_failed_required_criterion_vetoes_however_good_the_rest_is():
+    """
+    Measured 2026-08-21: the creator-vs-brand test correctly caught ADAM Audio
+    ("a branded watermark throughout and promotional marketing content from a
+    manufacturer") and the 0.5 ratio then re-admitted it at 2/3. A manufacturer
+    is not two-thirds eligible.
+    """
+    ok, why = gv.verdict_confirms(_breakdown(False, True), 0.6, 0.5, REQ)
+    assert ok is False
+    assert "required criterion" in why and "brand" in why
+
+
+def test_a_required_criterion_also_vetoes_a_true_aggregate():
+    """The veto is checked BEFORE the model's own aggregate, not after."""
+    payload = _breakdown(False, True)
+    payload["matches"] = True
+    ok, why = gv.verdict_confirms(payload, 0.6, 0.5, REQ)
+    assert ok is False, "the aggregate must not override a failed veto"
+
+
+def test_passing_the_veto_still_needs_the_content_ratio():
+    assert gv.verdict_confirms(_breakdown(True, False), 0.6, 0.5, REQ)[0] is False
+    assert gv.verdict_confirms(_breakdown(True, True), 0.6, 0.5, REQ)[0] is True
+
+
+def test_both_niches_mark_the_brand_criterion_required():
+    import niches
+    for name, cfg in niches.NICHES.items():
+        req = [c for c in cfg["video_criteria"] if c.get("required")]
+        assert len(req) == 1, f"{name}: expected exactly one required criterion"
+        assert "brand" in req[0]["name"], f"{name}: {req[0]['name']}"

@@ -130,6 +130,21 @@ NICHES = {
                      "footage they appear to have shot themselves? Answer no only "
                      "if this looks like reposted manufacturer material, stock "
                      "footage, or a slideshow of stills with no creator present."},
+            {"name": "an independent creator, not a brand",
+             # REQUIRED: a veto, not a scored criterion. The ratio route above is
+             # meant to loosen how much CONTENT relevance is demanded, and a
+             # manufacturer or publisher is not two-thirds eligible. Measured:
+             # ADAM Audio was correctly caught here and then re-admitted at 2/3
+             # before this flag existed.
+             "required": True,
+             "test": "Is this an individual creator's own channel, rather than a "
+                     "company, retailer, publisher, manufacturer, studio or TV "
+                     "brand posting produced marketing content? Signs of a brand: "
+                     "polished agency-style production with no identifiable host, "
+                     "a presenter speaking on behalf of a company, product B-roll "
+                     "with voiceover and no personality, or a logo bug throughout. "
+                     "A single person filming in their own home or workshop is an "
+                     "independent creator even when the production is good."},
         ],
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
@@ -342,6 +357,21 @@ NICHES = {
                      "footage they appear to have shot themselves? Answer no only "
                      "if this looks like stock footage, a slideshow of stills, or "
                      "reposted material with no creator present."},
+            {"name": "an independent creator, not a brand",
+             # REQUIRED: a veto, not a scored criterion. The ratio route above is
+             # meant to loosen how much CONTENT relevance is demanded, and a
+             # manufacturer or publisher is not two-thirds eligible. Measured:
+             # ADAM Audio was correctly caught here and then re-admitted at 2/3
+             # before this flag existed.
+             "required": True,
+             "test": "Is this an individual creator's own channel, rather than a "
+                     "company, retailer, publisher, manufacturer, studio or TV "
+                     "brand posting produced marketing content? Signs of a brand: "
+                     "polished agency-style production with no identifiable host, "
+                     "a presenter speaking on behalf of a company, product B-roll "
+                     "with voiceover and no personality, or a logo bug throughout. "
+                     "A single person filming in their own home or workshop is an "
+                     "independent creator even when the production is good."},
         ],
         "min_avg_views": 10_000,
         "min_channel_age_months": None,

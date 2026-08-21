@@ -9,6 +9,11 @@ Run with --test to sanity-check the whole pipeline cheaply (1 keyword,
 5 results, first niche only) before spending real quota on a full run.
 """
 import argparse
+from collections import Counter
+from datetime import datetime, timezone
+
+import config as _config
+import run_metrics
 import inspect
 import logging
 import math
@@ -1045,6 +1050,11 @@ def push_until_full(
         # candidates that carry a handle, i.e. the discovery path, which is the
         # only path where a re-return costs money.
         "rejected_handles": set(),
+        # Every drop reason this batch produced, counted. Nothing aggregated
+        # these before: `qualification` was read once for the TRANSIENT_DROP_REASONS
+        # test below and thrown away, so "which gate consumed the candidates" was
+        # answerable only by reading log lines. run_metrics.jsonl needs it as data.
+        "drop_reasons": Counter(),
     }
     # Candidates enriched since the qualified budget filled without producing a
     # flagged row. See FLAGGED_ONLY_PATIENCE.
@@ -1106,6 +1116,7 @@ def push_until_full(
         )
         if record is None:
             counts["skipped"] += 1
+            counts["drop_reasons"][qualification or "unknown"] += 1
             # `qualification` is the DROP REASON on this branch (build_record
             # returns (None, reason)), which is what makes the durable/transient
             # split readable here without a second return value.
@@ -1841,6 +1852,7 @@ def _run_discovery_rounds(
     flagged_headroom: int,
     tracked_handles=(),
     verifier=None,
+    drop_reasons=None,
 ) -> dict:
     """
     Fill a niche's daily budget from influencers.club discovery instead of
@@ -1971,6 +1983,8 @@ def _run_discovery_rounds(
         pushed_flagged += counts["flagged"]
         total_skipped += counts["skipped"]
         pushed_ids |= counts["pushed_ids"]
+        if drop_reasons is not None:
+            drop_reasons.update(counts["drop_reasons"])
 
         # Persisted per ROUND, not once at the end of the niche: a run that dies
         # mid-niche (quota abort, runner timeout, the 60-minute CI ceiling) has
@@ -2012,6 +2026,7 @@ def run_niche(
     enricher=None,
     discovery=None,
     verifier=None,
+    drop_reasons=None,
 ) -> tuple[int, int, set[str], bool]:
     """
     Run discovery -> pre-filter -> enrich -> score -> push for one niche's
@@ -2112,9 +2127,37 @@ def run_niche(
     # survives the gates than raw YouTube search does. With no key — or a
     # niche without filters — control falls straight through to the keyword
     # loop, so the pipeline still runs when influencers.club is unavailable.
+    # `discovery_source` lets a niche opt OUT of paid discovery and back onto the
+    # free YouTube keyword loop below. Defaults to "influencers", so a niche that
+    # says nothing behaves exactly as before.
+    #
+    # Why the choice needs to be per niche. The vendor filters server-side, so a
+    # far larger fraction of what it returns survives the gates — that is why it
+    # is the default and why Lifestyle Sofa keeps it. But its pool is FINITE per
+    # query, and Home Theater has very nearly consumed its own: measured
+    # 2026-08-22, gross 334, and 279 after its 262 cached rejects are excluded.
+    # At the observed 1 row per 100-150 creators that is about two rows left in
+    # the entire paid corpus, after which the niche returns zero however the
+    # gates are tuned.
+    #
+    # `keywords` costs YouTube quota instead of vendor credits and indexes a
+    # different, far larger corpus. It converts worse per candidate examined —
+    # that trade is the whole point of the vendor — but "worse conversion on an
+    # unbounded corpus" beats "good conversion on an exhausted one". No quality
+    # gate changes either way: every candidate from both sources goes through
+    # the same process_candidate.
+    discovery_source = niche_config.get("discovery_source", "influencers")
     use_discovery = (
-        discovery is not None and discovery.enabled and "discovery_filters" in niche_config
+        discovery is not None and discovery.enabled
+        and "discovery_filters" in niche_config
+        and discovery_source == "influencers"
     )
+    if discovery_source != "influencers":
+        logger.info(
+            "'%s' is configured for discovery_source=%r — using the free YouTube "
+            "keyword loop instead of paid influencers.club discovery.",
+            niche_name, discovery_source,
+        )
     if use_discovery:
         # This niche's own tracked handles, so the vendor never returns — and
         # never bills for — a creator already in this table. Empty until the
@@ -2126,6 +2169,7 @@ def run_niche(
             qualified_headroom, flagged_headroom,
             tracked_handles=get_tracked_handles(table_name),
             verifier=verifier,
+            drop_reasons=drop_reasons,
         )
         pushed_qualified = d["qualified"]
         pushed_flagged = d["flagged"]
@@ -2221,6 +2265,8 @@ def run_niche(
         pushed_flagged += counts["flagged"]
         total_skipped += counts["skipped"]
         pushed_ids |= counts["pushed_ids"]
+        if drop_reasons is not None:
+            drop_reasons.update(counts["drop_reasons"])
         # Every candidate offered to push_until_full is now spent, whether it
         # was written or dropped. push_until_full only returns before reading
         # its whole list when BOTH budgets are full, which also ends this
@@ -2377,6 +2423,14 @@ def run(
     elif USE_PLAYWRIGHT_STEALTH:
         logger.info("Browser email step is live (Playwright + stealth).")
 
+    # Per-run yield accounting. Populated as the loop goes and written in the
+    # `finally` below, so a run that dies mid-way still records what it spent —
+    # see the write call for why that placement is load-bearing.
+    run_started_at = datetime.now(timezone.utc).isoformat()
+    _run_completed = False
+    drop_reasons: Counter = Counter()
+    niche_metrics: dict[str, dict] = {}
+
     try:
         for niche_name, niche_config in niches.items():
             missing_keys = [key for key in REQUIRED_NICHE_KEYS if key not in niche_config]
@@ -2402,15 +2456,56 @@ def run(
                 enricher,
                 discovery,
                 verifier,
+                drop_reasons=drop_reasons,
             )
             total_discovered += discovered
             total_processed += processed
+            # Per niche, not just the total: the question this file was built to
+            # answer is "did Home Theater stop returning zero", and a combined
+            # figure cannot answer it.
+            niche_metrics[niche_name] = {
+                "rows": processed, "discovered": discovered,
+                "cap_check_completed": cap_check_completed,
+            }
             any_cap_check_completed = any_cap_check_completed or cap_check_completed
             # So a later niche in this same run also sees channels this one
             # just pushed, rather than only picking up prior runs' state.
             globally_tracked_ids |= newly_tracked_ids
+        # Last statement in the try: reaching it means every niche returned.
+        _run_completed = True
     finally:
         scraper.close()
+        # IN THE `finally`, deliberately. The run summary below is not: it sits
+        # after this block and is skipped by any exception from run_niche, by
+        # the `raise SystemExit(1)` further down, by a CI timeout and by
+        # KeyboardInterrupt. Those are exactly the runs worth recording, because
+        # they already spent money. The counters above accumulate in place, so
+        # a partial write is truthful rather than empty.
+        #
+        # Honest limitation: run_niche merges its counters only on return, so a
+        # crash MID-niche loses that niche's rows. The record is therefore "as
+        # of the last completed niche", which is what `status` is for.
+        run_metrics.write(run_metrics.build(
+            status="completed" if _run_completed else "aborted",
+            started_at=run_started_at,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            niches=niche_metrics,
+            drop_reasons=drop_reasons,
+            credits_spent=getattr(discovery, "credits_spent", 0.0),
+            creators_billed=getattr(discovery, "creators_billed", 0),
+            quota_used=get_today_spend(),
+            config_snapshot={
+                "DAILY_QUALIFIED_CAP": DAILY_QUALIFIED_CAP,
+                "DAILY_FLAGGED_CAP": DAILY_FLAGGED_CAP,
+                "max_discovery_credits": max_discovery_credits,
+                "MIN_VIEWS_PER_VIDEO_RATIO": MIN_VIEWS_PER_VIDEO_RATIO,
+                # Read through the module, not a `from config import` copy:
+                # this one is not otherwise bound in main, and going through
+                # the module keeps the snapshot honest if the value is retuned.
+                "DISCOVERY_SUBSCRIBER_FLOOR_RATIO": getattr(
+                    _config, "DISCOVERY_SUBSCRIBER_FLOOR_RATIO", None),
+            },
+        ))
 
     quota_used = get_today_spend()
     print("\n--- Run summary ---")

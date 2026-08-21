@@ -15,6 +15,8 @@ No network: every YouTube/Airtable/browser call is monkeypatched.
 """
 import sys
 
+from collections import Counter
+
 import pytest
 
 from airtable_client import AirtableReadError
@@ -253,7 +255,8 @@ def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
     )
 
     assert result == {"qualified": 0, "flagged": 0, "skipped": 1,
-                      "pushed_ids": set(), "rejected_handles": set()}
+                      "pushed_ids": set(), "rejected_handles": set(),
+                      "drop_reasons": Counter({"blocked": 1})}
 
 
 # --- M13: the email chain must be called WITH the scraper -----------------
@@ -636,7 +639,10 @@ def test_none_record_counts_as_skipped_not_flagged(monkeypatch):
     )
 
     assert result == {"qualified": 0, "flagged": 0, "skipped": 1,
-                      "pushed_ids": set(), "rejected_handles": set()}
+                      "pushed_ids": set(), "rejected_handles": set(),
+                      # The drop reason is now counted, not just read once for
+                      # the TRANSIENT_DROP_REASONS test and discarded.
+                      "drop_reasons": Counter({"unreachable": 1})}
 
 
 # --- MINOR 3: --daily-cap must cap the flagged budget too, not just qualified --

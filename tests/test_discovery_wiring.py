@@ -482,7 +482,13 @@ def test_the_niche_filters_reach_the_vendor_payload(monkeypatch):
     monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
     monkeypatch.setattr(main, "process_candidate", lambda *a, **k: (None, "skip"))
 
-    niche_config = main.NICHES["Home Theater"]
+    # Home Theater is on discovery_source="search_list" as of 2026-08-22 (its
+    # paid pool measured 279 net), so it no longer reaches the vendor at all.
+    # This test is about the FILTER WIRING, not about which source a niche uses,
+    # so force the paid path explicitly. Without the override the run falls
+    # through to the keyword loop and conftest hard-fails on a real search.list
+    # request — which is how this was caught.
+    niche_config = dict(main.NICHES["Home Theater"], discovery_source="influencers")
     main.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
         niche_config, None, None, _CapturingDiscovery(),

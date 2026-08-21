@@ -36,3 +36,4 @@ gemini_cache.json*
 # same creator-PII reasoning as outreach_preview/. Regenerate with
 # `python backtest_relevance.py`.
 backtest_results.json*
+run_metrics.jsonl

@@ -180,6 +180,30 @@ NICHES = {
         # verified live: 'any' | 'male' | 'female'). There is also a separate
         # audience.gender filter (target creators whose AUDIENCE skews male) if
         # audience composition ever matters more than the creator's own gender.
+        # SET 2026-08-22 after measuring the NET addressable pool, which is the
+        # number every previous attempt at this niche was missing.
+        #
+        #   gross pool (query only) ........ 334
+        #   cached rejects ................. 262
+        #   NET, rejects excluded .......... 279   <- ~2 rows at the observed rate
+        #
+        # Every prior measurement here was GROSS: measure_discovery_pool's total()
+        # sent `filters` and never `exclude_handles`, so it answered "creators
+        # matching this query", never "creators we can still buy". Run it with
+        # --net for the honest figure.
+        #
+        # 279 buyable creators is not a strictness problem and no gate change
+        # reaches it. The `keywords` list above costs zero vendor credits, indexes
+        # YouTube directly rather than the vendor's creator DB, and is not
+        # exhaustible in the same way. It converts worse per candidate — the
+        # vendor's server-side filtering is real value — but this niche has run
+        # out of vendor corpus to convert.
+        #
+        # `discovery_filters` is deliberately KEPT, not deleted: it is what
+        # measure_discovery_pool.py probes, and flipping this back to
+        # "influencers" must stay a one-word change once the pool recovers (the
+        # reject cache ages out at REJECTED_HANDLES_RETENTION_DAYS = 90).
+        "discovery_source": "search_list",
         "discovery_filters": {
             "profile_language": ["en"],
             "gender": "male",

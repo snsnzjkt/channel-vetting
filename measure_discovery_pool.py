@@ -29,13 +29,59 @@ if not d.enabled:
     sys.exit("discovery not configured")
 
 def total(filters):
-    r = d._post({"platform": "youtube", "paging": {"limit": 1, "page": 1},
-                 "sort": {"sort_by": "relevancy", "sort_order": "desc"},
-                 "filters": filters})
-    if r is None:
-        return None
-    b = r.json().get("total")
-    return b if isinstance(b, int) else 0
+    # Goes through InfluencerDiscovery.probe, NOT _post. probe() is the one that
+    # checks can_afford and writes record_spend; _post is only the HTTP call, so
+    # calling it directly spent real credits the ledger never saw. See probe()'s
+    # docstring for how much that was costing.
+    _, t = d.probe(filters, limit=1, source_label="pool ablation probe")
+    return t
+
+# ---------------------------------------------------------------------------
+# NET addressable pool.
+#
+# Everything above measures a GROSS pool: total() sends `filters` only, so the
+# vendor answers "creators matching this query" and never "creators we can
+# still buy". Those are very different numbers once a niche has been running.
+# Home Theater's gross pool is ~334 while its reject cache alone holds 262
+# handles, so the gross figure overstates the buyable pool by roughly 4x, and a
+# plan sized against it is sized against nothing.
+#
+# Run with --net. Costs one extra probe per niche (0.01 credits each).
+#
+# CAVEAT worth reading before trusting the output: this assumes the vendor
+# applies `exclude_handles` BEFORE computing `total`. If gross and net come back
+# identical, that assumption is wrong and the number means nothing — the vendor
+# is filtering the page but not the count. The script says so rather than
+# quietly reporting a bad figure.
+# ---------------------------------------------------------------------------
+def net_pool():
+    import main as _main
+    import rejected_handles as _rejected
+
+    for niche in ("Home Theater", "Lifestyle Sofa"):
+        base = niches.NICHES[niche]["discovery_filters"]
+        gross = total(base)
+        rejected = _rejected.for_niche(niche)
+        # The exclusion the real run sends, minus the parts that need live
+        # Airtable/blocklist reads — rejects dominate it for a mature niche.
+        f = copy.deepcopy(base)
+        f["exclude_handles"] = sorted(rejected)[:10000]
+        net = total(f)
+        print(f"\n{niche}")
+        print(f"  gross pool                 {gross if gross is not None else 'failed':>8}")
+        print(f"  reject cache               {len(rejected):>8}")
+        print(f"  net (gross minus rejects)  {net if net is not None else 'failed':>8}")
+        if gross and net == gross:
+            print("  !! net == gross: the vendor is NOT applying exclude_handles to `total`.")
+            print("     This number is meaningless; measure net by paging instead.")
+        elif gross and net is not None:
+            print(f"  -> {net/gross:.0%} of the gross pool is still buyable")
+
+
+if "--net" in sys.argv:
+    net_pool()
+    raise SystemExit(0)
+
 
 for niche in ("Home Theater", "Lifestyle Sofa"):
     base = niches.NICHES[niche]["discovery_filters"]

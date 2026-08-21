@@ -100,19 +100,36 @@ NICHES = {
                      "equipment, rather than reporting industry news, reacting to "
                      "other creators, or reselling manufacturer announcements?"},
         ],
+        # LOOSENED 2026-08-21, and deliberately. The previous three criteria
+        # required that AV equipment be the video's OWN subject and that the
+        # creator be presenting to camera. The backtest measured that as
+        # INVERTED against the reviewer's verdict: the five channels scoring
+        # highest were all Rejected, while Approved channels scored a median of
+        # 10 (see GEMINI_VERIFY_PLAN.md 2.16). The reviewer is evidently buying
+        # audience fit for home-entertainment FURNISHINGS, not equipment-review
+        # focus, so "the equipment is the subject" was the wrong bar.
+        #
+        # Two criteria instead of three, each widened:
+        #   - the SPACE now counts as much as the equipment, and incidental is
+        #     fine so long as a real home living space is on screen;
+        #   - voiceover over the creator's own footage counts, which is how a
+        #     large share of real creators actually shoot;
+        #   - the "not gaming / not generic gadgets" test is GONE. It duplicated
+        #     what off_target_reason already does on keywords, so a channel was
+        #     being penalised twice for one thing.
         "video_criteria": [
-            {"name": "on-camera creator",
-             "test": "Is a real person presenting to camera, or narrating their "
-                     "own footage of a real space, rather than the clip being "
-                     "reposted manufacturer material, stock footage, or a "
-                     "slideshow of stills?"},
-            {"name": "AV equipment or space is the subject",
-             "test": "Is home audio-visual equipment or a home entertainment "
-                     "space the video's own subject, rather than appearing "
-                     "incidentally in the background of something else?"},
-            {"name": "not gaming or generic gadgets",
-             "test": "Is the clip clearly NOT gameplay footage, a phone or laptop "
-                     "review, or a generic gadget unboxing?"},
+            {"name": "home entertainment or living space",
+             "test": "Does this clip show, discuss, build, review or tour a home "
+                     "entertainment or living space, or the equipment, seating or "
+                     "furnishings in one? A room tour, a renovation, a build, a "
+                     "product review or a setup walkthrough all count. The "
+                     "equipment does not have to be the main subject: a real home "
+                     "living space on screen is enough."},
+            {"name": "a real creator, not a repost",
+             "test": "Is there a real person on camera, OR a voice narrating "
+                     "footage they appear to have shot themselves? Answer no only "
+                     "if this looks like reposted manufacturer material, stock "
+                     "footage, or a slideshow of stills with no creator present."},
         ],
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
@@ -308,19 +325,23 @@ NICHES = {
                      "has access to, rather than aggregating inspiration images "
                      "or reposting other people's interiors?"},
         ],
+        # LOOSENED 2026-08-21. See the Home Theater entry for the measurement
+        # that prompted it. The criterion dropped here was the strictest of all
+        # six: "would a sofa brand recognise its own product category" ruled out
+        # kitchen, bedroom, organising and cooking content from creators whose
+        # audience is exactly the target. A lived-in home on screen is the bar.
         "video_criteria": [
-            {"name": "on-camera creator",
-             "test": "Is a real person presenting to camera, or narrating their "
-                     "own footage of a real home, rather than the clip being "
-                     "stock footage, a stills slideshow, or reposted material?"},
-            {"name": "a real home interior is the subject",
-             "test": "Is an actual home interior — a room, its furniture, its "
-                     "styling — the video's own subject, rather than a backdrop "
-                     "to unrelated content?"},
-            {"name": "seating or living space is plausibly relevant",
-             "test": "Does the space shown include, or clearly relate to, living-"
-                     "room seating and soft furnishings, so a sofa brand would "
-                     "recognise its own product category here?"},
+            {"name": "a real home, and life in it",
+             "test": "Does this clip show a real home interior or home life: "
+                     "decorating, styling, organising, cleaning, cooking, hosting, "
+                     "a room or house tour, a renovation, or everyday routines at "
+                     "home? A lived-in room on screen counts even when furniture "
+                     "is not what is being talked about."},
+            {"name": "a real creator, not a repost",
+             "test": "Is there a real person on camera, OR a voice narrating "
+                     "footage they appear to have shot themselves? Answer no only "
+                     "if this looks like stock footage, a slideshow of stills, or "
+                     "reposted material with no creator present."},
         ],
         "min_avg_views": 10_000,
         "min_channel_age_months": None,

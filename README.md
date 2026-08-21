@@ -298,6 +298,8 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `GEMINI_FREE_ONLY` | `true` | Enforces the hardcoded free-tier model allowlist. Only the literal `false` disables it |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Must be in `GEMINI_FREE_TIER_MODELS`; anything else switches verification off for the run with a loud error |
 | `GEMINI_BASE_URL` | Google's endpoint | Override only to point at a local stub |
+| `GEMINI_VIDEO_ALWAYS` | `true` | Video-check every candidate, not just flagged ones. One request each — the main budget consumer |
+| `GEMINI_TEXT_TIER` | `false` | The advisory 0-100 text score. Off on evidence: measured as non-predictive (see plan §2.16). Never gates a rescue |
 | `GEMINI_TIMEOUT` | 60 | Longer than other timeouts: Google fetches and decodes the clip server-side |
 | `GEMINI_MAX_RETRIES` | 1 | 5xx/network only. Never a 429 — that is the free-tier wall |
 | `GEMINI_MIN_CONFIDENCE` | 0.6 | **Provisional.** Below this a candidate is not rescued. Raising it never causes a drop, only fewer rescues |

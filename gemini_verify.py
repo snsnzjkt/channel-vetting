@@ -518,7 +518,8 @@ class GeminiVerifier:
 
     def __init__(self, model, cache_path, max_requests_per_run,
                  max_video_requests_per_run, max_seconds_per_run,
-                 min_confidence, verdict_version):
+                 min_confidence, verdict_version,
+                 video_always=True, text_tier=False):
         self.model = model
         self.cache_path = cache_path
         self.max_requests = max_requests_per_run
@@ -526,6 +527,9 @@ class GeminiVerifier:
         self.max_seconds = max_seconds_per_run
         self.min_confidence = min_confidence
         self.verdict_version = verdict_version
+        # See config.py for why these default the way they do.
+        self.video_always = video_always
+        self.text_tier = text_tier
 
         # Per-run counters and observability. Reported by main's run summary,
         # which prints UNCONDITIONALLY when enabled — a conditional line would
@@ -594,6 +598,8 @@ class GeminiVerifier:
             max_seconds_per_run=cfg.GEMINI_MAX_SECONDS_PER_RUN,
             min_confidence=cfg.GEMINI_MIN_CONFIDENCE,
             verdict_version=cfg.GEMINI_VERDICT_VERSION,
+            video_always=cfg.GEMINI_VIDEO_ALWAYS,
+            text_tier=cfg.GEMINI_TEXT_TIER,
         )
         # Fail closed on a corrupt ledger, but do NOT abort the run: this feature
         # is optional and the pipeline is fully functional without it.
@@ -605,8 +611,11 @@ class GeminiVerifier:
             return None
         logger.info(
             "Gemini relevance verification: ENABLED (model=%s, free-only=%s, "
-            "run caps %d total / %d video)",
-            v.model, cfg.GEMINI_FREE_ONLY, v.max_requests, v.max_video_requests,
+            "video=%s, text tier=%s, run caps %d total / %d video)",
+            v.model, cfg.GEMINI_FREE_ONLY,
+            "every candidate" if v.video_always else "rescue path only",
+            "on (advisory)" if v.text_tier else "off",
+            v.max_requests, v.max_video_requests,
         )
         return v
 
@@ -773,105 +782,112 @@ class GeminiVerifier:
 
     def judge(self, niche_config, stats, performance, *, flagged: bool) -> Judgement:
         """
-        Score a candidate, and — only if the keyword gate FLAGGED it — decide
+        Judge one candidate, and — only if the title gate FLAGGED it — decide
         whether to rescue it.
 
-        RESCUE-ONLY. This method can return `rescued=True`, never `dropped`.
-        Every failure edge returns a Judgement whose `rescued` is False, which
-        leaves the candidate with whatever verdict the existing gates already
-        gave it — i.e. exactly the pipeline's behaviour without this feature.
-        Read the branches below as: nothing here can make the output smaller.
+        RESCUE-ONLY. This can return `rescued=True`, never `dropped`. Every
+        failure edge leaves `rescued` False, which leaves the candidate with
+        whatever verdict the existing gates already gave it — i.e. exactly the
+        pipeline's behaviour without this feature. Nothing below can make the
+        output smaller.
+
+        SHAPE (changed 2026-08-21, at the operator's request and on the backtest):
+
+          - The VIDEO tier is the judgement. It runs on EVERY candidate when
+            `video_always` is set, so every row carries a video-checked verdict
+            rather than only the rescued ones, and it alone decides a rescue.
+          - The TEXT tier is ADVISORY and off by default. It used to GATE the
+            video tier, which made a signal since measured as non-predictive
+            (27% vs a 38% base rate; 0 of 5 in Home Theater — see
+            GEMINI_VERIFY_PLAN.md 2.16) a precondition for every rescue. It now
+            only records a 0-100 score for the reviewer.
+
+        The order matters for budget: the video request comes FIRST, because it
+        is the one whose answer can change anything. If the run walls out
+        mid-candidate, we would rather have spent the request on the tier that
+        decides than on the one that annotates.
         """
-        text_criteria = niche_config.get("text_criteria") or []
         video_criteria = niche_config.get("video_criteria") or []
+        text_criteria = niche_config.get("text_criteria") or []
         channel_id = stats.get("channel_id") or stats.get("handle") or "?"
 
-        # --- tier 1 ---
-        if not text_criteria:
-            return Judgement(STATE_UNAVAILABLE, "unavailable (no text_criteria)")
-        reason = self._may_request(video=False)
-        if reason:
-            self.unavailable += 1
-            return Judgement(STATE_UNAVAILABLE, f"unavailable ({reason})")
+        # --- the deciding tier: video ---
+        want_video = bool(video_criteria) and (self.video_always or flagged)
+        vv = None
+        url = ""
+        rescued = False
+        detail = None
 
-        digest = criteria_hash(text_criteria)
-        body = build_text_request(
-            stats.get("description", ""), performance.get("video_titles"),
-            performance.get("video_descriptions"), text_criteria,
-        )
-        v = self._call_cached(self._cache_key("text", channel_id, digest), body,
-                              video=False, verdict_key="on_niche")
-        if not v.ok:
-            self.unavailable += 1
-            return Judgement(STATE_UNAVAILABLE, f"unavailable ({v.reason_code})")
+        if want_video:
+            pick = self._pick_video(performance)
+            if pick is None:
+                detail = "no long-form video to sample"
+            else:
+                reason = self._may_request(video=True)
+                if reason:
+                    self.unavailable += 1
+                    return Judgement(STATE_UNAVAILABLE, f"unavailable ({reason})")
+                vid, duration_s = pick["video_id"], pick["duration_s"]
+                start_s, end_s = clip_window(duration_s)
+                url = f"https://www.youtube.com/watch?v={vid}&t={start_s}s"
+                vv = self._call_cached(
+                    self._cache_key("video", vid, criteria_hash(video_criteria),
+                                    start_s, end_s),
+                    build_video_request(vid, duration_s, video_criteria),
+                    video=True,
+                )
+                if not vv.ok:
+                    self.unavailable += 1
+                    return Judgement(STATE_UNAVAILABLE,
+                                     f"unavailable ({vv.reason_code})", video_url=url)
+                vconf = float(vv.payload.get("confidence", 0.0))
+                confirms = vv.payload.get("matches") is True and vconf >= self.min_confidence
+                if flagged and confirms:
+                    rescued = True
+                    detail = f"rescued {vconf:.2f} (video confirmed)"
+                elif confirms:
+                    detail = f"video confirmed {vconf:.2f}"
+                else:
+                    detail = f"video did not confirm ({vconf:.2f})"
+        elif not video_criteria:
+            detail = "no video_criteria"
+        else:
+            detail = "video not run (rescue path only)"
 
-        relevance = v.payload.get("relevance")
-        on_niche = bool(v.payload.get("on_niche"))
-        conf = float(v.payload.get("confidence", 0.0))
-        notes = self._notes(v.payload)
-
-        if not flagged:
-            # The broad tier: advisory only. The candidate continues regardless of
-            # what this says — the score is recorded for the reviewer and for the
-            # backtest that will decide whether it ever belongs in Overall Score.
-            self.scored += 1
-            return Judgement(
-                STATE_SCORED,
-                f"score {relevance} ({'on-niche' if on_niche else 'off-niche'}, {conf:.2f})",
-                notes=notes, relevance=relevance,
+        # --- the advisory tier: text. Never gates anything. ---
+        relevance = None
+        text_notes = ""
+        if self.text_tier and text_criteria and not self._may_request(video=False):
+            tv = self._call_cached(
+                self._cache_key("text", channel_id, criteria_hash(text_criteria)),
+                build_text_request(stats.get("description", ""),
+                                   performance.get("video_titles"),
+                                   performance.get("video_descriptions"),
+                                   text_criteria),
+                video=False, verdict_key="on_niche",
             )
+            if tv.ok:
+                relevance = tv.payload.get("relevance")
+                text_notes = self._notes(tv.payload)
 
-        # Flagged. A rescue needs BOTH tiers to agree, and needs confidence — the
-        # threshold guards the branch that ACTS, which is the only branch that
-        # changes anything.
-        self.scored += 1
-        if not on_niche or conf < self.min_confidence:
-            return Judgement(
-                STATE_SCORED,
-                f"score {relevance} (text did not rescue, {conf:.2f})",
-                notes=notes, relevance=relevance,
-            )
-
-        # --- tier 2 ---
-        if not video_criteria:
-            return Judgement(STATE_SCORED, f"score {relevance} (no video_criteria)",
-                             notes=notes, relevance=relevance)
-        pick = self._pick_video(performance)
-        if not pick:
-            return Judgement(STATE_SCORED,
-                             f"score {relevance} (no long-form video to sample)",
-                             notes=notes, relevance=relevance)
-        reason = self._may_request(video=True)
-        if reason:
-            self.unavailable += 1
-            return Judgement(STATE_UNAVAILABLE, f"unavailable ({reason})",
-                             notes=notes, relevance=relevance)
-
-        vid, duration_s = pick["video_id"], pick["duration_s"]
-        start_s, end_s = clip_window(duration_s)
-        vdigest = criteria_hash(video_criteria)
-        vbody = build_video_request(vid, duration_s, video_criteria)
-        vv = self._call_cached(
-            self._cache_key("video", vid, vdigest, start_s, end_s), vbody, video=True,
-        )
-        url = f"https://www.youtube.com/watch?v={vid}&t={start_s}s"
-        if not vv.ok:
-            self.unavailable += 1
-            return Judgement(STATE_UNAVAILABLE, f"unavailable ({vv.reason_code})",
-                             notes=notes, video_url=url, relevance=relevance)
-
-        vconf = float(vv.payload.get("confidence", 0.0))
-        if vv.payload.get("matches") is True and vconf >= self.min_confidence:
+        if rescued:
             self.rescued += 1
-            return Judgement(
-                STATE_RESCUED, f"rescued {vconf:.2f} (video confirmed)",
-                notes=self._notes(vv.payload), video_url=url,
-                rescued=True, relevance=relevance,
-            )
-        return Judgement(
-            STATE_SCORED, f"score {relevance} (video did not confirm, {vconf:.2f})",
-            notes=self._notes(vv.payload), video_url=url, relevance=relevance,
-        )
+            state = STATE_RESCUED
+        elif vv is not None and vv.ok:
+            self.scored += 1
+            state = STATE_SCORED
+        else:
+            self.scored += 1
+            state = STATE_SCORED
+
+        bits = [detail] if detail else []
+        if relevance is not None:
+            bits.append(f"text score {relevance}")
+        notes = self._notes(vv.payload) if (vv is not None and vv.ok) else ""
+        if text_notes:
+            notes = f"{notes} || TEXT: {text_notes}".strip(" |")
+        return Judgement(state, "; ".join(bits) or "no verdict", notes=notes,
+                         video_url=url, rescued=rescued, relevance=relevance)
 
     @staticmethod
     def _pick_video(performance):

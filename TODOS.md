@@ -217,3 +217,26 @@ Deferred work, with the reason it was deferred. Created 2026-08-14 by the
   the free tier carries the RESCUE path comfortably, but not scoring every
   candidate in both niches daily on top of it. That would need a paid tier, and
   per the brief the answer is to say so rather than implement it.
+
+- **Add an "independent creator, not a brand" video criterion.** Evidence from
+  2026-08-21 (`GEMINI_VERIFY_PLAN.md` §2.18): after loosening, the video tier
+  confirmed 3 of 6 Approved channels (up from ~0) but also **2 of 2 Rejected**
+  ones — and both false positives are genuinely on-topic. Apartment Therapy
+  really is touring a kitchen; ADAM Audio really is walking through a listening
+  room. They were rejected for **what the account is** (a media publisher, a
+  manufacturer), not for what the video shows, so **no content criterion can
+  separate them from Jason Witmer.** The axis the reviewer is actually using is
+  independent-creator versus brand/publisher, and it IS answerable from 25
+  seconds of video. Proposed wording: *"Is this an individual creator's own
+  channel, rather than a company, publisher, manufacturer or TV brand posting
+  produced marketing content?"* Needs the operator's confirmation that this is
+  the real screen before it goes in; the two existing criteria stay.
+
+- **Sample more than one video per channel — now evidenced, not a hunch.** The
+  three Approved channels the loosened criteria missed all failed for the same
+  reason: they are broad creators whose catalogue includes home content, and the
+  single median-view video landed elsewhere in it (a Premiere Pro tutorial, an
+  outdoor unboxing, a prop-helmet build). Widening criteria cannot fix that.
+  Sampling 2-3 videos, or 3 short windows in one request, can. Blocked only on
+  verifying that multiple `videoMetadata` parts referencing the same URL work in
+  one request — `verify_video.py` is where that gets proven.

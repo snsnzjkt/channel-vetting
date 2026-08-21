@@ -175,44 +175,72 @@ def test_off_allowlist_model_makes_no_request(monkeypatch, verifier):
 
 # --- 3. successful rescue -------------------------------------------------
 
-def test_flagged_candidate_is_rescued_when_both_tiers_confirm(monkeypatch, verifier):
-    calls = stub_post(monkeypatch,
-                      FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
-                      FakeResponse(200, body_for(matches=True, confidence=0.88)))
+def test_the_video_tier_alone_rescues_a_flagged_candidate(monkeypatch, verifier):
+    """
+    Video DECIDES (changed 2026-08-21). It used to be gated behind the text
+    tier's on_niche, which made a signal since measured as non-predictive a
+    precondition for every rescue.
+    """
+    calls = stub_post(monkeypatch, FakeResponse(200, body_for(matches=True, confidence=0.88)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is True
     assert j.state == gv.STATE_RESCUED
     assert "rescued" in j.detail
     assert j.video_url.startswith("https://www.youtube.com/watch?v=vidB")
-    assert len(calls) == 2, "one text call then one video call"
+    assert len(calls) == 1, "one VIDEO call, and no text call — the text tier is off"
     assert verifier.rescued == 1
+    assert verifier.video_requests == 1
 
 
-def test_unflagged_candidate_is_scored_and_never_gated(monkeypatch, verifier):
-    """The broad tier is ADVISORY. An off-niche score must not drop anything."""
-    stub_post(monkeypatch, FakeResponse(200, body_for(tier="text", on_niche=False, relevance=3)))
+def test_the_video_tier_runs_on_an_unflagged_candidate_too(monkeypatch, verifier):
+    """
+    video_always: every candidate gets a video-checked verdict, not just the
+    rescues. It still cannot drop anything — an unflagged candidate continues
+    whatever the verdict says.
+    """
+    calls = stub_post(monkeypatch, FakeResponse(200, body_for(matches=False, confidence=0.95)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=False)
-    assert j.rescued is False
+    assert j.rescued is False, "an unflagged candidate is never dropped by this"
     assert j.state == gv.STATE_SCORED
-    assert j.relevance == 3
+    assert "did not confirm" in j.detail
+    assert j.video_url, "the URL must be recorded so a human can audit it"
+    assert len(calls) == 1
+
+
+def test_video_always_off_restricts_video_to_the_rescue_path(monkeypatch, verifier):
+    verifier.video_always = False
+    calls = stub_post(monkeypatch, FakeResponse(200, body_for(matches=True, confidence=0.9)))
+    j = verifier.judge(NICHE, STATS, PERF, flagged=False)
+    assert len(calls) == 0, "no video request for an unflagged candidate"
+    assert j.rescued is False
+    verifier._cache = {}
+    verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert len(calls) == 1, "but the rescue path still gets one"
+
+
+def test_the_text_tier_is_advisory_and_cannot_block_a_rescue(monkeypatch, verifier):
+    """
+    With the text tier ON and saying OFF-niche, a confirming video must STILL
+    rescue. This is the regression the 2026-08-21 backtest forced: the text
+    signal is recorded, never authoritative.
+    """
+    verifier.text_tier = True
+    stub_post(monkeypatch,
+              FakeResponse(200, body_for(matches=True, confidence=0.9)),
+              FakeResponse(200, body_for(tier="text", on_niche=False, relevance=3)))
+    j = verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert j.rescued is True, "an off-niche text score must not veto a confirmed video"
+    assert j.relevance == 3, "...but it is still recorded for the reviewer"
+    assert "text score 3" in j.detail
 
 
 # --- 4. failed criteria = today's behaviour -------------------------------
 
 def test_video_saying_no_does_not_rescue(monkeypatch, verifier):
-    stub_post(monkeypatch,
-              FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
-              FakeResponse(200, body_for(matches=False, confidence=0.95)))
+    stub_post(monkeypatch, FakeResponse(200, body_for(matches=False, confidence=0.95)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is False, "a 'no' leaves the existing gate's drop in place"
     assert verifier.rescued == 0
-
-
-def test_text_saying_off_niche_skips_the_video_tier(monkeypatch, verifier):
-    calls = stub_post(monkeypatch, FakeResponse(200, body_for(tier="text", on_niche=False)))
-    j = verifier.judge(NICHE, STATS, PERF, flagged=True)
-    assert j.rescued is False
-    assert len(calls) == 1, "no video request for a candidate text already rejected"
 
 
 def test_low_confidence_never_rescues(monkeypatch, verifier):
@@ -223,9 +251,7 @@ def test_low_confidence_never_rescues(monkeypatch, verifier):
     destructive one unguarded. Under rescue-only the only acting branch is the
     rescue, so that is what the threshold must hold.
     """
-    stub_post(monkeypatch,
-              FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
-              FakeResponse(200, body_for(matches=True, confidence=0.41)))
+    stub_post(monkeypatch, FakeResponse(200, body_for(matches=True, confidence=0.41)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is False
     assert "did not confirm" in j.detail
@@ -233,10 +259,7 @@ def test_low_confidence_never_rescues(monkeypatch, verifier):
 
 def test_confident_true_with_no_evidence_does_not_rescue(monkeypatch, verifier):
     """Hostile-QA case: matches=true, confidence 0.0, empty criteria_results."""
-    payload = body_for(matches=True, confidence=0.0)
-    stub_post(monkeypatch,
-              FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
-              FakeResponse(200, payload))
+    stub_post(monkeypatch, FakeResponse(200, body_for(matches=True, confidence=0.0)))
     assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is False
 
 
@@ -323,14 +346,12 @@ def test_after_the_wall_no_further_request_is_issued(monkeypatch, verifier):
 # --- 9/10. cache ---------------------------------------------------------
 
 def test_a_cached_verdict_costs_no_request(monkeypatch, verifier):
-    calls = stub_post(monkeypatch,
-                      FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
-                      FakeResponse(200, body_for(matches=True, confidence=0.9)))
+    calls = stub_post(monkeypatch, FakeResponse(200, body_for(matches=True, confidence=0.9)))
     assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is True
     before = len(calls)
     assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is True
     assert len(calls) == before, "second identical judgement must be served from cache"
-    assert verifier.cache_hits >= 2
+    assert verifier.cache_hits >= 1
 
 
 def test_editing_criteria_invalidates_the_cache(monkeypatch, verifier):
@@ -620,8 +641,9 @@ def test_a_text_verdict_is_not_rejected_for_lacking_the_video_key(monkeypatch, v
     assert gv._parse_verdict(payload, verdict_key="matches").reason_code == gv.MALFORMED
 
 
-def test_each_tier_requires_its_own_boolean(monkeypatch, verifier):
-    """A video payload must not satisfy the text tier, or vice versa."""
-    stub_post(monkeypatch, FakeResponse(200, body_for(tier="video", matches=True)))
+def test_a_text_shaped_reply_does_not_satisfy_the_video_tier(monkeypatch, verifier):
+    """Each tier requires its OWN boolean; the shapes are not interchangeable."""
+    stub_post(monkeypatch, FakeResponse(200, body_for(tier="text", on_niche=True)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
-    assert j.state == gv.STATE_UNAVAILABLE, "a video-shaped reply is not a text verdict"
+    assert j.state == gv.STATE_UNAVAILABLE, "a text-shaped reply is not a video verdict"
+    assert j.rescued is False

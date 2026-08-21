@@ -479,6 +479,29 @@ GEMINI_MAX_SECONDS_PER_RUN = float(os.getenv("GEMINI_MAX_SECONDS_PER_RUN", 900))
 # Always reachable: every candidate video is drawn from a long-form set that
 # requires a parseable duration > SHORTS_MAX_SECONDS (180), so a video shorter
 # than the window is impossible by construction, not merely rare.
+# Run the VIDEO tier on every candidate that reaches the relevance gate, not
+# only on the ones the title gate flagged. Requested 2026-08-21: the operator
+# wants a video-checked verdict on every row, not just on rescues.
+#
+# It costs one request per candidate, which against the MEASURED ~100/day free
+# ceiling is the single biggest consumer of the budget — so it is a flag, and
+# turning it off returns to rescue-path-only video.
+GEMINI_VIDEO_ALWAYS = env_flag("GEMINI_VIDEO_ALWAYS", default=True)
+
+# The TEXT tier is OFF by default, and that is an evidence-based decision rather
+# than a cost one. Measured 2026-08-21 across 96 reviewer-labelled rows
+# (GEMINI_VERIFY_PLAN.md 2.16): its on_niche verdict is NOT predictive of the
+# reviewer's Approved/Rejected — 27% against a 38% base rate, and 0 of 5 in Home
+# Theater. Spending half of a ~100/day request budget on a signal measured as
+# non-predictive is the wrong trade, so it is opt-in until the criteria are
+# rewritten and re-measured with backtest_relevance.py.
+#
+# When on it is ADVISORY ONLY: it records a 0-100 relevance score for the
+# reviewer and never gates a rescue. That changed on 2026-08-21 too — it used to
+# gate the video tier, which made a non-predictive signal a precondition for
+# every rescue.
+GEMINI_TEXT_TIER = env_flag("GEMINI_TEXT_TIER", default=False)
+
 GEMINI_CLIP_SECONDS = int(os.getenv("GEMINI_CLIP_SECONDS", 25))
 GEMINI_CLIP_MIN_START_SECONDS = int(os.getenv("GEMINI_CLIP_MIN_START_SECONDS", 90))
 GEMINI_CLIP_START_FRACTION = float(os.getenv("GEMINI_CLIP_START_FRACTION", 0.25))

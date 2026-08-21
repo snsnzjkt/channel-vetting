@@ -1110,6 +1110,77 @@ no retry, no model switch, the day counter pinned to its ceiling so a re-run
 short-circuits, 36 remaining candidates marked `unavailable`, and **no bill** —
 the project has no billing account, so a charge was structurally impossible.
 
+## 2.18 VIDEO ON EVERY CANDIDATE, LOOSER CRITERIA, AND WHAT THAT REVEALED (2026-08-21)
+
+Two operator requests: run the video check on every candidate rather than only on
+rescues, and loosen the criteria. Both done, and testing them produced a sharper
+diagnosis than either change.
+
+**What changed.**
+- `GEMINI_VIDEO_ALWAYS=true` (new, default on). The video tier now runs on every
+  candidate reaching the relevance gate, so **every row carries a video-checked
+  verdict** instead of only the rescued ones.
+- **The video tier alone decides a rescue.** It used to be gated behind the text
+  tier's `on_niche`, which made a signal since measured as non-predictive a
+  precondition for every rescue. That gate is gone.
+- `GEMINI_TEXT_TIER=false` (new, default off). The text score is advisory and now
+  opt-in, because §2.16 measured it as worse than the base rate and it costs half
+  of a ~100/day request budget.
+- Criteria cut from three per niche to two, each widened: the *space* counts as
+  much as the equipment, voiceover-over-own-footage counts as an on-camera
+  creator, the duplicate "not gaming / not generic gadgets" test is gone (it
+  double-penalised what `off_target_reason` already does on keywords), and
+  Lifestyle's strictest test — *"would a sofa brand recognise its own product
+  category"* — is gone, since it ruled out kitchen, bedroom, organising and
+  cooking content from creators whose audience is exactly the target.
+
+**Measured effect on 8 channels (6 Approved, 2 Rejected):**
+
+```
+  Nuno Silva          Approved  NOT confirmed  median video is a Premiere Pro / Lumion tutorial
+  Sean's World        Approved  NOT confirmed  unboxing a copper container in a yard
+  DaBuild             Approved  NOT confirmed  sanding a prop helmet in a garage
+  Jason Witmer        Approved  CONFIRMED      router review in his home office
+  Jsky                Approved  CONFIRMED      DisplayPort cable review at his desk
+  Paul Antill         Approved  CONFIRMED      monitor and desk setup in a living space
+  Apartment Therapy   Rejected  CONFIRMED      room tour of a pink kitchen
+  ADAM Audio          Rejected  CONFIRMED      walkthrough of a listening studio
+
+  Approved confirmed 3/6   (was ~0/5 under the strict criteria)
+  Rejected confirmed 2/2
+```
+
+**They fire far more often, which is what was asked for. Discrimination did not
+improve — and the failures now say exactly why.**
+
+1. **The two Rejected channels that passed are genuinely on-topic.** Apartment
+   Therapy really is touring a kitchen; ADAM Audio really is walking through a
+   listening room. They were rejected for **what the account IS** — a media
+   publisher and a manufacturer — not for what the video shows. **No criterion
+   about video CONTENT can separate them from Jason Witmer, because both post
+   on-topic home content.** The axis the reviewer is actually using is
+   independent-creator versus brand/publisher, and that *is* answerable from
+   video. It is not currently asked.
+2. **The three Approved channels that failed are a SAMPLING problem, not a
+   criteria problem.** All three are broad creators whose catalogue includes home
+   content, and the single median-view video landed elsewhere in it. Widening the
+   criteria cannot fix that; sampling more than one video can. This is the
+   deferred multi-window / multi-video item in §4, and it now has evidence behind
+   it rather than a hunch.
+
+**Recommended next criterion, for the operator to confirm rather than for me to
+guess a third time:** add an *independent creator, not a brand* test —
+"is this an individual creator's own channel, rather than a company, publisher,
+manufacturer or TV brand posting produced marketing content?" That is the one
+signal that would have caught both false positives above, and the two current
+criteria stay as they are.
+
+**Budget consequence of video-on-every-candidate:** one request per candidate, so
+against the measured ~100/day ceiling roughly 80 candidates a day across both
+niches. That fits the caps in §2.17. It does mean the text tier and video tier
+cannot both run on everything within the free tier, which is the second reason
+the text tier defaults off.
+
 ## 3. Tests
 
 All Gemini HTTP mocked — `tests/conftest.py` already hard-fails any real request

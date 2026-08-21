@@ -949,6 +949,23 @@ def get_recent_video_performance(
 
     settled_views = []
     settled_engagements = []
+    # Parallel to settled_views, one record per entry, built in THIS loop so the
+    # three facts about a video can never drift apart.
+    #
+    # WHY THIS EXISTS AND WHY IT IS NOT TWO LISTS (2026-08-21). A caller that
+    # needs per-video attributes cannot assemble them from what this function
+    # used to return, because THREE per-video lists exist here and NO TWO SHARE
+    # AN ORDERING: `video_ids` is playlistItems order over the wide window,
+    # `durations` is videos.list order (which the comment above the
+    # videos_by_id map states carries no ordering guarantee), and `settled_views`
+    # is deduped_ids order capped at PERFORMANCE_SAMPLE_SIZE with no id on it at
+    # all. zip()-ing any two of them pairs a video with ANOTHER video's data,
+    # silently — no exception, just a confident wrong answer downstream.
+    #
+    # The consumer is gemini_verify, which picks a representative upload and
+    # needs its id AND its duration to compute a clip offset. Returning the
+    # association removes the possibility of that bug rather than documenting it.
+    settled_longform = []
     for video_id in deduped_ids:
         if len(settled_views) >= PERFORMANCE_SAMPLE_SIZE:
             break
@@ -960,6 +977,13 @@ def get_recent_video_performance(
         if not _view_count_is_settled(video.get("snippet", {}).get("publishedAt")):
             continue
         settled_views.append(_as_int(raw))
+        settled_longform.append({
+            "video_id": video_id,
+            "views": _as_int(raw),
+            "duration_s": parse_iso8601_duration(
+                video.get("contentDetails", {}).get("duration")
+            ),
+        })
         settled_engagements.append(
             _as_int(stats.get("likeCount")) + _as_int(stats.get("commentCount"))
         )
@@ -1020,6 +1044,15 @@ def get_recent_video_performance(
         # aggregate cannot express. min_views stays because it is what the drop
         # log reports, and because it is the cheaper thing to assert on.
         "settled_views": list(settled_views),
+        # The same sample as settled_views, but as {video_id, views, duration_s}
+        # records instead of bare ints — see the loop above for why a caller must
+        # never re-zip two of this function's parallel lists. Newest-first, long-
+        # form only, de-duplicated, settled only. EMPTY is a REACHABLE state, not
+        # an anomaly: a channel can clear MIN_LONGFORM_VIDEO_COUNT on older pages
+        # while having no settled long-form upload inside the fetched window, and
+        # the avg_views fallback below is the documented path for exactly that.
+        # Consumers must treat [] as "nothing to sample", never index into it.
+        "settled_longform": list(settled_longform),
         "avg_engagement_rate": avg_engagement_rate,
         "upload_dates": upload_dates,
         # How many videos avg_views/avg_engagement_rate were actually averaged

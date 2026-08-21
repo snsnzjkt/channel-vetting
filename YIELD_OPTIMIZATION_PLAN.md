@@ -387,3 +387,131 @@ vendor payload wiring and now falls through to the keyword loop. It forces
 - **Autouse isolation for `gemini_log.json`** — same latent gap as the rejected
   cache, but the Gemini tests already patch their own path, so there is no
   active bug. Flagged rather than built, to stay in scope.
+
+---
+
+## 11. RESULT — full 9-keyword Home Theater run, 2026-08-21
+
+```
+  BEFORE (paid vendor path)          AFTER (free search.list path)
+  candidates examined   ~5-50        342
+  rows written           0-2         7   (5 qualified, 2 flagged)
+  discovery credits      up to 6     0
+  total credits          ~6          0.24  (0.04 probes + 0.20 email enrichment)
+  wall clock             -           12m17s
+  YouTube quota          -           4,122 / 10,000
+```
+
+Home Theater went from producing zero to producing seven in a single run, at
+zero discovery cost. The supply problem is solved.
+
+### Where the 342 went
+
+```
+  outside_search_zone        106   <- geography, 64% of all drops with the next
+  no_declared_country         67   <- line. NOT CHANGED, by operator instruction.
+  below_view_minimum          42
+  duplicate                   34
+  shorts_only                 18
+  non_english_description     11
+  excluded_topic               8
+  too_few_longform_videos      5
+  too_few_videos               4
+  off_target_niche             3   <- the relevance gate, after the fix
+  not_english                  3
+  blocked                      3
+  video_below_view_minimum     2
+```
+
+The relevance gate accounted for **3 drops out of 269**. Before the fix it was
+dropping 67% of the channels the reviewer had approved. It is now out of the way,
+which is exactly what it should be.
+
+### THE HONEST PART: what actually landed
+
+Drew Binsky (travel, 7.3M), Josh Pate's College Football Show, JTL SPORTS,
+3AW Football, Hi My Car, 1221 Manhwa Recap, stuffeyy, Danny & Diggy.
+
+**Not one of them is a home theater channel.** They came from Home Theater's
+ADJACENCY keywords — `sports podcast commentary`, `car and truck review`,
+`homesteading vlog`, `movie review and reaction` — which predate this work.
+The home-theater-proper keywords contributed almost nothing, because that
+corpus is where the niche was already exhausted.
+
+Whether this is success or failure is a question only the reviewer can answer,
+and it is the RIGHT question to put to him:
+
+- If the audience-adjacency theory is right — the one the label analysis
+  supports, where the reviewer buys an audience for home-entertainment
+  FURNITURE rather than AV expertise — then a man-cave-adjacent sports podcast
+  is a legitimate prospect and these rows are the point.
+- If it is wrong, then these keywords are noise and should be cut, and Home
+  Theater has no free corpus worth searching.
+
+`1221 Manhwa Recap` is the row that suggests at least some of the adjacency
+vocabulary is too loose regardless of which way the theory falls.
+
+**Do not tune anything further until the reviewer has judged these seven.**
+Guessing his taste is what produced the inverted relevance criterion, the
+inverted off-target gate, and two rounds of wasted calibration. Seven labelled
+verdicts are worth more than any amount of further reasoning here.
+
+### Not changed, by instruction
+- Location / search zone — despite being 64% of drops.
+- Gender filter.
+- Credit budget.
+
+---
+
+## 12. Criteria optimization, 2026-08-22 — mined from the labels, not guessed
+
+Every candidate criterion was scored against the reviewer's own verdicts (21/31
+Home Theater, 37/53 Lifestyle) before shipping. A term ships only if it catches
+more REJECTED than it kills APPROVED.
+
+| candidate | kills approved | catches rejected | shipped? |
+|---|---|---|---|
+| `av_specialist` (HT) | 0/21 | 5/31 | **yes** |
+| `story_recap` (both) | 0 | 0 | yes — instruction, zero harm |
+| `property_showcase` (LS) | 0/37 | 2/53 | **yes** |
+| `travel_vlog` (LS) | 0/37 | 2/53 | **yes** |
+| `realestate_listing` (LS) | **1**/37 | 2/53 | **NO** — see below |
+| `reaction_farm`, `news_politics`, `sports_league`, `music_perf`, `food_only` | 0 | 0 | no — no effect |
+
+`realestate_listing` was rejected deliberately. Net +1 is not worth a lost
+prospect when the brief is "still want many output, not super strict".
+
+### The inversion that mattered
+
+`av_specialist` vocabulary was in Home Theater's **on_target_terms**, i.e. as
+RESCUE vocabulary. Measured there it rescued **0 approved and 6 rejected**
+channels — working exclusively for the channels the reviewer turns down.
+"speakers" appears in 0 of 21 approved titles and 8 of 31 rejected.
+
+It is an exclusion now, and removed from on_target_terms. Both halves are
+required: a term on both lists scores off == on, and the gate needs off > on.
+
+Caught: Zero Fidelity (66%), Lenny Florentine (62%), New Record Day (42%),
+Forever Analog (16%) — every dedicated AV reviewer the reviewer rejected.
+
+### Manhwa
+
+The `movie review and reaction` KEYWORD is kept. Removing it would cost real
+volume, and movie/reaction creators are a plausible home-entertainment
+audience. The content type is excluded instead of the query that found it.
+
+### Net effect on the gate
+
+```
+                        approved dropped     rejected caught
+  before this session   14/21  (67%)         9/31  (29%)     discrimination -38%
+  after                  0/21  ( 0%)         4/31  (13%)     discrimination +13%
+```
+
+Zero approved channels lost, and the gate now points the right way. Lifestyle
+went from completely inert (0/37, 0/53) to 0 approved / 1 rejected.
+
+### Still not strict
+Nothing here narrows discovery. Every change is a targeted exclusion measured
+to cost zero approved channels. Volume levers (geography, gender, budget)
+remain untouched by instruction.

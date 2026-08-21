@@ -775,6 +775,16 @@ def off_target_reason(niche_config: dict, description: str, video_titles) -> tup
     if not judged:
         return None, ""
 
+    # A niche may restrict which off-target categories apply to it. Home Theater
+    # does, and the reason is measured rather than aesthetic: see the comment on
+    # `off_target_categories` in niches.py. Absent the key, every category
+    # applies, which is the historical behaviour.
+    allowed = niche_config.get("off_target_categories")
+    active = (
+        {c: t for c, t in OFF_TARGET_TERMS.items() if c in set(allowed)}
+        if allowed is not None else OFF_TARGET_TERMS
+    )
+
     off_hits = 0
     on_hits = 0
     categories: set[str] = set()
@@ -782,7 +792,7 @@ def off_target_reason(niche_config: dict, description: str, video_titles) -> tup
         low = title.lower()
         matched = {
             category
-            for category, terms in OFF_TARGET_TERMS.items()
+            for category, terms in active.items()
             if any(term in low for term in terms)
         }
         if matched:
@@ -802,6 +812,14 @@ def off_target_reason(niche_config: dict, description: str, video_titles) -> tup
     )
     if off_share >= OFF_TARGET_MIN_SHARE:
         return DROP_OFF_TARGET, detail
+
+    # The PERSONA rule is skipped for a niche with a restricted category set.
+    # BIO_OFF_SIGNALS is entirely gaming and consumer-tech vocabulary — exactly
+    # what a restricting niche has measured as anti-predictive — so letting it
+    # fire would reinstate through the bio the drops the category list just
+    # removed. Measured: it is what "about technology" would do to Bane Tech.
+    if allowed is not None:
+        return None, ""
 
     bio_signals = [s for s in BIO_OFF_SIGNALS if s in (description or "").lower()]
     if bio_signals and off_hits:
@@ -2598,9 +2616,12 @@ def run(
             "itself worked — this is a yield result, not a crash. Check, in this "
             "order: (1) the drop-reason counts printed above, which say which gate "
             "consumed the candidates; (2) whether the niche's discovery pool is "
-            "simply exhausted — a limit=1 probe costs 0.01 credits and Home "
-            "Theater's whole pool measured 208 creators on 2026-08-21, of which "
-            "most were already tracked; (3) TODOS.md 'Yield levers', which ranks "
+            "exhausted, which applies ONLY to a niche still on influencers.club "
+            "discovery — run `measure_discovery_pool.py --net` for the real "
+            "figure, because gross totals ignore exclude_handles and overstate "
+            "it (Home Theater measured 334 gross but 279 net on 2026-08-22). A "
+            "niche on discovery_source='search_list' cannot run dry this way, "
+            "so read its drop reasons instead; (3) TODOS.md 'Yield levers', which ranks "
             "the gates by how many rows each is actually costing.",
             total_discovered,
         )

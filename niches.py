@@ -63,15 +63,47 @@ NICHES = {
         # "OCM Reviews" (DACs, IEMs, Atmos soundbars) scores 0.06 off / 0.60 on
         # and is rescued; "DragsterTV" (Forza money glitches) scores 0.04 off /
         # 0.00 on and is dropped. No single signal separates those two.
+        # WIDENED 2026-08-22 toward ROOM and FURNITURE vocabulary, on reviewer
+        # instruction: accept a channel that "did a room tour or mostly home
+        # furniture type of content", even when not all of its content is that.
+        #
+        # The old list was pure AV EQUIPMENT — projector, soundbar, atmos, DAC,
+        # IEM. That is a narrower reading of the niche than the reviewer's, and
+        # the earlier backtest said so out loud: across 96 labelled rows an
+        # equipment-focus score was INVERTED against the verdict (27% approved
+        # vs a 38% base rate; the five most equipment-focused channels were all
+        # rejected). The reviewer is buying an AUDIENCE for home-entertainment
+        # FURNITURE, not gear-review expertise.
+        #
+        # These terms only ever RESCUE — see main.off_target_reason. Adding one
+        # can never admit a channel on its own; it can only raise on_share so
+        # that a partly-off-topic channel is not dropped for the off-topic part.
+        # That is exactly the "not all content is like that" case.
         "on_target_terms": [
+            "room tour", "house tour", "home tour", "apartment tour",
+            "setup tour", "setup reveal",
+            "basement tour", "basement finish", "room makeover", "room reveal",
+            "room setup", "entertainment center", "entertainment room",
+            "tv stand", "tv wall", "tv mount", "media console", "media cabinet",
+            "sectional", "sofa", "couch", "seating", "furniture",
+            "living room", "family room", "game room", "bonus room",
+            "home renovation", "home improvement", "interior",
             "home theater", "home theatre", "home cinema", "projector",
             "projection screen", "projector screen", "soundbar", "atmos",
-            "surround", "speaker", "subwoofer", "amplifier", "av receiver",
-            "hi-fi", "hifi", "audiophile", " dac", "iem", "headphone",
-            "turntable", "vinyl", "media room", "man cave", "dolby", "5.1",
-            "7.1", "klipsch", "denon", "marantz", "sonos", "bookshelf speaker",
-            "acoustic", "listening room", "theater seating", "recliner",
-            "4k hdr", "home audio",
+            "surround", "av receiver", "media room", "man cave", "dolby",
+            "5.1", "7.1", "sonos", "theater seating", "recliner", "4k hdr",
+            # REMOVED 2026-08-22: speaker, subwoofer, amplifier, hi-fi, hifi,
+            # audiophile, dac, iem, headphone, turntable, vinyl, klipsch,
+            # denon, marantz, bookshelf speaker, acoustic, listening room,
+            # home audio.
+            #
+            # Measured as RESCUE terms over 21 approved / 31 rejected rows they
+            # saved 0 approved channels and 6 rejected ones — working
+            # exclusively for the channels the reviewer turns down. "speakers"
+            # appears in 0 of 21 approved and 8 of 31 rejected titles.
+            # They are an EXCLUSION now: OFF_TARGET_TERMS["av_specialist"].
+            # Both halves are required, because a term on both lists scores
+            # off == on and the gate needs off > on to fire.
         ],
         # GEMINI RESCUE CRITERIA. Read only when main's title-based
         # off_target_reason has FLAGGED a candidate, and used only to overturn
@@ -203,6 +235,45 @@ NICHES = {
         # measure_discovery_pool.py probes, and flipping this back to
         # "influencers" must stay a one-word change once the pool recovers (the
         # reject cache ages out at REJECTED_HANDLES_RETENTION_DAYS = 90).
+        # MEASURED 2026-08-22 against the reviewer's own verdicts, and this is
+        # the single biggest yield finding in the repo.
+        #
+        # off_target_reason was dropping 14 of the 21 Home Theater channels the
+        # reviewer APPROVED (67%), while catching only 9 of 31 he rejected
+        # (29%). Discrimination -38%: more than twice as likely to kill a good
+        # channel as a bad one. Every category was individually harmful:
+        #
+        #   category           kills APPROVED   catches REJECTED
+        #   gaming                48%               16%
+        #   phones_and_pcs        52%               19%
+        #   generic_gadgets       43%               13%
+        #   ai_and_crypto         19%                6%
+        #
+        # The gate's own docstring named Bane Tech, DanKamYouKnow, Paul Antill
+        # and NFT TIGERS as "hand-verified off-target". The reviewer approved
+        # ALL FOUR. The calibration was verified against an engineer's idea of
+        # on-niche, never against the labels — the same inversion the 96-row
+        # relevance backtest found in 2026-08-21.
+        #
+        # What the labels actually say: for Home Theater the reviewer buys
+        # general tech / gadget / setup creators (an AUDIENCE for home
+        # entertainment furniture) and rejects the dedicated AV specialists
+        # (Zero Fidelity, New Record Day, Forever Analog), the manufacturer
+        # accounts (ADAM Audio, Dolby) and the media brands (HGTV, Apartment
+        # Therapy, Drew & Jonathan). Excluding "gaming, phones/PCs, gadgets"
+        # from this niche excludes precisely the approved profile.
+        #
+        # So this niche keeps ONLY the toys_and_kids category, which exists on
+        # explicit reviewer instruction ("remove channels related to Lego",
+        # "we cannot accept channels like this for HT"). Re-enable a category
+        # here only with a backtest that shows it catches more rejections than
+        # approvals.
+        # Each entry measured against the reviewer's own verdicts (approved /
+        # rejected counts in the OFF_TARGET_TERMS comments). The four omitted
+        # categories — gaming, phones_and_pcs, generic_gadgets, ai_and_crypto —
+        # were each more likely to kill an approved channel than catch a
+        # rejected one. Add nothing here without a fresh backtest.
+        "off_target_categories": ["toys_and_kids", "story_recap", "av_specialist"],
         "discovery_source": "search_list",
         "discovery_filters": {
             "profile_language": ["en"],
@@ -291,6 +362,19 @@ NICHES = {
         },
     },
     "Lifestyle Sofa": {
+        # Stated EXPLICITLY rather than left to default-all, so adding a
+        # category to OFF_TARGET_TERMS never silently changes this niche.
+        # av_specialist is deliberately absent: it is measured for Home Theater
+        # and untested here, and unmeasured strictness is what this whole
+        # exercise has been undoing.
+        #
+        # property_showcase and travel_vlog each catch 2 rejected and kill 0
+        # approved over 37/53 labelled rows. The first four are inert here
+        # (0/37 and 0/53) and are kept only so the default is unchanged.
+        "off_target_categories": [
+            "gaming", "phones_and_pcs", "generic_gadgets", "ai_and_crypto",
+            "toys_and_kids", "story_recap", "property_showcase", "travel_vlog",
+        ],
         "keywords": [
             "interior design and styling",
             "home decor tour",
@@ -782,6 +866,102 @@ OFF_TARGET_TERMS = {
         "fitness tracker", "earbuds", "electric scooter", "3d printer",
         "drone review", "action camera", "osmo pocket", "insta360", "dash cam",
         "massage gun",
+    ],
+    # Toys, construction-brick and kids' doll/roleplay content. ADDED 2026-08-22
+    # from reviewer feedback: Victor rejected "Bricksie" (a LEGO City channel)
+    # and "Baby Doll Stories" for Home Theater, and neither was visible to this
+    # gate at all — both scored 0.00 off-target and sailed through.
+    #
+    # Baby Doll Stories is the more instructive one. Its titles say "Room
+    # Makeover" and "DIY Cardboard ... Doll Room", so it scores ON-TARGET for
+    # Lifestyle Sofa ("makeover", "diy"). A kids' doll channel was reading as a
+    # home-decor prospect. That is why this category is global rather than
+    # Home-Theater-only.
+    #
+    # SUBSTRING SAFETY IS THE WHOLE DIFFICULTY HERE — matching is plain
+    # `term in title.lower()`, so the obvious words are traps:
+    #   "brick" matches "brick wall" / "exposed brick fireplace"  <- real decor
+    #   "doll"  matches "dollar store decor"                      <- real decor
+    #   "toy"   matches "toy storage ideas" and "Toyota"          <- real, and a car
+    #   "figure" matches "figure out"
+    # So every entry below is either a brand ("lego", "barbie", "funko") or a
+    # multi-word phrase. Do not "simplify" these to their root words; there is a
+    # test that fails if you do.
+    "toys_and_kids": [
+        "lego", "minifigure", "minifig", "brickheadz", "bricklink",
+        "barbie", "baby doll", "dollhouse", "doll house", "doll room",
+        "doll story", "doll makeover", "squishmallow", "squishy", "slime",
+        "play doh", "play-doh", "playdough", "playset",
+        # "toy story" was here and was REMOVED 2026-08-22: it matched
+        # "Toy Story Gaming Laptop! MSI Cyborg 15 Special Edition" on Paul
+        # Antill, a channel the reviewer APPROVED. A film brand shows up on
+        # branded merchandise, so it is not evidence of kids' content.
+        "toy review", "toy unboxing", "toy haul", "kids toy",
+        "surprise egg", "blind bag", "action figure", "funko",
+        "poor vs rich", "rich vs poor", "gacha", "kids cartoon",
+        "nursery rhyme",
+    ],
+    # Story-recap content (manhwa / manhua / webtoon / anime). ADDED 2026-08-22
+    # on reviewer instruction after "1221 Manhwa Recap" reached the Home Theater
+    # table from the "movie review and reaction" keyword.
+    #
+    # The keyword itself is KEPT. Removing it would cost real volume — movie and
+    # reaction creators are a plausible home-entertainment audience — so the
+    # content type is excluded instead of the query that found it.
+    #
+    # Measured: kills 0 of 21 approved and 0 of 31 rejected in Home Theater, and
+    # 0/37 // 0/53 in Lifestyle. No historical evidence either way, because this
+    # content only started appearing once Home Theater moved to the free
+    # search.list corpus. Shipped on the instruction plus the zero-harm result,
+    # not on a measured benefit.
+    "story_recap": [
+        "manhwa", "manhua", "webtoon", "anime recap", "manga recap",
+        "donghua", "light novel", "novel recap",
+    ],
+    # AV-SPECIALIST vocabulary, and this one is the surprise. MEASURED 2026-08-22
+    # over 21 approved / 31 rejected Home Theater rows:
+    #
+    #   as an EXCLUSION: catches 5 rejected, kills 0 approved
+    #   as RESCUE vocab: rescues 6 REJECTED and 0 APPROVED
+    #
+    # "speakers" appears in 0 of 21 approved channels and 8 of 31 rejected;
+    # "audio" in 2 of 21 vs 10 of 31. The reviewer rejects the dedicated hi-fi
+    # reviewers — Zero Fidelity, New Record Day, Forever Analog, 5.1 Test &
+    # Clips — and the manufacturer accounts, ADAM Audio and Dolby.
+    #
+    # So this vocabulary was on the WRONG SIDE of the gate: it sat in Home
+    # Theater's on_target_terms, where its only measurable effect was to rescue
+    # channels the reviewer had rejected. It is an exclusion now, and it is
+    # removed from on_target_terms below — both halves are required, because
+    # a term on both lists scores off == on and the gate needs off > on.
+    #
+    # NOT applied to Lifestyle: untested there, and unmeasured strictness is
+    # what this whole exercise has been undoing.
+    "av_specialist": [
+        # "speaker" is the single strongest signal in the labelled set: it
+        # appears in 0 of 21 approved Home Theater channels and 8 of 31
+        # rejected. Bare rather than a phrase, because unlike "brick" or "doll"
+        # it has no common collision with real home-content vocabulary.
+        "speaker", "subwoofer", "audiophile", "hi-fi", "hifi", " dac", "iem",
+        "amplifier", "turntable", "bookshelf speaker", "klipsch", "denon",
+        "marantz", "phono", "loudspeaker",
+    ],
+    # Property showcase and travel, for LIFESTYLE only. Measured there:
+    # property_showcase catches 2 rejected / kills 0; travel_vlog 2 / 0. Small
+    # but free. They match the rejected set's character — Homeworthy England,
+    # Homeworthy New York, Escape To The Country, Inside Japan Living — which
+    # is aspirational property media rather than a creator selling to an
+    # audience.
+    #
+    # `realestate_listing` was tested alongside these and REJECTED: +2 rejected
+    # but -1 approved. A net of +1 is not worth a lost prospect when the brief
+    # is explicitly "still want many output, not super strict".
+    "property_showcase": [
+        "inside the", "mansion", "estate tour", "property tour",
+        "million dollar", "luxury home", "home tour of",
+    ],
+    "travel_vlog": [
+        "travel vlog", "country in", "visiting", "trip to", "backpacking", "expat",
     ],
     "ai_and_crypto": [
         "crypto", "bitcoin", "ethereum", "nft", "altcoin", "web3", "blockchain",

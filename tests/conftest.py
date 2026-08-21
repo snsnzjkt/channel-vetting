@@ -115,6 +115,30 @@ def isolate_rejected_handles(tmp_path, monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def isolate_run_metrics(tmp_path, monkeypatch):
+    """
+    Point the per-run metrics log at a per-test temp file.
+
+    Third instance of the same hazard, after the credit ledger and the reject
+    cache — and this one was self-inflicted: the tests that exercise run()
+    (test_pipeline_regressions, test_discovery_window) call the real
+    run_metrics.write, so the very first suite run after the feature landed
+    appended ~30 junk records to the repo's real run_metrics.jsonl, most of them
+    a fixture called "Test Niche" with every counter at zero.
+
+    That is worse here than noise. The file exists to answer "did this change
+    help", and its readers average across runs — so fixture records with zero
+    rows and zero credits drag every before/after comparison toward zero. A
+    polluted metrics file does not look broken, it looks like bad results.
+    """
+    import run_metrics
+
+    monkeypatch.setattr(
+        run_metrics, "RUN_METRICS_FILE", str(tmp_path / "run_metrics.jsonl")
+    )
+
+
 @pytest.fixture
 def credit_ceilings(monkeypatch):
     """

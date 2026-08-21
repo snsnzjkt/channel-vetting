@@ -73,6 +73,47 @@ NICHES = {
             "acoustic", "listening room", "theater seating", "recliner",
             "4k hdr", "home audio",
         ],
+        # GEMINI RESCUE CRITERIA. Read only when main's title-based
+        # off_target_reason has FLAGGED a candidate, and used only to overturn
+        # that flag — never to drop a candidate the keyword gate let through.
+        # See gemini_verify.GeminiVerifier.judge for why that asymmetry is the
+        # whole safety argument.
+        #
+        # Two rules for editing these:
+        #   1. A VIDEO criterion must be answerable from ~25 seconds of footage
+        #      alone. "Does the creator own their home" is not; "is a person
+        #      presenting to camera" is.
+        #   2. Editing either list invalidates every cached verdict for this
+        #      niche automatically (the criteria are hashed into the cache key),
+        #      so retuning costs requests, never correctness.
+        # Keep to 2-4 entries per list: each one is a separate judgement the
+        # model has to evidence, and a long list dilutes all of them.
+        "text_criteria": [
+            {"name": "home AV / entertainment-space focus",
+             "test": "Across these titles and descriptions, is the channel's "
+                     "recurring subject home audio-visual equipment or the "
+                     "entertainment spaces built around it — speakers, "
+                     "projectors, receivers, soundbars, media rooms, man caves — "
+                     "rather than general consumer tech, phones, PCs, or gaming?"},
+            {"name": "reviews or builds, not news",
+             "test": "Does the channel actually review, install or build this "
+                     "equipment, rather than reporting industry news, reacting to "
+                     "other creators, or reselling manufacturer announcements?"},
+        ],
+        "video_criteria": [
+            {"name": "on-camera creator",
+             "test": "Is a real person presenting to camera, or narrating their "
+                     "own footage of a real space, rather than the clip being "
+                     "reposted manufacturer material, stock footage, or a "
+                     "slideshow of stills?"},
+            {"name": "AV equipment or space is the subject",
+             "test": "Is home audio-visual equipment or a home entertainment "
+                     "space the video's own subject, rather than appearing "
+                     "incidentally in the background of something else?"},
+            {"name": "not gaming or generic gadgets",
+             "test": "Is the clip clearly NOT gameplay footage, a phone or laptop "
+                     "review, or a generic gadget unboxing?"},
+        ],
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
         # NARROWED 2026-08-20 from US/CA/UK/Europe/AU to US/CA/UK/AU. The
@@ -239,6 +280,47 @@ NICHES = {
             "christmas", "haul", "recipe", "cooking", "baking", "mom",
             "motherhood", "family", "homemaking", "self care", "morning routine",
             "home office", "small home", "tiny home", "house plan",
+        ],
+        # GEMINI RESCUE CRITERIA. Read only when main's title-based
+        # off_target_reason has FLAGGED a candidate, and used only to overturn
+        # that flag — never to drop a candidate the keyword gate let through.
+        # See gemini_verify.GeminiVerifier.judge for why that asymmetry is the
+        # whole safety argument.
+        #
+        # Two rules for editing these:
+        #   1. A VIDEO criterion must be answerable from ~25 seconds of footage
+        #      alone. "Does the creator own their home" is not; "is a person
+        #      presenting to camera" is.
+        #   2. Editing either list invalidates every cached verdict for this
+        #      niche automatically (the criteria are hashed into the cache key),
+        #      so retuning costs requests, never correctness.
+        # Keep to 2-4 entries per list: each one is a separate judgement the
+        # model has to evidence, and a long list dilutes all of them.
+        "text_criteria": [
+            {"name": "home and living focus",
+             "test": "Across these titles and descriptions, is the channel's "
+                     "recurring subject the home itself — decorating, styling, "
+                     "organising, cleaning, furnishing, renovating, house tours, "
+                     "homemaking — rather than fashion, beauty, travel, fitness "
+                     "or general vlogging that merely happens indoors?"},
+            {"name": "shows real spaces",
+             "test": "Does the channel show real, specific rooms and furniture it "
+                     "has access to, rather than aggregating inspiration images "
+                     "or reposting other people's interiors?"},
+        ],
+        "video_criteria": [
+            {"name": "on-camera creator",
+             "test": "Is a real person presenting to camera, or narrating their "
+                     "own footage of a real home, rather than the clip being "
+                     "stock footage, a stills slideshow, or reposted material?"},
+            {"name": "a real home interior is the subject",
+             "test": "Is an actual home interior — a room, its furniture, its "
+                     "styling — the video's own subject, rather than a backdrop "
+                     "to unrelated content?"},
+            {"name": "seating or living space is plausibly relevant",
+             "test": "Does the space shown include, or clearly relate to, living-"
+                     "room seating and soft furnishings, so a sofa brand would "
+                     "recognise its own product category here?"},
         ],
         "min_avg_views": 10_000,
         "min_channel_age_months": None,

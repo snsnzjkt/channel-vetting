@@ -42,7 +42,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config import YOUTUBE_API_KEY, INFLUENCERS_API_KEY
+from config import YOUTUBE_API_KEY, INFLUENCERS_API_KEY, GEMINI_MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +87,18 @@ def _make_session(
     allowed_methods=IDEMPOTENT_METHODS,
     respect_retry_after=True,
     read_retries=RETRY_TOTAL,
+    total=RETRY_TOTAL,
 ) -> requests.Session:
+    """
+    `total` was added for the GEMINI session (2026-08-21), which needs a retry
+    budget of its own rather than the module-wide RETRY_TOTAL: every request it
+    makes is metered against a free-tier daily allowance, so "how many times may
+    we re-send this" is a per-vendor policy question, not a global one. Existing
+    callers omit it and are unchanged.
+    """
     retry = Retry(
-        total=RETRY_TOTAL,
-        connect=RETRY_TOTAL,
+        total=total,
+        connect=total,
         read=read_retries,
         backoff_factor=BACKOFF_FACTOR,
         status_forcelist=retry_statuses,
@@ -235,6 +243,40 @@ if YOUTUBE_API_KEY:
 # that message lands in a log retained for 90 days.
 if INFLUENCERS_API_KEY:
     INFLUENCERS.headers["Authorization"] = f"Bearer {INFLUENCERS_API_KEY}"
+
+
+# Gemini (relevance verification). The retry policy here is the second-strictest
+# in this module, and every deviation from the factory defaults is load-bearing:
+#
+# - 429 is DELIBERATELY ABSENT from the forcelist, unlike RETRY_STATUSES. A 429
+#   here is the free-tier wall, and retrying it is precisely the behaviour this
+#   integration must not have — the caller classifies the QuotaFailure body into
+#   a per-minute pause or a per-day latch instead. Backing off into a wall is how
+#   an unattended run spends its whole budget discovering the same fact 5 times.
+#
+# - POST is added to allowed_methods. `:generateContent` is reached ONLY by POST,
+#   so leaving it out would make GEMINI_RETRY_STATUSES below dead configuration
+#   and the 5xx retry would silently never happen — the same trap documented for
+#   INFLUENCERS above. This is not optional politeness.
+#
+# - respect_retry_after=False. urllib3 sleeps the header verbatim with no
+#   ceiling, so a 503 carrying `Retry-After: 86400` would park the run inside the
+#   adapter for a day, invisibly, against the workflow's own timeout-minutes.
+#
+# - read_retries=0. A read retry means the request WAS SENT, the free-tier
+#   request was already consumed, and we simply never saw the response. Retrying
+#   spends a second request that the ledger's post-response accounting never
+#   sees, which is the one direction that overspends a quota.
+GEMINI_RETRY_STATUSES = (500, 502, 503, 504)
+GEMINI_RETRY_METHODS = IDEMPOTENT_METHODS | {"POST"}
+
+GEMINI = _make_session(
+    retry_statuses=GEMINI_RETRY_STATUSES,
+    allowed_methods=GEMINI_RETRY_METHODS,
+    respect_retry_after=False,
+    read_retries=0,
+    total=GEMINI_MAX_RETRIES,
+)
 
 
 def post_with_rate_limit_retry(url: str, *, sleep=None, **kwargs) -> requests.Response:

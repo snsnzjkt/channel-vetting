@@ -57,6 +57,7 @@ from credit_tracker import (
     assert_readable as assert_credit_ledger_readable,
     spend_summary as credit_spend_summary,
 )
+from gemini_verify import GeminiVerifier
 from influencers import InfluencersClient, null_client
 from influencer_discovery import InfluencerDiscovery
 from do_not_contact import BlocklistUnavailable, fetch_blocklist
@@ -1135,6 +1136,7 @@ def process_candidate(
     enricher=None,
     known_channel_ids: set[str] | None = None,
     has_room=None,
+    verifier=None,
 ) -> tuple[dict | None, str]:
     """
     Enrich, screen, qualify, and build an Airtable record for one candidate.
@@ -1318,10 +1320,54 @@ def process_candidate(
     off_target, off_detail = off_target_reason(
         niche_config, stats.get("description", ""), performance.get("video_titles"),
     )
+
+    # GEMINI RELEVANCE VERIFICATION — a RESCUE LADDER on the gate above, and
+    # nothing else. Read the two branches below carefully, because the whole
+    # safety argument for this feature is in their shape:
+    #
+    #   - a candidate the keyword gate did NOT flag is scored and CONTINUES,
+    #     whatever the score says. The score is advisory: it is recorded for the
+    #     reviewer and for the backtest that will decide whether it ever belongs
+    #     in Overall Score. It is not a gate and must not become one without that
+    #     measurement, because a positive must-match relevance gate was already
+    #     built, measured and REJECTED in this repo (see off_target_reason).
+    #
+    #   - a candidate the keyword gate DID flag is dropped exactly as it is
+    #     today, UNLESS both Gemini tiers confirm it is on-niche. Only then is
+    #     the drop reversed.
+    #
+    # So this block can only ever ADD a row. There is no new DROP_ reason, and
+    # nothing here writes to rejected_handles.json — a rescued candidate simply
+    # stops being a reject, and a non-rescued one is recorded by the existing
+    # gate exactly as before. Every failure edge (disabled, no key, 429, timeout,
+    # 4xx, malformed, cap reached, no video, unreadable ledger) leaves
+    # `judgement.rescued` False, which is indistinguishable from this feature not
+    # existing. That is deliberate: it is what makes "the pipeline stays
+    # functional when Gemini is unavailable" true by construction rather than by
+    # careful coding.
+    #
+    # Placed HERE and not lower for the same reason off_target_reason is here:
+    # the titles and descriptions it reads arrive free on the response just
+    # fetched, and it is still ahead of the long-form paging and the 0.2-credit
+    # email lookup. A rescue therefore costs nothing a normal candidate does not.
+    judgement = None
+    if verifier is not None:
+        judgement = verifier.judge(
+            niche_config, stats, performance, flagged=bool(off_target),
+        )
+        if off_target and judgement.rescued:
+            logger.info(
+                "RESCUED %s — the title gate flagged it (%s) but Gemini confirmed "
+                "it is on-niche: %s",
+                stats.get("channel_title"), off_detail, judgement.detail,
+            )
+            off_target = None
+
     if off_target:
         logger.info(
-            "Dropping %s before push — %s (%s).",
+            "Dropping %s before push — %s (%s).%s",
             stats.get("channel_title"), off_target, off_detail,
+            f" Gemini: {judgement.detail}." if judgement is not None else "",
         )
         return None, off_target
 
@@ -1584,6 +1630,42 @@ def process_candidate(
     # between "nobody has this address" and "the one on file stopped
     # validating" — verified live: 7 of the 8 email-less rows in the base are
     # the former and 1 is the latter.
+    # Gemini relevance verdict, in four columns, each written ONLY when it
+    # exists — same table_has_field guard and same reasoning as "Handle" above.
+    #
+    # A value is written on EVERY judgement, never left blank, because a blank
+    # cell would otherwise mean four different things (feature off, column
+    # absent, probe blipped, row predates the feature) — the exact ambiguity the
+    # README already documents for "Email Source": "Without it a blank Email cell
+    # cannot be told apart from a row written before the column existed."
+    #
+    # "Relevance State" is the only Single select, and only because its value set
+    # is CLOSED (scored/rescued/unavailable). push_record sends typecast=True,
+    # which silently MINTS a missing option — harmless for a closed set, but it
+    # would turn the free-form detail into hundreds of one-off options and drop
+    # rows out of the reviewer's saved views. That is why the detail is text.
+    #
+    # csv_safe on both text fields: "Relevance Notes" is the most
+    # attacker-influenced field in this record — model-generated prose derived
+    # from video a creator fully controls, and models reproduce on-screen text
+    # faithfully. Newlines are already flattened at the assembly site in
+    # gemini_verify._notes, because csv_safe only inspects value[0] and an
+    # embedded newline in a CSV export can start a fresh logical line.
+    #
+    # "Verified Video URL" is deliberately NOT wrapped: it always starts with
+    # "https://", so it cannot begin with a formula prefix. Do not "simplify" it
+    # to a bare video ID — an 11-character YouTube ID can legitimately start with
+    # "-", which IS a formula prefix, and the hole would reopen silently.
+    if judgement is not None and niche_table:
+        if table_has_field(niche_table, "Relevance State"):
+            record["Relevance State"] = judgement.state
+        if table_has_field(niche_table, "Relevance Detail"):
+            record["Relevance Detail"] = csv_safe(judgement.detail)
+        if judgement.notes and table_has_field(niche_table, "Relevance Notes"):
+            record["Relevance Notes"] = csv_safe(judgement.notes)
+        if judgement.video_url and table_has_field(niche_table, "Verified Video URL"):
+            record["Verified Video URL"] = judgement.video_url
+
     if niche_table and table_has_field(niche_table, "Email Source"):
         record["Email Source"] = csv_safe(email_source or _email_miss_note(enricher))
     if niche_table and table_has_field(niche_table, "Email Type"):
@@ -1728,6 +1810,7 @@ def _run_discovery_rounds(
     qualified_headroom: int,
     flagged_headroom: int,
     tracked_handles=(),
+    verifier=None,
 ) -> dict:
     """
     Fill a niche's daily budget from influencers.club discovery instead of
@@ -1847,6 +1930,7 @@ def _run_discovery_rounds(
                 c, external_handles, blocklist, niche_config, scraper, enricher,
                 known_channel_ids=globally_tracked_ids | pushed_ids,
                 has_room=has_room,
+                verifier=verifier,
             ),
             table_name,
             qualified_headroom - pushed_qualified,
@@ -1897,6 +1981,7 @@ def run_niche(
     scraper,
     enricher=None,
     discovery=None,
+    verifier=None,
 ) -> tuple[int, int, set[str], bool]:
     """
     Run discovery -> pre-filter -> enrich -> score -> push for one niche's
@@ -2010,6 +2095,7 @@ def run_niche(
             globally_tracked_ids, external_handles, blocklist, scraper, enricher,
             qualified_headroom, flagged_headroom,
             tracked_handles=get_tracked_handles(table_name),
+            verifier=verifier,
         )
         pushed_qualified = d["qualified"]
         pushed_flagged = d["flagged"]
@@ -2093,6 +2179,7 @@ def run_niche(
             lambda c, has_room: process_candidate(
                 c, external_handles, blocklist, niche_config, scraper, enricher,
                 has_room=has_room,
+                verifier=verifier,
             ),
             table_name,
             qualified_headroom - pushed_qualified,
@@ -2232,6 +2319,15 @@ def run(
     else:
         logger.info("influencers.club discovery unavailable — discovery falls back to YouTube search.list.")
 
+    # Gemini relevance verification. One verifier per run, for the same reason
+    # the two clients above are per-run: the request counters, the quota latch and
+    # the wall-clock budget all describe ONE run. from_config() returns None when
+    # the feature is off, the key is missing, the model is not allowlisted, or the
+    # ledger is unreadable — so `verifier is None` is the single inert state and
+    # every downstream branch is a no-op by construction. It logs its own
+    # enabled/disabled line, at WARNING when the configuration is contradictory.
+    verifier = GeminiVerifier.from_config()
+
     scraper = BrowserEmailScraper.launch() if USE_PLAYWRIGHT_STEALTH else null_scraper()
     # launch() fails SOFT — a missing Chromium binary, a missing shared
     # library, or an unimportable playwright all return an inert scraper
@@ -2275,6 +2371,7 @@ def run(
                 scraper,
                 enricher,
                 discovery,
+                verifier,
             )
             total_discovered += discovered
             total_processed += processed
@@ -2327,6 +2424,25 @@ def run(
     # when this run spent nothing — since "already at 9.8 of 10 today" is most
     # worth knowing on the run that is about to be refused.
     print(f"credits, all runs today: {credit_spend_summary()}")
+
+    # Gemini, printed UNCONDITIONALLY whenever the feature is enabled — zeros
+    # included. The `if …spent:` guards above are right for spend that may
+    # legitimately be zero, but they are WRONG here: the case most worth
+    # surfacing is "enabled and issued nothing", which on CI means the workflow
+    # env: entry or the cache path is missing. A conditional line would hide the
+    # feature in exactly its most common failure. Same reasoning as
+    # credit_spend_summary() printing unconditionally.
+    #
+    # The RESCUED count is the number to watch, and it is the direct analogue of
+    # the credits-per-row ratio above: if it stays at 0 the feature is a
+    # well-tested no-op and should be switched off or retuned, and that is
+    # visible within one run instead of after a month of reading verdicts.
+    if verifier is not None:
+        for line in verifier.summary_lines():
+            print(line)
+        verifier.flush_cache()
+    else:
+        print('gemini relevance:  DISABLED (see the startup log line for why)')
 
     if not any_cap_check_completed:
         logger.error(

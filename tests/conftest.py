@@ -84,6 +84,37 @@ def isolate_credit_ledger(tmp_path, monkeypatch):
     monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_MONTH", float("inf"))
 
 
+@pytest.fixture(autouse=True)
+def isolate_rejected_handles(tmp_path, monkeypatch):
+    """
+    Point the rejected-handle cache at a per-test temp file.
+
+    Exactly the same hazard as `isolate_credit_ledger` above, and it had already
+    happened by the time this fixture was written: 58 synthetic handles
+    (`a0`..`a57`, all stamped 2026-08-20) were found sitting in the repo's real
+    `rejected_handles.json`, in the Home Theater niche, alongside 262 genuine
+    ones. A test suite had written to production state.
+
+    Why only that file was hit: `tests/test_rejected_handles.py` monkeypatches
+    `REJECTED_HANDLES_FILE` itself, so it was always clean. Every OTHER test that
+    reaches a code path calling `rejected_handles.add()` — the discovery-wiring
+    tests especially — had nothing pointing it away from the real file.
+
+    Patches the name bound in `rejected_handles`, not `config`, for the reason
+    the sibling fixture spells out: the module does `from config import ...`, so
+    the value is copied into its globals at import.
+
+    The contamination was not harmless. Those handles are sent to the vendor in
+    `exclude_handles` on every run, so a polluted cache spends part of a
+    10,000-handle request budget on strings that match no creator.
+    """
+    import rejected_handles
+
+    monkeypatch.setattr(
+        rejected_handles, "REJECTED_HANDLES_FILE", str(tmp_path / "rejected_handles.json")
+    )
+
+
 @pytest.fixture
 def credit_ceilings(monkeypatch):
     """

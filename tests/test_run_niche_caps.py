@@ -1,4 +1,6 @@
 """Caps count successful pushes only, and the two budgets are separate."""
+from collections import Counter
+
 import pytest
 
 
@@ -159,4 +161,6 @@ def test_zero_headroom_pushes_nothing(monkeypatch):
         flagged_headroom=0,
     )
     assert result == {"qualified": 0, "flagged": 0, "skipped": 0,
-                      "pushed_ids": set(), "rejected_handles": set()}
+                      "pushed_ids": set(), "rejected_handles": set(),
+                      # Nothing was examined, so no gate had a chance to speak.
+                      "drop_reasons": Counter()}

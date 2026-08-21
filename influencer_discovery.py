@@ -335,6 +335,61 @@ class InfluencerDiscovery:
         )
         return result
 
+    def probe(self, filters: dict, limit: int = 1, *, source_label="pool probe"):
+        """
+        One measurement request, billed THROUGH THE LEDGER.
+
+        Exists because the measurement scripts used to call `_post` directly,
+        and `_post` is only the HTTP call — `can_afford` and `record_spend` live
+        inside `discover()`'s loop. So every ablation run spent real vendor
+        credits that `credit_log.json` never saw and that no day or month
+        ceiling was ever checked against. At limit=1 that was ~0.1 credits per
+        run and invisible; at the limit=20 a variant sweep needs it is ~2.0,
+        about 20% of the day cap, entirely off the books. The ledger's whole
+        premise is that no spend escapes it.
+
+        Returns (accounts, total) — or (None, None) when the request failed or
+        the spend was refused, so a caller can tell "no results" apart from
+        "never asked". Unlike discover() this does NOT paginate, does NOT
+        dedupe, and does NOT convert to candidates: it is for measuring, and
+        the raw account dicts are what a precision read needs.
+        """
+        if not self.enabled:
+            return None, None
+        # The vendor bills per creator RETURNED, so a limit=N request costs at
+        # most N * 0.01 — much cheaper than discover()'s whole-page projection,
+        # and worth pricing exactly since the point of a probe is to be cheap.
+        cost_estimate = limit * CREDITS_PER_CREATOR
+        if self._credits_spent + cost_estimate > self._max_credits:
+            logger.warning(
+                "probe would exceed the per-run ceiling (%.2f spent of %.2f, "
+                "probe costs up to %.2f) — refusing.",
+                self._credits_spent, self._max_credits, cost_estimate,
+            )
+            return None, None
+        if not can_afford(cost_estimate, source_label):
+            self._active = False
+            return None, None
+
+        resp = self._post({
+            "platform": "youtube",
+            "paging": {"limit": limit, "page": 0},
+            "sort": DEFAULT_SORT,
+            "filters": dict(filters),
+        })
+        if resp is None:
+            return None, None
+
+        accounts, total, cost, credits_left = self._parse(resp)
+        self._credits_spent += cost
+        if not record_spend(cost, kind=KIND_DISCOVERY, detail=source_label):
+            self._active = False
+        if credits_left is not None:
+            self._credits_left_reported = credits_left
+            record_vendor_balance(credits_left)
+        self._creators_billed += len(accounts)
+        return accounts, total
+
     def _prepare_exclude(self, exclude_handles) -> list[str]:
         """
         Normalize, dedupe, and cap the exclusion set.

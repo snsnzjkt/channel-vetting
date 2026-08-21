@@ -387,3 +387,76 @@ vendor payload wiring and now falls through to the keyword loop. It forces
 - **Autouse isolation for `gemini_log.json`** — same latent gap as the rejected
   cache, but the Gemini tests already patch their own path, so there is no
   active bug. Flagged rather than built, to stay in scope.
+
+---
+
+## 11. RESULT — full 9-keyword Home Theater run, 2026-08-21
+
+```
+  BEFORE (paid vendor path)          AFTER (free search.list path)
+  candidates examined   ~5-50        342
+  rows written           0-2         7   (5 qualified, 2 flagged)
+  discovery credits      up to 6     0
+  total credits          ~6          0.24  (0.04 probes + 0.20 email enrichment)
+  wall clock             -           12m17s
+  YouTube quota          -           4,122 / 10,000
+```
+
+Home Theater went from producing zero to producing seven in a single run, at
+zero discovery cost. The supply problem is solved.
+
+### Where the 342 went
+
+```
+  outside_search_zone        106   <- geography, 64% of all drops with the next
+  no_declared_country         67   <- line. NOT CHANGED, by operator instruction.
+  below_view_minimum          42
+  duplicate                   34
+  shorts_only                 18
+  non_english_description     11
+  excluded_topic               8
+  too_few_longform_videos      5
+  too_few_videos               4
+  off_target_niche             3   <- the relevance gate, after the fix
+  not_english                  3
+  blocked                      3
+  video_below_view_minimum     2
+```
+
+The relevance gate accounted for **3 drops out of 269**. Before the fix it was
+dropping 67% of the channels the reviewer had approved. It is now out of the way,
+which is exactly what it should be.
+
+### THE HONEST PART: what actually landed
+
+Drew Binsky (travel, 7.3M), Josh Pate's College Football Show, JTL SPORTS,
+3AW Football, Hi My Car, 1221 Manhwa Recap, stuffeyy, Danny & Diggy.
+
+**Not one of them is a home theater channel.** They came from Home Theater's
+ADJACENCY keywords — `sports podcast commentary`, `car and truck review`,
+`homesteading vlog`, `movie review and reaction` — which predate this work.
+The home-theater-proper keywords contributed almost nothing, because that
+corpus is where the niche was already exhausted.
+
+Whether this is success or failure is a question only the reviewer can answer,
+and it is the RIGHT question to put to him:
+
+- If the audience-adjacency theory is right — the one the label analysis
+  supports, where the reviewer buys an audience for home-entertainment
+  FURNITURE rather than AV expertise — then a man-cave-adjacent sports podcast
+  is a legitimate prospect and these rows are the point.
+- If it is wrong, then these keywords are noise and should be cut, and Home
+  Theater has no free corpus worth searching.
+
+`1221 Manhwa Recap` is the row that suggests at least some of the adjacency
+vocabulary is too loose regardless of which way the theory falls.
+
+**Do not tune anything further until the reviewer has judged these seven.**
+Guessing his taste is what produced the inverted relevance criterion, the
+inverted off-target gate, and two rounds of wasted calibration. Seven labelled
+verdicts are worth more than any amount of further reasoning here.
+
+### Not changed, by instruction
+- Location / search zone — despite being 64% of drops.
+- Gender filter.
+- Credit budget.

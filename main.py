@@ -2483,6 +2483,40 @@ def run(
         )
         raise SystemExit(1)
 
+    # ZERO ROWS AFTER REAL WORK IS ALSO A RESULT THAT NEEDS SAYING OUT LOUD.
+    #
+    # The check above only catches a run that never got as far as a cap check. It
+    # says nothing about the case that actually happened repeatedly on this
+    # pipeline: discovery ran, credits were spent, candidates were examined, and
+    # NOT ONE row was written — and the run exited 0 and reported green. From the
+    # outside that is indistinguishable from a healthy quiet day, which is why
+    # "the pipeline gives no records" went undiagnosed.
+    #
+    # Deliberately a LOUD ERROR and not a non-zero exit. The run genuinely
+    # succeeded at everything it was asked to do; the finding is about YIELD, not
+    # correctness, and failing a scheduled job for a weak day would train whoever
+    # watches it to ignore red. The line carries the two numbers that tell a weak
+    # day apart from a broken one, and names the first thing to check.
+    if total_processed == 0 and total_discovered > 0:
+        logger.error(
+            "ZERO ROWS WRITTEN this run, from %d creator(s) discovered. The run "
+            "itself worked — this is a yield result, not a crash. Check, in this "
+            "order: (1) the drop-reason counts printed above, which say which gate "
+            "consumed the candidates; (2) whether the niche's discovery pool is "
+            "simply exhausted — a limit=1 probe costs 0.01 credits and Home "
+            "Theater's whole pool measured 208 creators on 2026-08-21, of which "
+            "most were already tracked; (3) TODOS.md 'Yield levers', which ranks "
+            "the gates by how many rows each is actually costing.",
+            total_discovered,
+        )
+    elif total_processed == 0:
+        logger.warning(
+            "Zero rows written and zero creators discovered. Nothing was examined, "
+            "so no gate is at fault — discovery returned nothing. Either the pool "
+            "is exhausted for every niche, or the discovery source is refusing "
+            "(check the credit ledger and the influencers.club warnings above)."
+        )
+
 
 def main() -> None:
     global DAILY_QUALIFIED_CAP, DAILY_FLAGGED_CAP

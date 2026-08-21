@@ -274,3 +274,40 @@ Deferred work, with the reason it was deferred. Created 2026-08-14 by the
 - **Keep channels that declare no country** rather than dropping them (5 of 29).
   Currently a deliberate break from the repo's own "absent data never
   disqualifies" rule.
+
+## Home Theater ran out of POOL, not out of leniency (measured 2026-08-21)
+
+`measure_discovery_pool.py` (limit=1 probes, 0.01 credits each):
+
+```
+  Home Theater   baseline pool = 208        Lifestyle Sofa  baseline = 1,498
+    subscriber floor 10k -> 2.5k    334  +61%      2,846  +90%   <- APPLIED
+    drop the gender filter          749 +260%      2,140  +43%   <- see below
+    drop the location filter        979 +371%      2,877  +92%   <- excluded by
+                                                                    instruction
+    drop the negation keyword list  225   +8%      1,516   +1%
+    drop profile_language           216   +4%      1,555   +4%
+    subs 2.5k + no gender         1,299 +525%      4,057 +171%
+```
+
+**208 creators was the whole Home Theater universe.** At a measured 1 row per
+100-150 creators that is 1-2 rows in total, and roughly 64 of the 208 were already
+tracked or in `rejected_handles.json`. So zero-record runs were pool exhaustion,
+not strictness — which is why loosening gates barely moved it.
+
+- **APPLIED: `DISCOVERY_SUBSCRIBER_FLOOR_RATIO` 1.0 -> 0.25.** Home Theater 208 ->
+  334, Lifestyle 1,498 -> 2,846. This loosens **no** quality gate: subscribers are
+  a proxy, and the real 10,000-average-views requirement is untouched and still
+  applied to every candidate. A channel with 6,000 subscribers and 15,000 average
+  views passed every hard requirement and was simply never surfaced.
+
+- **NOT APPLIED, and the biggest lever left: the per-niche `gender` filter.**
+  Home Theater filters to male creators, Lifestyle to female. Dropping it takes
+  Home Theater from 208 to 749 (+260%) — more than four times what the subscriber
+  floor bought. It is not a quality gate at all; it is an audience-targeting
+  assumption, so widening it is a brief decision rather than a strictness one and
+  was deliberately left to the operator. Combined with the subscriber floor
+  already applied it would give Home Theater a 1,299-creator pool, finally
+  comparable to Lifestyle's.
+
+- Location was excluded by explicit instruction and is not revisited here.

@@ -11,7 +11,7 @@ truth: adding a niche in one place is still enough.
 """
 import logging
 
-from config import AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA
+from config import AIRTABLE_TABLE_HOME_THEATER, AIRTABLE_TABLE_LIFESTYLE_SOFA, DISCOVERY_SUBSCRIBER_FLOOR_RATIO as CONFIG_DISCOVERY_SUBSCRIBER_FLOOR_RATIO
 from search_zones import ZONE_CORE, vendor_locations_for
 
 logger = logging.getLogger(__name__)
@@ -509,7 +509,10 @@ NICHES = {
 # an `average_views` filter and silently ignores it (verified — total unchanged
 # at min=100,000,000). The subscriber floor is the only lever the vendor honours,
 # which is why it carries this much weight.
-DISCOVERY_SUBSCRIBER_FLOOR_RATIO = 1.0
+# Value lives in config.py — it is env-tunable and config.py is the only
+# module that reads environment variables. See there for the measurement
+# that set it and for why lowering it loosens no quality gate.
+DISCOVERY_SUBSCRIBER_FLOOR_RATIO = CONFIG_DISCOVERY_SUBSCRIBER_FLOOR_RATIO
 
 
 # Whole categories a brand-partnership run must never surface, however well a

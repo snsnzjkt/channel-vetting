@@ -106,6 +106,29 @@ SOURCE_LABEL = "YouTube Discovery Pipeline"
 # to retune it live at MIN_VIEWS_PER_VIDEO_RATIO in main.py.
 MIN_VIEWS_PER_VIDEO_RATIO = float(os.getenv("MIN_VIEWS_PER_VIDEO_RATIO", 0.30))
 
+# The discovery-side SUBSCRIBER floor, as a fraction of the niche's own
+# min_avg_views. Lowered 1.0 -> 0.25 on 2026-08-21, so a 10,000-average-views
+# niche asks the vendor for 2,500+ subscribers instead of 10,000+.
+#
+# THIS LOOSENS NO QUALITY GATE. Subscribers are a proxy; the real requirement is
+# 10,000 AVERAGE VIEWS, and that gate is untouched and still applied to every
+# candidate. A channel with 6,000 subscribers and 15,000 average views passes
+# every hard requirement this pipeline has and was simply never surfaced.
+#
+# MEASURED with limit=1 probes on 2026-08-21 (0.01 credits each), which is what
+# made the real problem visible: the Home Theater pool at a 10,000 floor is only
+# **208 creators in total**. At the measured 1 row per 100-150 creators the entire
+# addressable universe yields 1-2 rows, and roughly 64 of those 208 are already
+# tracked or rejected — so Home Theater had essentially run out of pool. That, not
+# gate strictness, is why it returned no records. Lifestyle's pool is 1,498, which
+# is exactly why it kept producing rows.
+#
+#   Home Theater    208 -> 334 (+61%)
+#   Lifestyle     1,498 -> 2,846 (+90%)
+DISCOVERY_SUBSCRIBER_FLOOR_RATIO = float(
+    os.getenv("DISCOVERY_SUBSCRIBER_FLOOR_RATIO", 0.25)
+)
+
 # --- Daily prospect caps ---
 # "Prospect" = a record successfully pushed to Airtable. Counted per niche
 # per day from Airtable's own "Date Added" field, so a second run on the

@@ -87,12 +87,30 @@ class FakeResponse:
         return self._payload
 
 
-def body_for(matches=True, confidence=0.9, on_niche=True, relevance=80,
-             finish="STOP", model="gemini-3.5-flash-lite", tokens=2400):
-    inner = {"matches": matches, "confidence": confidence, "reason": "because",
-             "criteria_results": [{"criterion": "c", "matches": matches,
-                                   "evidence": "seen"}]}
-    inner.update({"on_niche": on_niche, "relevance": relevance})
+def body_for(matches=True, confidence=0.9, on_niche=None, relevance=80,
+             finish="STOP", model="gemini-3.5-flash-lite", tokens=2400,
+             tier="video"):
+    """
+    A response body for ONE tier, carrying only that tier's own keys.
+
+    This deliberately does NOT put both `matches` and `on_niche` in every
+    payload. It used to, and that masked a real bug: _parse_verdict hardcoded
+    "matches", so every well-formed TEXT verdict — which uses `on_niche` — was
+    rejected as malformed. The model was answering correctly and the parser was
+    throwing the answer away, and the tests could not see it because the fixture
+    was more generous than the API. A fixture must be exactly as strict as the
+    thing it stands in for.
+    """
+    if tier == "text":
+        inner = {"on_niche": on_niche if on_niche is not None else True,
+                 "relevance": relevance, "confidence": confidence,
+                 "reason": "because",
+                 "criteria_results": [{"criterion": "c", "matches": True,
+                                       "evidence": "seen"}]}
+    else:
+        inner = {"matches": matches, "confidence": confidence, "reason": "because",
+                 "criteria_results": [{"criterion": "c", "matches": matches,
+                                       "evidence": "seen"}]}
     return {
         "candidates": [{"finishReason": finish,
                         "content": {"parts": [{"text": json.dumps(inner)}]}}],
@@ -159,7 +177,7 @@ def test_off_allowlist_model_makes_no_request(monkeypatch, verifier):
 
 def test_flagged_candidate_is_rescued_when_both_tiers_confirm(monkeypatch, verifier):
     calls = stub_post(monkeypatch,
-                      FakeResponse(200, body_for(on_niche=True, confidence=0.9)),
+                      FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
                       FakeResponse(200, body_for(matches=True, confidence=0.88)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is True
@@ -172,7 +190,7 @@ def test_flagged_candidate_is_rescued_when_both_tiers_confirm(monkeypatch, verif
 
 def test_unflagged_candidate_is_scored_and_never_gated(monkeypatch, verifier):
     """The broad tier is ADVISORY. An off-niche score must not drop anything."""
-    stub_post(monkeypatch, FakeResponse(200, body_for(on_niche=False, relevance=3)))
+    stub_post(monkeypatch, FakeResponse(200, body_for(tier="text", on_niche=False, relevance=3)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=False)
     assert j.rescued is False
     assert j.state == gv.STATE_SCORED
@@ -183,7 +201,7 @@ def test_unflagged_candidate_is_scored_and_never_gated(monkeypatch, verifier):
 
 def test_video_saying_no_does_not_rescue(monkeypatch, verifier):
     stub_post(monkeypatch,
-              FakeResponse(200, body_for(on_niche=True, confidence=0.9)),
+              FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
               FakeResponse(200, body_for(matches=False, confidence=0.95)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is False, "a 'no' leaves the existing gate's drop in place"
@@ -191,7 +209,7 @@ def test_video_saying_no_does_not_rescue(monkeypatch, verifier):
 
 
 def test_text_saying_off_niche_skips_the_video_tier(monkeypatch, verifier):
-    calls = stub_post(monkeypatch, FakeResponse(200, body_for(on_niche=False)))
+    calls = stub_post(monkeypatch, FakeResponse(200, body_for(tier="text", on_niche=False)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is False
     assert len(calls) == 1, "no video request for a candidate text already rejected"
@@ -206,7 +224,7 @@ def test_low_confidence_never_rescues(monkeypatch, verifier):
     rescue, so that is what the threshold must hold.
     """
     stub_post(monkeypatch,
-              FakeResponse(200, body_for(on_niche=True, confidence=0.9)),
+              FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
               FakeResponse(200, body_for(matches=True, confidence=0.41)))
     j = verifier.judge(NICHE, STATS, PERF, flagged=True)
     assert j.rescued is False
@@ -217,7 +235,7 @@ def test_confident_true_with_no_evidence_does_not_rescue(monkeypatch, verifier):
     """Hostile-QA case: matches=true, confidence 0.0, empty criteria_results."""
     payload = body_for(matches=True, confidence=0.0)
     stub_post(monkeypatch,
-              FakeResponse(200, body_for(on_niche=True, confidence=0.9)),
+              FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
               FakeResponse(200, payload))
     assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is False
 
@@ -306,7 +324,7 @@ def test_after_the_wall_no_further_request_is_issued(monkeypatch, verifier):
 
 def test_a_cached_verdict_costs_no_request(monkeypatch, verifier):
     calls = stub_post(monkeypatch,
-                      FakeResponse(200, body_for(on_niche=True, confidence=0.9)),
+                      FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9)),
                       FakeResponse(200, body_for(matches=True, confidence=0.9)))
     assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is True
     before = len(calls)
@@ -316,7 +334,7 @@ def test_a_cached_verdict_costs_no_request(monkeypatch, verifier):
 
 
 def test_editing_criteria_invalidates_the_cache(monkeypatch, verifier):
-    stub_post(monkeypatch, *[FakeResponse(200, body_for(on_niche=True, confidence=0.9))] * 2)
+    stub_post(monkeypatch, *[FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9))] * 2)
     a = verifier._cache_key("text", "UC1", gv.criteria_hash(NICHE["text_criteria"]))
     b = verifier._cache_key("text", "UC1", gv.criteria_hash(
         [{"name": "t", "test": "DIFFERENT"}]))
@@ -406,7 +424,7 @@ def test_offsets_serialise_as_whole_seconds():
 # --- 13. caps -----------------------------------------------------------
 
 def test_run_cap_stops_requests(monkeypatch, verifier):
-    calls = stub_post(monkeypatch, *[FakeResponse(200, body_for())] * 20)
+    calls = stub_post(monkeypatch, *[FakeResponse(200, body_for(tier="text"))] * 20)
     verifier.max_requests = 2
     # Distinct channels, or the cache would serve four of the five and the cap
     # would never be reached — which is the cache working, not the cap.
@@ -433,7 +451,7 @@ def test_day_cap_persists_across_two_verifiers(monkeypatch, tmp_path):
     bug credit_tracker's docstring was written about.
     """
     monkeypatch.setattr(gemini_tracker, "GEMINI_MAX_REQUESTS_PER_DAY", 2)
-    stub_post(monkeypatch, *[FakeResponse(200, body_for())] * 10)
+    stub_post(monkeypatch, *[FakeResponse(200, body_for(tier="text"))] * 10)
     for _ in range(2):
         v = gv.GeminiVerifier("gemini-3.5-flash-lite", str(tmp_path / "c.json"),
                               100, 50, 900, 0.6, 1)
@@ -501,7 +519,7 @@ def test_no_long_form_video_is_survivable(monkeypatch, verifier):
     count_longform_in_older_videos, which pages BEYOND the fetched window, so a
     channel can clear MIN_LONGFORM_VIDEO_COUNT with zero long-form uploads here.
     """
-    stub_post(monkeypatch, *[FakeResponse(200, body_for(on_niche=True, confidence=0.9))] * 6)
+    stub_post(monkeypatch, *[FakeResponse(200, body_for(tier="text", on_niche=True, confidence=0.9))] * 6)
     base = {k: v for k, v in PERF.items() if k != "settled_longform"}
     cases = [
         base,                                                   # key absent entirely
@@ -580,3 +598,30 @@ def test_off_allowlist_model_returns_no_verifier(monkeypatch):
     monkeypatch.setattr(config, "GEMINI_API_KEY", "k")
     monkeypatch.setattr(config, "GEMINI_MODEL", "gemini-2.5-flash")
     assert gv.GeminiVerifier.from_config() is None
+
+
+def test_a_text_verdict_is_not_rejected_for_lacking_the_video_key(monkeypatch, verifier):
+    """
+    REGRESSION. _parse_verdict once hardcoded "matches", the VIDEO tier's boolean,
+    so every well-formed TEXT verdict — which uses `on_niche` — was thrown away as
+    malformed. Three real channels came back "unavailable (malformed)" while the
+    model had in fact answered `on_niche: true, relevance: 95, confidence: 0.95`
+    with good evidence.
+
+    This asserts the text tier parses a payload carrying ONLY its own key.
+    """
+    payload = {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": json.dumps(
+        {"on_niche": True, "relevance": 95, "confidence": 0.95, "reason": "r",
+         "criteria_results": [{"criterion": "c", "matches": True, "evidence": "e"}]})}]}}],
+        "modelVersion": "gemini-3.5-flash-lite",
+        "usageMetadata": {"promptTokenCount": 6403}}
+    assert gv._parse_verdict(payload, verdict_key="on_niche").ok is True
+    # ...and the video key is still required on the video tier.
+    assert gv._parse_verdict(payload, verdict_key="matches").reason_code == gv.MALFORMED
+
+
+def test_each_tier_requires_its_own_boolean(monkeypatch, verifier):
+    """A video payload must not satisfy the text tier, or vice versa."""
+    stub_post(monkeypatch, FakeResponse(200, body_for(tier="video", matches=True)))
+    j = verifier.judge(NICHE, STATS, PERF, flagged=True)
+    assert j.state == gv.STATE_UNAVAILABLE, "a video-shaped reply is not a text verdict"

@@ -278,9 +278,17 @@ def _classify_error(resp) -> str:
     return UNREACHABLE
 
 
-def _parse_verdict(payload: dict) -> Verdict:
+def _parse_verdict(payload: dict, verdict_key: str = "matches") -> Verdict:
     """
     Validate a 200 body into a Verdict, or a named failure.
+
+    `verdict_key` is the tier's boolean field: "matches" for video, "on_niche"
+    for text. It is a PARAMETER and not a hardcoded string because it was
+    hardcoded to "matches" once, which silently rejected every well-formed text
+    verdict as malformed — the model answered correctly and the parser threw the
+    answer away. Unit tests missed it because the fixture put BOTH keys in every
+    payload; a live end-to-end run found it immediately. If a third tier is ever
+    added, pass its key rather than adding another `or`.
 
     responseSchema is the primary mechanism — no regex, no fence-stripping, no
     "find the first {". But it is NOT blindly trusted: a MAX_TOKENS finish, a
@@ -324,7 +332,13 @@ def _parse_verdict(payload: dict) -> Verdict:
     # Range and type validation. A schema-honouring model can still return a
     # confidence of 1.7, and a confidence outside [0,1] cannot be compared
     # against GEMINI_MIN_CONFIDENCE meaningfully.
-    if not isinstance(parsed.get("matches"), bool):
+    if not isinstance(parsed.get(verdict_key), bool):
+        logger.warning(
+            "Gemini verdict is missing its %r boolean (keys: %s) — treating as "
+            "malformed. The candidate keeps the verdict the existing gates gave "
+            "it. If this fires on every request, the tier and the schema have "
+            "drifted apart.", verdict_key, sorted(parsed) if isinstance(parsed, dict) else "?",
+        )
         return Verdict(MALFORMED, model_version=model_version, tokens=tokens)
     conf = parsed.get("confidence")
     if not isinstance(conf, (int, float)) or isinstance(conf, bool) or not 0.0 <= float(conf) <= 1.0:
@@ -335,7 +349,7 @@ def _parse_verdict(payload: dict) -> Verdict:
     return Verdict(OK, payload=parsed, model_version=model_version, tokens=tokens)
 
 
-def call(body: dict, model=None) -> Verdict:
+def call(body: dict, model=None, verdict_key: str = "matches") -> Verdict:
     """
     POST one request and return a Verdict. Never raises.
 
@@ -381,7 +395,7 @@ def call(body: dict, model=None) -> Verdict:
         return Verdict(reason)
 
     try:
-        return _parse_verdict(resp.json())
+        return _parse_verdict(resp.json(), verdict_key=verdict_key)
     except ValueError:
         return Verdict(MALFORMED)
 
@@ -733,7 +747,7 @@ class GeminiVerifier:
         else:
             self.reasons.pop("consecutive_400", None)
 
-    def _call_cached(self, key, body, *, video: bool) -> Verdict:
+    def _call_cached(self, key, body, *, video: bool, verdict_key="matches") -> Verdict:
         """One request, or a cached verdict. Budget is checked by the caller."""
         import time
         cache = self._load_cache()
@@ -743,7 +757,7 @@ class GeminiVerifier:
             return Verdict(hit.get("reason_code", MALFORMED), hit.get("payload"),
                            hit.get("model_version", ""), 0)
         started = time.monotonic()
-        verdict = call(body, model=self.model)
+        verdict = call(body, model=self.model, verdict_key=verdict_key)
         self._record(verdict, video=video, elapsed=time.monotonic() - started)
         # Only successful verdicts are cached. A transient failure must not be
         # remembered for 30 days — that would convert a blip into a standing
@@ -785,7 +799,8 @@ class GeminiVerifier:
             stats.get("description", ""), performance.get("video_titles"),
             performance.get("video_descriptions"), text_criteria,
         )
-        v = self._call_cached(self._cache_key("text", channel_id, digest), body, video=False)
+        v = self._call_cached(self._cache_key("text", channel_id, digest), body,
+                              video=False, verdict_key="on_niche")
         if not v.ok:
             self.unavailable += 1
             return Judgement(STATE_UNAVAILABLE, f"unavailable ({v.reason_code})")

@@ -31,3 +31,8 @@ outreach_preview/
 # public. gemini_log.json is a request counter, same shape as quota_log.json.
 gemini_log.json*
 gemini_cache.json*
+
+# Backtest run artefact. Holds creator names and reviewer verdicts —
+# same creator-PII reasoning as outreach_preview/. Regenerate with
+# `python backtest_relevance.py`.
+backtest_results.json*

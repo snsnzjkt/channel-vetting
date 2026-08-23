@@ -2164,13 +2164,22 @@ def run_niche(
     # unbounded corpus" beats "good conversion on an exhausted one". No quality
     # gate changes either way: every candidate from both sources goes through
     # the same process_candidate.
+    #
+    # THIRD OPTION, "both": run paid discovery AND THEN top up from the free
+    # keywords in the same run. Added 2026-08-22 because the two sources were
+    # mutually exclusive for no good reason, and each is bounded in a different
+    # way — the paid one by the credit budget (Lifestyle can afford ~600 of its
+    # 2,814 available creators per run), the free one by the search window. A
+    # niche that exhausts its paid budget has no reason to stop when a free
+    # corpus is sitting there, and the keyword loop already respects the
+    # remaining headroom, so it simply fills what discovery could not.
     discovery_source = niche_config.get("discovery_source", "influencers")
     use_discovery = (
         discovery is not None and discovery.enabled
         and "discovery_filters" in niche_config
-        and discovery_source == "influencers"
+        and discovery_source in ("influencers", "both")
     )
-    if discovery_source != "influencers":
+    if discovery_source == "search_list":
         logger.info(
             "'%s' is configured for discovery_source=%r — using the free YouTube "
             "keyword loop instead of paid influencers.club discovery.",
@@ -2201,7 +2210,21 @@ def run_niche(
     # channel an earlier one already paid for. Emptied when discovery already
     # ran, so the keyword loop below is skipped entirely in that mode.
     seen_ids = set(globally_tracked_ids)
-    remaining_keywords = [] if use_discovery else list(keywords)
+    # Emptied only when paid discovery is the SOLE source. Under
+    # discovery_source="both" the keyword loop runs after the discovery rounds
+    # and tops up whatever headroom they left, which is the point of that mode.
+    #
+    # seen_ids is seeded with what discovery already pushed, so the keyword loop
+    # does not re-enrich a channel this run just wrote. Without it the duplicate
+    # would still be caught by process_candidate's known_channel_ids check, but
+    # only after paying a channels.list unit for it.
+    if use_discovery and discovery_source == "both":
+        remaining_keywords = list(keywords)
+        seen_ids |= pushed_ids
+    elif use_discovery:
+        remaining_keywords = []
+    else:
+        remaining_keywords = list(keywords)
     rounds = 0
 
     while remaining_keywords:

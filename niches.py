@@ -362,6 +362,18 @@ NICHES = {
         },
     },
     "Lifestyle Sofa": {
+        # "both" = paid discovery FIRST, then top up from `keywords` in the same
+        # run. Set 2026-08-22 because this niche is BUDGET-bound, not
+        # pool-bound: measured 2,814 creators still buyable and only ~600
+        # affordable per run at 6 credits, so 79% of its own pool goes
+        # unexamined every run and more budget was declined.
+        #
+        # The free keyword corpus costs YouTube quota instead of credits, and
+        # the keyword loop only spends the headroom paid discovery left, so this
+        # adds output without adding spend. Paid stays FIRST because its
+        # server-side filtering converts better per candidate — the free pass is
+        # a top-up, not a replacement.
+        "discovery_source": "both",
         # Stated EXPLICITLY rather than left to default-all, so adding a
         # category to OFF_TARGET_TERMS never silently changes this niche.
         # av_specialist is deliberately absent: it is measured for Home Theater

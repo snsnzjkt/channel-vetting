@@ -138,12 +138,19 @@ def test_home_theater_applies_only_the_measured_useful_categories():
     Re-enabling a category here without a fresh backtest re-breaks this.
     """
     assert niches.NICHES["Home Theater"]["off_target_categories"] == [
-        "toys_and_kids",    # reviewer instruction: no Lego, no kids' doll channels
-        "story_recap",      # reviewer instruction: no manhwa recaps
-        "av_specialist",    # measured: catches 5 rejected, kills 0 approved
+        "toys_and_kids",      # reviewer instruction: no Lego, no kids' doll channels
+        "story_recap",        # reviewer instruction: no manhwa recaps
+        "av_specialist",      # measured: catches 6 rejected, kills 0 approved
+        "automotive",         # measured: catches 1, kills 0
+        "movie_review_farm",  # measured: catches 1, kills 0
+        "kids_craft",         # catches 123 GO! and 123 GO! GOLD, kills 0
     ]
-    # The four omitted categories were each measured MORE likely to kill an
-    # approved channel than to catch a rejected one. Do not add them back.
+    # sports_commentary was TRIED AND REMOVED: on the refreshed labels (31/61,
+    # up from 21/31) it killed 3 approved — JTL SPORTS, MAH, Cowboys Report by
+    # Chat Sports — to catch 1. The reviewer also approved "The Joel Klatt
+    # Show: A College Football Podcast". Sports commentary is not disqualifying
+    # here, which also validates the "sports podcast commentary" KEYWORD.
+    assert "sports_commentary" not in niches.NICHES["Home Theater"]["off_target_categories"]
     for harmful in ("gaming", "phones_and_pcs", "generic_gadgets", "ai_and_crypto"):
         assert harmful not in niches.NICHES["Home Theater"]["off_target_categories"]
 
@@ -241,8 +248,14 @@ def test_lifestyle_states_its_categories_explicitly():
     """
     cats = niches.NICHES["Lifestyle Sofa"]["off_target_categories"]
     assert "av_specialist" not in cats
-    for expected in ("property_showcase", "travel_vlog", "story_recap"):
+    for expected in ("travel_vlog", "story_recap", "kids_craft"):
         assert expected in cats
+    # property_showcase was TRIED AND REMOVED: it caught 3 rejected but killed
+    # Diana Oachis, an APPROVED channel whose titles are "Inside Oakville's
+    # $5.98 MILLION MANSION" and "Madeira LUXURY Home Tour". The reviewer
+    # approves some luxury home tours and rejects others, so the category does
+    # not separate what he wants.
+    assert "property_showcase" not in cats
 
 
 def test_realestate_listing_was_deliberately_not_shipped():

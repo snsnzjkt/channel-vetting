@@ -56,11 +56,50 @@ def test_source_selects_the_path(source, expect_paid):
     assert chosen is expect_paid
 
 
-def test_home_theater_is_on_the_free_path_and_lifestyle_is_not():
-    """The live configuration, pinned. Flipping either is a deliberate act."""
+def test_the_live_discovery_sources_are_pinned():
+    """
+    The live configuration. Flipping either is a deliberate act.
+
+      Home Theater  -> "search_list"  paid pool measured spent (279 net)
+      Lifestyle     -> "both"         paid pool is 2,814 but only ~600 is
+                                      affordable per run, so the free keyword
+                                      corpus tops up the headroom paid
+                                      discovery could not reach
+    """
     import niches
     assert niches.NICHES["Home Theater"]["discovery_source"] == "search_list"
-    assert niches.NICHES["Lifestyle Sofa"].get("discovery_source", "influencers") == "influencers"
+    assert niches.NICHES["Lifestyle Sofa"]["discovery_source"] == "both"
+
+
+def test_both_mode_keeps_the_keyword_loop_alive():
+    """
+    Under "both" the keyword loop must NOT be emptied — that is the whole
+    point. Under plain "influencers" it must still be emptied, or every
+    influencers niche silently starts burning YouTube quota.
+    """
+    for source, keywords_expected in (("influencers", False), ("both", True), ("search_list", True)):
+        cfg = _niche(source)
+        use_discovery = (
+            "discovery_filters" in cfg
+            and cfg.get("discovery_source", "influencers") in ("influencers", "both")
+        )
+        if use_discovery and source == "both":
+            remaining = list(cfg["keywords"])
+        elif use_discovery:
+            remaining = []
+        else:
+            remaining = list(cfg["keywords"])
+        assert bool(remaining) is keywords_expected, f"{source} got remaining={remaining!r}"
+
+
+def test_both_mode_still_uses_paid_discovery_first():
+    """Paid converts better per candidate, so it must not be skipped."""
+    cfg = _niche("both")
+    use_discovery = (
+        "discovery_filters" in cfg
+        and cfg.get("discovery_source", "influencers") in ("influencers", "both")
+    )
+    assert use_discovery is True
 
 
 def test_home_theater_keeps_its_discovery_filters():

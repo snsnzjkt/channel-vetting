@@ -515,3 +515,66 @@ went from completely inert (0/37, 0/53) to 0 approved / 1 rejected.
 Nothing here narrows discovery. Every change is a targeted exclusion measured
 to cost zero approved channels. Volume levers (geography, gender, budget)
 remain untouched by instruction.
+
+---
+
+## 13. RESULTS — both niches, 2026-08-24
+
+Sequential runs, 90-day window, with the measured criteria live.
+
+```
+                    discovered    rows    credits            notes
+  Lifestyle Sofa       134         19     2.0 disc + email   was 0 — crash fix unblocked it
+  Home Theater         323          6     0 disc + email     + 29 from the earlier sweep
+```
+
+Tables now hold **65 rows awaiting review** (34 Home Theater, 31 Lifestyle).
+Session credit cost 5.04 of the 200/month ceiling; YouTube quota 3,580/10,000.
+
+### What the new filters kept out (18 channels in one run)
+
+```
+  toys / kids     Baby Doll Series, Dollhouse Mini World, Toys and Colours,
+                  Sammys collectable toys hall
+  AV specialist   AVForums, ListenUp, Electro Empire, Galaxy Geeks
+  automotive      Edmunds Cars, Diecast Cars-Trucks, Motor Future, My Car world
+  other           Watch Stuff With Us, Meow-some! Live
+```
+
+`Baby Doll Series` is the same channel type the reviewer originally flagged by
+hand. It is now caught automatically.
+
+### Drop distribution differs completely by niche
+
+```
+  HOME THEATER (323)              LIFESTYLE SOFA (134)
+    outside_search_zone   85        below_view_minimum   34
+    no_declared_country   59        shorts_only          12
+    below_view_minimum    45        too_few_longform      3
+    off_target_niche      18        no_declared_country   1
+    too_few_longform      13
+```
+
+Geography is 144 of 234 Home Theater drops and **1** of 50 for Lifestyle —
+because paid discovery filters location server-side while raw YouTube search
+does not. Unchanged by instruction, and it is now the binding constraint on
+Home Theater by a wide margin.
+
+### DIMINISHING RETURNS, stated plainly
+
+Home Theater produced 29 rows on the first 90-day sweep and 6 on the second,
+identical run. **The window does not refill.** The first sweep took the best
+candidates and they are now correctly skipped (277 of 323 skipped on the
+second). Re-running the same window is not a lever.
+
+What is left, in order of size:
+1. Geography — 144 of 234 drops. Declined by the operator.
+2. New keywords for both niches — free, untried.
+3. A wider window (180+ days) — free, diminishing.
+4. Credit budget — no longer binding: 5.04 spent of 200/month.
+
+### Cost shape has changed
+Discovery is no longer the cost driver; EMAIL ENRICHMENT is. 0.20 per lookup,
+only on candidates that clear every gate, so it scales with output rather than
+with waste. At the observed rate the 200/month ceiling supports well over 500
+rows. Budget is no longer the constraint it was when this plan opened.

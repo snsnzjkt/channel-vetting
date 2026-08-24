@@ -37,3 +37,4 @@ gemini_cache.json*
 # `python backtest_relevance.py`.
 backtest_results.json*
 run_metrics.jsonl
+video_topics_cache.json

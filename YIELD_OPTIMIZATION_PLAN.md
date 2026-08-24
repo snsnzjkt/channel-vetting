@@ -1300,3 +1300,110 @@ Move `longform_drop_reason` above the Gemini block too (169 -> 45). Requires an
 explicit call on spending YouTube quota to save Gemini requests. Quota is at 36%
 utilisation and Gemini requests at ~97%, so the trade looks right, but it was
 not reviewed.
+
+---
+
+## 14.11 SHIPPED — video topic gate, 2026-08-24
+
+Asked for: a transcript checker, so the pipeline can tell what a video is about
+("guns or legos"), using an ASR model such as Whisper.
+
+**The diagnosis was right and the vocabularies already existed.** The gap was
+never the terms — `EXCLUDED_TOPIC_TERMS["firearms"]` already holds `firearm`,
+`handgun`, `ammo`, and `OFF_TARGET_TERMS["toys_and_kids"]` already holds `lego`,
+`minifigure`, `brickheadz`. The gap is the **input**: every relevance signal in
+this pipeline reads what a channel is CALLED (`excluded_topic_reason`,
+`broadcast_tv_reason` — title and About bio) or what it NAMES its videos
+(`off_target_reason` — video titles). **None reads what a video is about.** A
+firearms channel titling videos "Range Day 47" passes both.
+
+### The transcript route is closed. Measured, not assumed.
+
+| route | result |
+|---|---|
+| `captions.download` (YouTube Data API) | requires **OAuth as the channel owner**. No third-party route at any price — a documented Google restriction, not a rate limit |
+| caption `baseUrl` from the watch page | **HTTP 200, 0 bytes** |
+| `&fmt=json3`, `&fmt=srv3`, with and without `Referer` | **HTTP 200, 0 bytes** each |
+| bare `/api/timedtext` | **HTTP 200, 0 bytes** |
+| InnerTube `/youtubei/v1/player` | request hung; consistent with the same block |
+
+The track **listing** is still readable — we can confirm English auto-captions
+exist — and the **content** is not. `youtube-transcript-api` uses these same
+endpoints and hits the same wall.
+
+Local ASR (Whisper / faster-whisper) would work, and does not fit here: it needs
+the audio, which means downloading it — against YouTube's terms — plus `ffmpeg`,
+model weights, and minutes of CPU per video. The 2026-08-24 Home Theater run
+already took **985s against a 900s Gemini brake**; ASR across ~90 candidates is
+hours, not minutes. Note also that **Whisper is OpenAI's, not Google's**;
+Google's equivalent is Cloud Speech-to-Text, which is paid, and §4 rules paid
+usage out.
+
+**What the pipeline already has instead:** Gemini is handed the video URL, not a
+transcript, and ingests **audio and frames together** — so "what is said" is
+already reachable through `video_criteria`, on a 25-second window. This change
+covers the whole sampled catalogue, from data already paid for. They complement.
+
+### What shipped
+
+| item | detail |
+|---|---|
+| `enrichment.py` | capture `snippet.tags` and `snippet.categoryId` — both already on the `videos.list` response ("a flat 1 unit regardless of parts"), both previously discarded. **This is R2.** |
+| `video_topics.py` (new) | share-based topic evidence over creator tags; word-boundary matching; category reporting; reviewer-readable summary |
+| `main.py` | `DROP_OFF_TOPIC_TAGS` + the gate, placed with the other **free** gates ahead of the paid Gemini call |
+| `config.py` | `VIDEO_TOPIC_GATE` (default **off**), `VIDEO_TOPIC_MIN_SHARE` (0.40), `VIDEO_TOPIC_CATEGORIES` (measured allowlist) |
+| `measure_video_topics.py` (new) | scores the signal against reviewer verdicts; caches, so a re-run is free |
+| tests | `test_video_topics.py` (14), `test_video_topic_gate.py` (10) |
+
+**Cost: zero.** No credits, no Gemini requests, no new network call, no new
+dependency. The tags arrive on a response the pipeline already makes.
+
+### MEASURED before shipping — 211 labelled channels (81 Approved / 130 Rejected)
+
+91% carry tags at all. A channel with no tags can never be dropped by this.
+
+```
+  share >= 40%          kills approved   catches rejected    net
+  gaming                             0                  2    +2
+  sports_commentary                  0                  1    +1
+  av_specialist                      0                  1    +1
+  toys_and_kids                      0                  1    +1
+  ------------------------------------------------------------------
+  total                              0                  5    +5
+```
+
+Five channels the reviewer rejected, caught at **zero cost to approved ones** —
+the same shape and scale as §12's shipped `av_specialist` change.
+
+**Two findings baked into the defaults rather than left to a reader:**
+
+- **`phones_and_pcs` is HARMFUL** at every threshold where it fires (-2 at 10%,
+  -1 at 25%), matching the 2026-08-21 title backtest that found the same
+  category anti-predictive. It is **excluded from the allowlist** and a test
+  asserts it can never drop.
+- **Lifestyle Sofa: nothing fires** at 25% over 113 labelled rows. This is a
+  Home Theater signal in practice — the same per-niche divergence §13 found in
+  the drop distributions. Left enabled for both because an inert gate costs
+  nothing, not because it was shown to work there.
+
+### Honest limits
+
+- **Guns and Lego specifically are unvalidated for benefit.** `firearms` fires on
+  **zero** of the 211 labelled channels, so the corpus contains no tagged
+  firearms channel to catch. `firearms`, `asmr` and `political` ship on the §12
+  `story_recap` precedent — instruction-backed exclusions with **zero measured
+  harm** — not on measured benefit. `toys_and_kids` did fire and did earn its
+  place (+1).
+- **Five catches on 211 rows is a real result and a small one.** The gate is
+  **default OFF**. Evidence is always computed and logged; only the drop is
+  gated. Run it advisory for a cycle, read the `TOPIC ADVISORY` lines, then arm
+  it with `VIDEO_TOPIC_GATE=true`.
+- Tags are creator-declared, so a creator who tags nothing or tags dishonestly is
+  invisible here. That is why this is negative-evidence-only and why absent tags
+  are never a verdict.
+
+### To arm it
+```
+VIDEO_TOPIC_GATE=true          # after a cycle of advisory logs
+VIDEO_TOPIC_MIN_SHARE=0.40     # 0.25 costs 1 approved for 4 more catches
+```

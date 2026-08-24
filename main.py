@@ -13,6 +13,7 @@ from collections import Counter
 from datetime import datetime, timezone
 
 import config as _config
+import video_topics
 import run_metrics
 import inspect
 import logging
@@ -80,6 +81,9 @@ from config import (
     INFLUENCERS_MAX_EXCLUDE_HANDLES,
     INFLUENCERS_TEST_DISCOVERY_CREDITS,
     USE_PLAYWRIGHT_STEALTH,
+    VIDEO_TOPIC_GATE,
+    VIDEO_TOPIC_MIN_SHARE,
+    VIDEO_TOPIC_CATEGORIES,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -464,6 +468,12 @@ DROP_NON_ENGLISH_DESCRIPTION = "non_english_description"
 OFF_TARGET_MIN_SHARE = 0.10
 
 DROP_OFF_TARGET = "off_target_niche"
+# The tag-based sibling of DROP_EXCLUDED_TOPIC. Distinct because they read
+# DIFFERENT TEXT — that one the channel title and bio, this one the creator's
+# own per-video tags — and collapsing them would hide which input fired, which
+# is the only thing that tells you whether the vocabulary or the surface was
+# wrong. See video_topics.py.
+DROP_OFF_TOPIC_TAGS = "off_topic_tags"
 DROP_NO_HEADROOM = "no_headroom_for_bucket"
 
 # Drop reasons that say nothing about the CHANNEL, only about this run's
@@ -1379,6 +1389,55 @@ def process_candidate(
     off_target, off_detail = off_target_reason(
         niche_config, stats.get("description", ""), performance.get("video_titles"),
     )
+
+    # TOPIC EVIDENCE FROM CREATOR TAGS — the free half of "what is this video
+    # actually about", and a DIFFERENT input from every other gate here: the
+    # others read what the channel is CALLED or what it NAMES its videos, none
+    # read what a video is about. A firearms channel titling videos "Range Day
+    # 47" and a Lego channel titling one "New Build Complete!" are invisible to
+    # excluded_topic_reason and off_target_reason and legible here.
+    #
+    # Free in every sense: `video_tags` arrived on the videos.list response
+    # already fetched above (a flat 1 unit regardless of parts), so this costs no
+    # quota, no credits, no Gemini request and no network call. It therefore sits
+    # with the other free gates, ahead of the paid Gemini block.
+    #
+    # ADVISORY unless VIDEO_TOPIC_GATE is set. The evidence is always computed
+    # and always recorded; only the DROP is gated. That split is the repo's
+    # standing pattern for a new relevance signal — the Gemini text tier is
+    # advisory for the same reason — and it exists because three separate
+    # relevance criteria in this pipeline have been caught pointing the wrong
+    # way. Measured before shipping: at the default 0.40 share this fires on 0
+    # of 81 Approved and 5 of 130 Rejected channels (measure_video_topics.py).
+    topic_evidence = video_topics.topic_evidence(
+        performance.get("video_tags"),
+        {**EXCLUDED_TOPIC_TERMS, **OFF_TARGET_TERMS},
+    )
+    topic_summary = video_topics.summarise(
+        topic_evidence, performance.get("video_category_ids"))
+    topic_category, topic_share = video_topics.dominant_topic(
+        topic_evidence, VIDEO_TOPIC_MIN_SHARE)
+    # Restricted to the measured allowlist, NOT to whatever fired. phones_and_pcs
+    # is net-harmful at every threshold where it fires and is deliberately absent
+    # from VIDEO_TOPIC_CATEGORIES; a dominant topic outside the allowlist is
+    # recorded and ignored.
+    if topic_category and topic_category not in VIDEO_TOPIC_CATEGORIES:
+        topic_category = None
+    if VIDEO_TOPIC_GATE and topic_category:
+        logger.info(
+            "Dropping %s before push — %s (%s at %.0f%% of %d tags: %s).",
+            stats.get("channel_title"), DROP_OFF_TOPIC_TAGS, topic_category,
+            100 * topic_share, topic_evidence["tags_seen"],
+            ", ".join(topic_evidence["terms"].get(topic_category, [])),
+        )
+        return None, DROP_OFF_TOPIC_TAGS
+    if topic_category:
+        logger.info(
+            "TOPIC ADVISORY %s — %s at %.0f%% of %d tags. Not dropped: "
+            "VIDEO_TOPIC_GATE is off.",
+            stats.get("channel_title"), topic_category, 100 * topic_share,
+            topic_evidence["tags_seen"],
+        )
 
     # Activity/quality signals for the gate, all free from data already
     # fetched. upload_freq (videos/month over the sampled window) is computed

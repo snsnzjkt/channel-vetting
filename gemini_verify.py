@@ -133,6 +133,34 @@ def _served_model_allowed(model_version: str) -> bool:
     return any(model_version.startswith(m) for m in GEMINI_FREE_TIER_MODELS)
 
 
+def stage2_banner(cfg, *, video_always: bool) -> str:
+    """
+    One phrase describing what stage 2 will actually DO, for the startup log.
+
+    A pure function of config rather than a block inside `from_config`, because
+    the wording is the thing worth testing and `from_config` needs an enabled
+    verifier, a readable ledger and an API key to reach it. A test that has to
+    stand all that up to check a sentence ends up asserting the environment
+    instead — which is exactly how the first version of this failed in CI, where
+    GEMINI_ENABLED is unset and the banner reads "DISABLED".
+
+    Describes the FLOW, not the flags. The previous line said
+    "video=every candidate", read straight off GEMINI_VIDEO_ALWAYS, and that
+    stopped being true when stage 2 became a transcript review: video is now a
+    FALLBACK reached only when a video has no captions. An operator reading a
+    banner that says video runs on everything will reasonably conclude the
+    pipeline is doing something it is not.
+    """
+    if getattr(cfg, "GEMINI_STAGE2_MODE", "video") == "transcript":
+        videos = getattr(cfg, "GEMINI_TRANSCRIPT_VIDEOS", 2)
+        fallback = ("FALLBACK ONLY, when a video has no captions"
+                    if getattr(cfg, "GEMINI_VIDEO_FALLBACK", False) else "OFF")
+        return (f"stage 2 = TRANSCRIPT of up to {videos} video(s) "
+                f"(text request); video = {fallback}")
+    return ("stage 2 = VIDEO clip on "
+            + ("every candidate" if video_always else "the rescue path only"))
+
+
 def clip_window(duration_s) -> tuple[int, int]:
     """
     The (start, end) second offsets to send for a video `duration_s` long.
@@ -1069,20 +1097,7 @@ class GeminiVerifier:
         except gemini_tracker.GeminiLedgerUnavailable as exc:
             logger.error("%s Verification is OFF for this run.", exc)
             return None
-        # Describes the FLOW, not just the flags. The old line said
-        # "video=every candidate", read straight off GEMINI_VIDEO_ALWAYS, and
-        # that stopped being true when stage 2 became a transcript review: video
-        # is now a FALLBACK reached only when a video has no captions. An
-        # operator reading a banner that says video runs on everything will
-        # reasonably conclude the pipeline is doing something it is not.
-        if cfg.GEMINI_STAGE2_MODE == "transcript":
-            stage2 = (f"stage 2 = TRANSCRIPT of up to "
-                      f"{cfg.GEMINI_TRANSCRIPT_VIDEOS} video(s) (text request); "
-                      f"video = " + ("FALLBACK ONLY, when a video has no captions"
-                                     if cfg.GEMINI_VIDEO_FALLBACK else "OFF"))
-        else:
-            stage2 = ("stage 2 = VIDEO clip on "
-                      + ("every candidate" if v.video_always else "the rescue path only"))
+        stage2 = stage2_banner(cfg, video_always=v.video_always)
         logger.info(
             "Gemini relevance verification: ENABLED (model=%s, free-only=%s, "
             "%s, text tier=%s, run caps %d total / %d video)",

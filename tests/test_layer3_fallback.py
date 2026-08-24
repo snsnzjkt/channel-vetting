@@ -209,25 +209,53 @@ def test_pipeline_level_a_transcript_means_ZERO_video_requests(monkeypatch):
     )
 
 
-def test_the_startup_banner_does_not_claim_video_runs_on_everything(caplog):
+def test_the_startup_banner_does_not_claim_video_runs_on_everything():
     """
     The banner read "video=every candidate" straight off GEMINI_VIDEO_ALWAYS,
     which stopped being true when stage 2 became a transcript review. An operator
     reading that will reasonably conclude the pipeline does something it does not.
+
+    Tests the pure `stage2_banner` rather than driving `from_config`. The first
+    version of this test called from_config and read the log, which passed
+    locally and FAILED in CI: GEMINI_ENABLED is unset there, so the banner reads
+    "DISABLED (...)", which still contains "relevance verification" and slipped
+    past the skip guard. A test that needs an API key, a readable ledger and an
+    enabled feature to check a sentence is asserting the environment.
     """
-    import logging
+    class _Cfg:
+        GEMINI_STAGE2_MODE = "transcript"
+        GEMINI_TRANSCRIPT_VIDEOS = 2
+        GEMINI_VIDEO_FALLBACK = True
 
-    import config as cfg
+    line = gv.stage2_banner(_Cfg, video_always=True)
+    assert "TRANSCRIPT of up to 2 video(s)" in line
+    assert "FALLBACK ONLY" in line
+    assert "every candidate" not in line, (
+        "video is a fallback now; a banner claiming otherwise misleads the operator"
+    )
 
-    caplog.set_level(logging.INFO)
-    if cfg.GEMINI_STAGE2_MODE != "transcript":
-        pytest.skip("banner wording under test applies to transcript mode")
-    gv.GeminiVerifier.from_config()
-    # getMessage(), not .message: logging is lazily formatted, so .message is
-    # the raw "%s" template and the mode text lives in .args.
-    line = next((r.getMessage() for r in caplog.records
-                 if "relevance verification" in r.getMessage()), "")
-    if not line:
-        pytest.skip("verification disabled in this environment")
-    assert "every candidate" not in line, line
-    assert "FALLBACK ONLY" in line, line
+
+def test_the_banner_says_OFF_when_the_fallback_is_disabled():
+    class _Cfg:
+        GEMINI_STAGE2_MODE = "transcript"
+        GEMINI_TRANSCRIPT_VIDEOS = 2
+        GEMINI_VIDEO_FALLBACK = False
+
+    assert "video = OFF" in gv.stage2_banner(_Cfg, video_always=True)
+
+
+def test_the_banner_still_describes_the_legacy_video_mode():
+    """The mode is still reachable, so its wording still has to be right."""
+    class _Cfg:
+        GEMINI_STAGE2_MODE = "video"
+
+    assert "VIDEO clip on every candidate" in gv.stage2_banner(_Cfg, video_always=True)
+    assert "the rescue path only" in gv.stage2_banner(_Cfg, video_always=False)
+
+
+def test_the_shipping_config_produces_the_fallback_wording():
+    """Guards the DEFAULTS, not just the function: transcript + fallback on."""
+    import config
+
+    line = gv.stage2_banner(config, video_always=True)
+    assert "TRANSCRIPT" in line and "FALLBACK ONLY" in line, line

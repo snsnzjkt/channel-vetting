@@ -273,7 +273,22 @@ NICHES = {
         # categories — gaming, phones_and_pcs, generic_gadgets, ai_and_crypto —
         # were each more likely to kill an approved channel than catch a
         # rejected one. Add nothing here without a fresh backtest.
-        "off_target_categories": ["toys_and_kids", "story_recap", "av_specialist"],
+        "off_target_categories": [
+            "toys_and_kids", "story_recap", "av_specialist",
+            # Added after the first 90-day sweep. Each measured at 0 approved
+            # channels killed across both niches; see OFF_TARGET_TERMS.
+            "automotive", "movie_review_farm", "kids_craft",
+            # sports_commentary was TRIED AND REMOVED 2026-08-22. Re-scored
+            # against the refreshed labels (31 approved / 61 rejected, up from
+            # 21/31) it killed 3 approved channels — JTL SPORTS, MAH, Cowboys
+            # Report by Chat Sports — to catch 1 rejected. The reviewer also
+            # approved "The Joel Klatt Show: A College Football Podcast".
+            #
+            # Sports commentary is NOT disqualifying for this niche, which also
+            # validates the "sports podcast commentary" KEYWORD. The audience
+            # theory holds: a man-cave sports audience is a home-entertainment
+            # furniture audience.
+        ],
         "discovery_source": "search_list",
         "discovery_filters": {
             "profile_language": ["en"],
@@ -385,7 +400,17 @@ NICHES = {
         # (0/37 and 0/53) and are kept only so the default is unchanged.
         "off_target_categories": [
             "gaming", "phones_and_pcs", "generic_gadgets", "ai_and_crypto",
-            "toys_and_kids", "story_recap", "property_showcase", "travel_vlog",
+            "toys_and_kids", "story_recap", "travel_vlog",
+            # property_showcase was TRIED AND REMOVED 2026-08-22. On the
+            # refreshed labels it caught 3 rejected but killed 1 approved —
+            # Diana Oachis, whose titles are "Inside Oakville's $5.98 MILLION
+            # MANSION" and "Madeira LUXURY Home Tour". The reviewer approves
+            # some luxury home tours and rejects others, so the category does
+            # not separate what he wants and a net +2 is not worth a lost
+            # prospect when the brief is "still want many output".
+            # 123 GO!-style kids craft/prank content is not a furniture prospect
+            # either. Measured 0 of 37 approved Lifestyle channels affected.
+            "kids_craft",
         ],
         "keywords": [
             "interior design and styling",
@@ -974,6 +999,42 @@ OFF_TARGET_TERMS = {
     ],
     "travel_vlog": [
         "travel vlog", "country in", "visiting", "trip to", "backpacking", "expat",
+    ],
+    # ADDED 2026-08-22 from reviewer feedback on the first 90-day sweep: "some
+    # channels are not suitable for Home Theater" and "I only got 3 new
+    # channels" out of 29 pushed. The sweep fixed volume and exposed precision.
+    #
+    # Each set was scored against BOTH the 142 historical verdicts AND the 67
+    # unreviewed rows the sweep produced. All four kill ZERO approved channels
+    # in either niche and together catch 17 of the 67:
+    #
+    #   sports_commentary   0 approved / 9 caught   DNVR Sports, Nightcap,
+    #                                               Sky Sports Cricket, The Pivot
+    #   automotive          0 approved / 3 caught   CAR TV, Moto Feelz
+    #   movie_review_farm   0 approved / 3 caught   Reel Review HQ, Media Knights
+    #   kids_craft          0 approved / 2 caught   123 GO!, 123 GO! GOLD
+    #
+    # kids_craft is the gap toys_and_kids left: 123 GO! is a 12.7M-subscriber
+    # kids channel whose titles are "hacks" and "pranks" rather than any toy
+    # brand, so no amount of Lego vocabulary would have caught it.
+    "sports_commentary": [
+        "podcast", "nfl", "nba", "mlb", "nhl", "premier league", "arsenal",
+        "cricket", "wrestling", "wwe", "aew", "transfer news", "match preview",
+        "game recap", "fantasy football", "draft pick", "free agency", "playoff",
+    ],
+    "automotive": [
+        "car review", "truck review", "suv", "sedan", "test drive", "horsepower",
+        "mustang", "corvette", "motorcycle", "moto ", "dealership",
+        "engine swap", "car tv",
+    ],
+    "movie_review_farm": [
+        "movie review", "film review", "trailer reaction", "first time watching",
+        "explained ending", "recap and review", "season finale",
+        "episode review", "box office",
+    ],
+    "kids_craft": [
+        "hacks you", "genius hacks", "crafts for", "funny pranks", "diy hacks",
+        "life hacks", "123 go", "tricks and hacks", "weird ways",
     ],
     "ai_and_crypto": [
         "crypto", "bitcoin", "ethereum", "nft", "altcoin", "web3", "blockchain",

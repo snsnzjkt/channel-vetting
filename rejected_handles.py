@@ -143,7 +143,17 @@ def record(niche_name: str, handles) -> int:
         entries[handle] = day
     log["niches"][niche_name] = _prune(entries)
 
-    tmp_path = f"{REJECTED_HANDLES_FILE}.tmp"
+    # UNIQUE PER PROCESS. This was f"{REJECTED_HANDLES_FILE}.tmp" — one shared name —
+    # and two concurrent runs then raced: both wrote the same tmp file, the
+    # first os.replace moved it away, and the second raised
+    # FileNotFoundError. _replace_with_retry only retries PermissionError,
+    # so the loser CRASHED MID-RUN. Observed 2026-08-22 when a Home Theater
+    # sweep and a Lifestyle run overlapped: the Lifestyle run died in
+    # record_spend after examining 9 candidates and wrote no rows.
+    #
+    # os.getpid() is enough: the collision is between PROCESSES, and a
+    # single process serialises its own writes.
+    tmp_path = f"{REJECTED_HANDLES_FILE}.{os.getpid()}.tmp"
     try:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(log, f, indent=2, sort_keys=True)

@@ -779,3 +779,29 @@ GEMINI_TOPIC_CONFIRM = env_flag("GEMINI_TOPIC_CONFIRM", default=True)
 
 GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE = float(
     os.getenv("GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE", 0.75))
+
+
+# STAGE 2: how many of a creator's videos the transcript review reads.
+#
+# Both transcripts travel in ONE request, which is what makes this stage
+# request-neutral against the 25-second video call it replaced. Raising this
+# raises tokens per candidate, not requests per candidate — but two is already
+# ~1,500 tokens and a third buys less than the second did.
+GEMINI_TRANSCRIPT_VIDEOS = int(os.getenv("GEMINI_TRANSCRIPT_VIDEOS", 2))
+
+# STAGE 2 mode. "transcript" reads what the creator says across
+# GEMINI_TRANSCRIPT_VIDEOS whole videos and writes a summary for the manager;
+# "video" is the previous 25-second frames-and-audio call.
+#
+# Switched to transcript on 2026-08-25 by operator decision. The flow is: broad
+# metadata sweep -> transcript review -> MANUAL approval by the manager. Stage 2's
+# job is therefore to inform that person, and the video tier was not doing that:
+# it produced a bare verdict, was never validated, and the one measurement
+# available suggests it confirms everything (6/6 Approved and 2/2 Rejected).
+#
+# "video" is kept reachable rather than deleted because the visual criteria it can
+# answer — a logo bug throughout, no identifiable host, product B-roll — are real
+# signals a transcript cannot see, and the brand-vs-creator veto rests on them.
+# If the summaries turn out to miss brands the video tier caught, this is the way
+# back.
+GEMINI_STAGE2_MODE = os.getenv("GEMINI_STAGE2_MODE", "transcript")

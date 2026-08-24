@@ -36,6 +36,9 @@ class _StubVerifier:
     def judge(self, niche_config, stats, performance, *, flagged):
         return gv.Judgement(gv.STATE_SCORED, "stub", notes="")
 
+    def review_transcripts(self, niche_config, stats, performance, *, flagged):
+        return self.judge(niche_config, stats, performance, flagged=flagged)
+
 
 NICHE = {"min_avg_views": 10_000, "min_channel_age_months": None,
          "allowed_country_codes": ZONE_CORE, "table_name": "tbl"}

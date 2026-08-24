@@ -2372,3 +2372,106 @@ the new value rather than deleted, because the number carries a credit and a
 reviewer cost and should fail loudly if it moves by accident.
 
 Suite: **1382 passing**, zero regressions.
+
+---
+
+## 14.22 SHIPPED — the three-stage flow. Stage 2 is a transcript review now.
+
+Operator's stated flow: **1. broad metadata sweep, many records → 2. transcript
+review of 1-2 of the creator's videos → 3. manual approval by the manager.**
+
+Stage 3 being a human is what determines stage 2's job: **inform, don't judge.**
+
+### The change
+
+`verifier.judge` (25 seconds of frames, one video) is replaced as the default by
+`verifier.review_transcripts` (up to 2 whole transcripts, one request) via
+`GEMINI_STAGE2_MODE=transcript`.
+
+**It is request-neutral and still a large gain.** Both cost one request per
+candidate — both transcripts travel in one body rather than one each. But the
+transcript call is TEXT, so it leaves the ceiling that actually binds:
+
+```
+  GEMINI_MAX_VIDEO_REQUESTS_PER_RUN = 30   vs  ~61 candidates reaching stage 2
+  -> video mode could never cover more than half of them
+  -> as text, all ~61 fit inside the 70/run cap
+```
+
+Token cost measured: two real transcripts came to 459 and 1,038 tokens **end to
+end**, against ~1,650 for a 25-second window at `MEDIA_RESOLUTION_LOW`.
+
+| | video mode (was) | transcript mode (now) |
+|---|---|---|
+| evidence | 25s of one video | up to 2 whole videos |
+| requests/candidate | 1 | 1 |
+| ceiling charged | video, 30/run | total only, 70/run |
+| coverage of ~61 candidates | 30 | **61** |
+| output for the manager | a score | **a written summary** |
+
+### What it gives up
+
+The **visual** criteria. "A logo bug throughout", "polished agency-style
+production with no identifiable host", "product B-roll with voiceover" are not
+answerable from a transcript, and the brand-vs-creator veto rests on them.
+`GEMINI_STAGE2_MODE=video` is kept reachable, with its own end-to-end test, as
+the way back if summaries start missing brands.
+
+Judged against each niche's **`text_criteria`**, not `video_criteria` — these are
+text questions, and those lists were rewritten in §14.19 to ask about the SPACE
+rather than the gear, which is the direction the labels support.
+
+### LIVE — and the summaries are the point
+
+Two real channels, free tier, **zero credits, zero video requests**:
+
+**New Record Day** (the AV reviewer §12 built the exclusion to catch)
+> *"This creator runs an audio gear review channel called New Record Day, hosted
+> by Ron, targeting audiophiles and music enthusiasts. The videos consist of
+> in-depth component evaluations, specifically focusing on high-end
+> loudspeakers, technical specifications, and listening impressions."*
+
+**Bricksie** (flagged 88% `toys_and_kids` on titles, 64% on tags)
+> *"The creator shares family and home life content centered around organizing
+> living spaces, house tours, and balancing a massive LEGO collection with
+> everyday family rooms. They talk directly to an audience of hobbyists,
+> families, and home enthusiasts interested in home organization and DIY room
+> usage."*
+
+That second one is a materially better read than "Lego channel", and it is the
+kind of thing only the actual content could have told us.
+
+### THE FINDING THAT MATTERS: stage 2 rescued both, and one is a known Reject
+
+Both candidates were flagged by the keyword gate and **both were rescued**. New
+Record Day is labelled **Rejected** by the reviewer, and §12 added the
+`av_specialist` exclusion specifically to catch it.
+
+So the transcript tier overturned a correct drop. That is consistent with the
+only measurement available for the deciding tier — it confirms nearly everything
+(6/6 Approved, 2/2 Rejected).
+
+**Under this operator's instruction that is acceptable, and it is worth being
+explicit about why.** The goal is volume, stage 3 is a human, and the summary
+told the truth even when the verdict did not: a manager reading *"audio gear
+review channel… high-end loudspeakers, technical specifications"* has exactly
+what they need to reject it in one line. The verdict adds a row; the summary
+makes the row cheap to judge.
+
+What it is NOT is a relevance filter, and it should not be described as one. If
+review load becomes the problem, the lever is `GEMINI_MIN_CRITERIA_RATIO` (1.0
+restores aggregate-only strictness) or turning rescue off — not a new gate.
+
+### Also fixed
+
+`verdict_confirms` said **"video confirmed"** unconditionally. A reviewer cell
+reading that for a verdict taken from a transcript sends whoever audits it to the
+wrong place. The reason string now names the evidence it actually read.
+
+| item | detail |
+|---|---|
+| `gemini_verify.py` | `TRANSCRIPT_SCHEMA`, `build_transcript_review_request`, `_pick_videos`, `review_transcripts`, evidence-naming in `verdict_confirms` |
+| `main.py` | stage 2 routed by `GEMINI_STAGE2_MODE` |
+| `config.py` | `GEMINI_STAGE2_MODE` (transcript), `GEMINI_TRANSCRIPT_VIDEOS` (2) |
+| tests | video-mode end-to-end pinned and kept; transcript-mode twin added asserting 0 video requests and the summary reaching `Relevance Notes` |
+| suite | 1382 -> **1384 passing**, zero regressions |

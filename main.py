@@ -81,6 +81,7 @@ from config import (
     INFLUENCERS_MAX_EXCLUDE_HANDLES,
     INFLUENCERS_TEST_DISCOVERY_CREDITS,
     USE_PLAYWRIGHT_STEALTH,
+    GEMINI_STAGE2_MODE,
     VIDEO_TOPIC_GATE,
     VIDEO_TOPIC_MIN_SHARE,
     VIDEO_TOPIC_CATEGORIES,
@@ -1585,11 +1586,26 @@ def process_candidate(
     # is what the request budget should be spent on. Nothing about the rescue
     # semantics changed: a candidate the free gates drop was already dropped
     # before this move, it just used to cost a request on the way out.
+    # STAGE 2 of the three-stage flow: broad metadata sweep -> THIS -> manual
+    # approval by the manager. Because a human makes the final call, stage 2's
+    # job is to INFORM rather than to judge, which is why the transcript mode
+    # writes a plain-language summary of what the creator actually talks about.
+    #
+    # "transcript" reads GEMINI_TRANSCRIPT_VIDEOS whole videos in ONE request;
+    # "video" is the previous 25-second frames call. Both cost one request per
+    # candidate, but only the video one charges GEMINI_MAX_VIDEO_REQUESTS_PER_RUN
+    # (30), which is why the video mode could never cover more than half the ~61
+    # candidates that reach here. See config.GEMINI_STAGE2_MODE.
     judgement = None
     if verifier is not None:
-        judgement = verifier.judge(
-            niche_config, stats, performance, flagged=bool(off_target),
-        )
+        if GEMINI_STAGE2_MODE == "transcript":
+            judgement = verifier.review_transcripts(
+                niche_config, stats, performance, flagged=bool(off_target),
+            )
+        else:
+            judgement = verifier.judge(
+                niche_config, stats, performance, flagged=bool(off_target),
+            )
         if off_target and judgement.rescued:
             logger.info(
                 "RESCUED %s — the title gate flagged it (%s) but Gemini confirmed "

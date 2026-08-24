@@ -2256,3 +2256,52 @@ verdicts lost to a run cap. R0 already fixed that for free.
 3. If the tier confirms everything, drop it and go transcript-only on one
    provider. If it discriminates, it stays Gemini, because the video tier is the
    one thing that cannot port.
+
+### 14.20a Why Lifestyle has ZERO usable rows — the predicted starvation, confirmed
+
+Rows per day added, and what each carries:
+
+```
+  HOME THEATER                          LIFESTYLE SOFA
+  date        rows verdict lab BOTH     date        rows verdict lab BOTH
+  2026-08-12    17    0     17   0      2026-08-12    24    0     24   0
+  2026-08-14    29    0     29   0      2026-08-14    28    0     28   0
+  2026-08-17    12    0     12   0      2026-08-17    21    0     21   0
+  2026-08-20     3    0      3   0      2026-08-20    21    0     21   0
+  2026-08-21    31    6     31   6  <-- 2026-08-21     9    0      8   0  <--
+  2026-08-23    11   11      5   5      2026-08-24    30   30      0   0
+  2026-08-24    28   28      0   0
+```
+
+Two separate causes, and neither is a Lifestyle-specific bug:
+
+**1. The 08-21 run gave Home Theater 6 verdicts and Lifestyle 0.** Home Theater
+iterates first (`main.py` dict order, §2c) and per-run caps are per PROCESS
+(`GEMINI_MAX_REQUESTS_PER_RUN = 70`, video 30). Home Theater took 6 of its 31 rows
+and walled out; Lifestyle, running behind it, got nothing at all.
+
+**This is exactly the failure the eng review named as F2** — *"the second niche
+systematically unjudged (dict-order starvation)"* — and it is now confirmed in
+production data rather than predicted. §2c had already documented the same
+first-come starvation for *credits*; it reproduces on the request budget.
+
+**2. Lifestyle's only verdict-bearing rows are from 08-24, which the reviewer has
+not reached.** Labels stop at 08-21; verdicts start at 08-24. The two ranges do
+not even touch, so the intersection is empty by construction rather than by
+accident.
+
+Home Theater escaped only because its 08-21 and 08-23 rows got verdicts *and*
+were subsequently judged. That is the whole of its 11-row corpus.
+
+### What this changes
+
+- **Judging Lifestyle's 30 verdict-bearing rows takes it from 0 usable to 30** —
+  on its own that crosses the `--min-rows 30` bar the backtest needs. It is the
+  single highest-leverage action available, and it costs reviewer time only.
+- **The per-niche request reservation (eng F2) is no longer hypothetical.** It was
+  dropped from v1 as "wrong-signed" when framed as a *credit* floor, and that
+  reasoning does not carry over: a REQUEST reservation is not guaranteeing spend
+  to a poor converter, it is stopping one niche from consuming the evidence budget
+  of the other. Lifestyle converts better (§14.18: 51% vs 33% on the paid path)
+  and has no measured verdicts at all, which is the worst possible combination.
+  Not built — flagged with evidence now instead of a prediction.

@@ -53,6 +53,7 @@ from config import (
     GEMINI_API_KEY,
     GEMINI_BASE_URL,
     GEMINI_CLIP_MIN_START_SECONDS,
+    GEMINI_CACHE_RETENTION_DAYS,
     GEMINI_CLIP_SECONDS,
     GEMINI_TOPIC_CONFIRM,
     GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE,
@@ -1033,7 +1034,9 @@ class GeminiVerifier:
         if not self._cache_dirty or self._cache is None:
             return
         import time
-        cutoff = time.time() - (30 * 86400)
+        # Was hardcoded to 30 days while GEMINI_CACHE_RETENTION_DAYS sat in
+        # config.py with a docstring explaining its rationale and no reader.
+        cutoff = time.time() - (GEMINI_CACHE_RETENTION_DAYS * 86400)
         pruned = {k: v for k, v in self._cache.items() if v.get("ts", 0) >= cutoff}
         tmp = f"{self.cache_path}.tmp"
         try:
@@ -1264,30 +1267,56 @@ class GeminiVerifier:
                 detail = "no long-form video to sample"
             else:
                 reason = self._may_request(video=True)
-                if reason:
+                # A refusal that exhausts ONLY the video budget falls through to
+                # the advisory text tier below instead of abandoning the
+                # candidate. `_may_request` logs "the text tier continues" on a
+                # video-cap refusal and this used to return immediately, making
+                # that promise false: a candidate hitting the video wall silently
+                # lost its text score too, with the text budget untouched. A cap
+                # that stops more than it says it stops is worse than a tighter
+                # one, because the operator reads the log line and not the code.
+                if reason and self._may_request(video=False) is None:
+                    # The video budget is gone and the TEXT budget is not, so
+                    # continue to the advisory tier instead of abandoning the
+                    # candidate. That is exactly what _may_request's own log line
+                    # promises on a video-cap refusal ("the text tier
+                    # continues"), and returning here made it false: a candidate
+                    # hitting the video wall silently lost its text score too.
+                    #
+                    # Asked of the BUDGET rather than inferred from the reason
+                    # string, because a video refusal can mean either "video
+                    # sub-cap spent" (text is fine) or "total spent" (text is
+                    # gone as well), and only can_afford knows which. Matching
+                    # on the string would have guessed, and guessed wrong for
+                    # day_cap_reached.
+                    self.unavailable += 1
+                    detail = f"video unavailable ({reason})"
+                elif reason:
                     self.unavailable += 1
                     return Judgement(STATE_UNAVAILABLE, f"unavailable ({reason})")
-                vid, duration_s = pick["video_id"], pick["duration_s"]
-                start_s, end_s = clip_window(duration_s)
-                url = f"https://www.youtube.com/watch?v={vid}&t={start_s}s"
-                vv = self._call_cached(
-                    self._cache_key("video", vid, criteria_hash(video_criteria),
-                                    start_s, end_s),
-                    build_video_request(vid, duration_s, video_criteria),
-                    video=True,
-                )
-                if not vv.ok:
-                    self.unavailable += 1
-                    return Judgement(STATE_UNAVAILABLE,
-                                     f"unavailable ({vv.reason_code})", video_url=url)
-                confirms, why = verdict_confirms(
-                    vv.payload, self.min_confidence, self.min_criteria_ratio,
-                    required_names=[c for c in video_criteria if c.get("required")])
-                if flagged and confirms:
-                    rescued = True
-                    detail = f"rescued ({why})"
                 else:
-                    detail = why
+                    vid, duration_s = pick["video_id"], pick["duration_s"]
+                    start_s, end_s = clip_window(duration_s)
+                    url = f"https://www.youtube.com/watch?v={vid}&t={start_s}s"
+                    vv = self._call_cached(
+                        self._cache_key("video", vid, criteria_hash(video_criteria),
+                                        start_s, end_s),
+                        build_video_request(vid, duration_s, video_criteria),
+                        video=True,
+                    )
+                    if not vv.ok:
+                        self.unavailable += 1
+                        return Judgement(STATE_UNAVAILABLE,
+                                         f"unavailable ({vv.reason_code})",
+                                         video_url=url)
+                    confirms, why = verdict_confirms(
+                        vv.payload, self.min_confidence, self.min_criteria_ratio,
+                        required_names=[c for c in video_criteria if c.get("required")])
+                    if flagged and confirms:
+                        rescued = True
+                        detail = f"rescued ({why})"
+                    else:
+                        detail = why
         elif not video_criteria:
             detail = "no video_criteria"
         else:
@@ -1312,10 +1341,13 @@ class GeminiVerifier:
         if rescued:
             self.rescued += 1
             state = STATE_RESCUED
-        elif vv is not None and vv.ok:
-            self.scored += 1
-            state = STATE_SCORED
         else:
+            # One branch, not two. This used to be an `elif vv is not None and
+            # vv.ok` followed by an `else` with an IDENTICAL body, which read as
+            # a distinction between "scored on a real verdict" and "scored
+            # without one" while doing the same thing in both. Either collapse
+            # them or make them differ; they are collapsed, because `detail`
+            # already carries which case it was and the counter does not need to.
             self.scored += 1
             state = STATE_SCORED
 

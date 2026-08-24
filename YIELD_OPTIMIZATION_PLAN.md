@@ -2117,3 +2117,65 @@ change is a parser and two report lines; the data was already paid for.
 | `rank_pending.py` | bucket-count and spread reporting |
 | tests | +3 regression tests, `test_ranking.py` now 20 |
 | suite | 1373 -> **1376 passing**, zero regressions |
+
+---
+
+## 14.19 Decision: MAX RECORDS. And the five outstanding bugs, fixed.
+
+**Volume is the goal, so the AI metadata screen stays out and `VIDEO_TOPIC_GATE`
+stays OFF.** Both reduce output:
+
+| lever | effect on records |
+|---|---|
+| AI Layer 1 (§14.16) | **−⅓ of approved prospects.** Not shipped |
+| `VIDEO_TOPIC_GATE` on | **−2.4%** (5 of 211, all reviewer-Rejected). Left OFF |
+| keyword Layer 1 (shipped) | **0 loss** — 100% recall, advisory only |
+
+Nothing had to be undone: the shipped defaults were already the max-records
+configuration. Layer 2 (§14.15) is built and live-verified but only runs when the
+gate is armed, so today it costs nothing and removes nothing.
+
+**What actually raises records** — none of it built here, all of it recorded:
+geography (144 of 234 Home Theater drops, operator-declined), new keywords
+(free, untried), a wider window (free, untried), and the strongest hint in the
+data: `home theater products review` is **5 of 5 approved**. Credits are not the
+constraint — 13.04 of 200 used this month.
+
+### Bugs fixed
+
+| # | bug | fix |
+|---|---|---|
+| 1 | `GEMINI_CACHE_RETENTION_DAYS` sat in `config.py` with a docstring and **no reader**; `flush_cache` hardcoded `30 * 86400` | the knob is read |
+| 2 | `judge()`'s final `elif`/`else` had **identical bodies**, reading as a distinction while doing the same thing | collapsed to one branch, with the reason stated |
+| 3 | A **video-only cap refusal abandoned the candidate**, so it lost its advisory text score too — while `_may_request` logs "the text tier continues". A cap that stops more than it says it stops | falls through to the text tier when the text budget is genuinely open |
+| 4 | HT `text_criteria` scored **"speakers" as ON-niche** while `OFF_TARGET_TERMS["av_specialist"]` scores it OFF-niche, for the same niche. Two layers, opposite directions, one vocabulary | criteria rewritten to ask about the **space**, not the gear |
+| 5 | Startup banner claimed influencers.club **"replacing search.list"**, which stopped being true when `discovery_source` became per-niche | says what is available; per-niche line says what is used |
+
+**On #3, the first attempt was wrong and the test caught it.** I branched on the
+refusal *string*, which conflates two different states: `day_cap_reached` from a
+video request can mean "video sub-cap spent" (text fine) or "total spent" (text
+gone). An existing cap test failed, and the fix is to ask
+`_may_request(video=False)` directly — the budget knows, the string does not.
+
+**On #4, the fix is a contradiction removal, not evidence.** `GEMINI_TEXT_TIER`
+stays `False`, pinned by a test. The tier measured 27% approved against a 38%
+base rate; a better prompt is not a backtest.
+
+### New guard: `tests/test_criteria_consistency.py`
+
+The general case behind #4, because a term flipped in one place and left standing
+in another is how three of the four inverted criteria happened:
+
+- no niche may **praise vocabulary it also excludes**, in either criteria list
+- `on_target_terms` and active exclusions may **never overlap** (a term on both
+  scores off == on, and the gate needs off > on)
+- `GEMINI_TEXT_TIER` stays off until backtested
+- every niche keeps 2-4 usable criteria, so a rewrite cannot silently empty one
+
+The guard initially flagged the §14.12 veto for saying "action figure" — which it
+says in order to *exclude* it. Rather than pattern-match the wording, that
+criterion now carries an explicit `names_exclusions: True`, and the guard skips
+flagged criteria. Inferring intent from wording is the same guessing that caused
+the bug.
+
+Suite: 1376 -> **1382 passing**, zero regressions. Zero credits.

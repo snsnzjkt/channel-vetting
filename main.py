@@ -2568,7 +2568,16 @@ def run(
     # YouTube search.list keyword loop — so the pipeline still runs without it.
     discovery = InfluencerDiscovery.from_config(max_credits=max_discovery_credits)
     if discovery.enabled:
-        logger.info("Discovery source: influencers.club creator search (replacing search.list).")
+        # NOT "replacing search.list" any more. That wording predates the
+        # per-niche `discovery_source` key: a niche set to "search_list" ignores
+        # this source entirely and one set to "both" uses each in turn, so the
+        # old line claimed a global override that stopped being true. The banner
+        # says what is AVAILABLE; run_niche logs what each niche actually uses.
+        logger.info(
+            "Discovery source: influencers.club creator search is available. "
+            "Each niche picks via its discovery_source key (influencers | "
+            "search_list | both) — see the per-niche line below."
+        )
     else:
         logger.info("influencers.club discovery unavailable — discovery falls back to YouTube search.list.")
 

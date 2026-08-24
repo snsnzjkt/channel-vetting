@@ -120,17 +120,53 @@ NICHES = {
         #      so retuning costs requests, never correctness.
         # Keep to 2-4 entries per list: each one is a separate judgement the
         # model has to evidence, and a long list dilutes all of them.
+        # REWRITTEN 2026-08-25. The previous version CONTRADICTED the keyword
+        # layer on the exact vocabulary the 2026-08-22 mining measured.
+        #
+        # It asked whether the recurring subject was "home audio-visual equipment
+        # ... speakers, projectors, receivers, soundbars", i.e. it scored
+        # "speakers" as evidence the channel is ON-niche. Meanwhile
+        # OFF_TARGET_TERMS["av_specialist"] contains speaker, subwoofer,
+        # audiophile, turntable, amplifier and IS active for this niche via
+        # off_target_categories — so the keyword layer scores the same word as
+        # evidence the channel is OFF-niche. Two layers, opposite directions, one
+        # vocabulary.
+        #
+        # That was latent only because GEMINI_TEXT_TIER defaults False. Switching
+        # the text tier on without this fix would have had the AI layer score
+        # highest exactly the channels section 12 built the exclusion to catch:
+        # Zero Fidelity, New Record Day, Lenny Florentine, Forever Analog — every
+        # dedicated AV reviewer the reviewer turned down. Measured there:
+        # av_specialist vocabulary rescued 0 approved and 6 rejected channels,
+        # and "speakers" appears in 0 of 21 approved titles and 8 of 31 rejected.
+        #
+        # So these now ask what the labels say the reviewer actually buys — the
+        # AUDIENCE for home-entertainment furniture and the SPACE it lives in —
+        # which is the same correction video_criteria received on 2026-08-21 and
+        # which text_criteria never got. Equipment is no longer the subject; a
+        # room is. Gear-focused channels are left to the keyword exclusion, which
+        # is measured and already catches them.
+        #
+        # STILL ADVISORY. GEMINI_TEXT_TIER stays False: this rewrite removes a
+        # known contradiction, it does not constitute evidence that the tier
+        # predicts anything. The tier measured 27% approved against a 38% base
+        # rate and needs a fresh backtest before it is switched on, not a better
+        # prompt.
         "text_criteria": [
-            {"name": "home AV / entertainment-space focus",
-             "test": "Across these titles and descriptions, is the channel's "
-                     "recurring subject home audio-visual equipment or the "
-                     "entertainment spaces built around it — speakers, "
-                     "projectors, receivers, soundbars, media rooms, man caves — "
-                     "rather than general consumer tech, phones, PCs, or gaming?"},
-            {"name": "reviews or builds, not news",
-             "test": "Does the channel actually review, install or build this "
-                     "equipment, rather than reporting industry news, reacting to "
-                     "other creators, or reselling manufacturer announcements?"},
+            {"name": "home living or entertainment SPACE",
+             "test": "Across these titles and descriptions, does this channel "
+                     "recurrently show or discuss real home living space — room "
+                     "tours, house or apartment tours, renovations, basement or "
+                     "garage conversions, media rooms, man caves, game rooms — or "
+                     "the furniture, seating and fittings in one? A channel whose "
+                     "subject is the ROOM counts. A channel whose subject is "
+                     "specialist audio or video EQUIPMENT reviewed as gear does "
+                     "NOT: that is a different audience and is handled elsewhere."},
+            {"name": "a household, not a storefront",
+             "test": "Does this look like a person or family showing their own "
+                     "home and life in it, rather than a retailer, manufacturer, "
+                     "publisher or industry-news channel? Occasional off-topic "
+                     "uploads are fine — judge what the channel recurrently is."},
         ],
         # LOOSENED 2026-08-21, and deliberately. The previous three criteria
         # required that AV equipment be the video's OWN subject and that the
@@ -223,6 +259,12 @@ NICHES = {
             # before trusting it.
             {"name": "not an excluded subject",
              "required": True,
+             # This criterion NAMES excluded vocabulary in order to exclude it,
+             # which is the opposite of praising it. The consistency guard in
+             # tests/test_criteria_consistency.py would otherwise read
+             # "action figure" here as this niche endorsing a term it excludes,
+             # so the intent is declared rather than inferred from the wording.
+             "names_exclusions": True,
              "test": "Is the SUBJECT of this clip something other than firearms, "
                      "toys or construction-brick building, ASMR, or party "
                      "politics? Answer no ONLY when one of those is what the "
@@ -623,6 +665,12 @@ NICHES = {
             # before trusting it.
             {"name": "not an excluded subject",
              "required": True,
+             # This criterion NAMES excluded vocabulary in order to exclude it,
+             # which is the opposite of praising it. The consistency guard in
+             # tests/test_criteria_consistency.py would otherwise read
+             # "action figure" here as this niche endorsing a term it excludes,
+             # so the intent is declared rather than inferred from the wording.
+             "names_exclusions": True,
              "test": "Is the SUBJECT of this clip something other than firearms, "
                      "toys or construction-brick building, ASMR, or party "
                      "politics? Answer no ONLY when one of those is what the "

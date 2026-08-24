@@ -94,15 +94,29 @@ def _run(monkeypatch, keywords, per_keyword=20, survives_one_in=5,
 
 
 def test_keeps_searching_until_the_qualified_budget_is_full(monkeypatch):
-    """The regression: 1 row per 5 candidates, 30 rows wanted, 10 keywords available."""
+    """
+    The regression: 1 row per 5 candidates, a full day's budget wanted, 10
+    keywords available.
+
+    Asserted against DAILY_QUALIFIED_CAP rather than a literal. These tests are
+    about the refill LOOP — that it keeps searching until the budget is full —
+    and hardcoding the cap made six of them fail when the cap was raised, which
+    tested the constant rather than the behaviour.
+    """
+    # The point is that ONE keyword cannot fill the budget, so the loop has to
+    # come back for more. Sized off the cap: ~1/8 of the budget per keyword, so
+    # roughly 8 keywords are needed whatever the cap is set to. A fixed
+    # per_keyword would silently stop testing refill the moment the cap moved.
+    cap = main.DAILY_QUALIFIED_CAP
+    survives = 5
+    per_keyword = max(survives, (cap // 8) * survives)
     searched, pushed, processed, _ = _run(
-        monkeypatch, [f"kw{i}" for i in range(10)], per_keyword=20, survives_one_in=5,
+        monkeypatch, [f"kw{i}" for i in range(10)],
+        per_keyword=per_keyword, survives_one_in=survives,
     )
 
-    # 30 qualified + 10 flagged is the cap; only Qualified rows are produced
-    # here, so a full budget means 30 rows off 150 candidates = 8 keywords.
-    assert len(pushed) == main.DAILY_QUALIFIED_CAP == 30
-    assert processed == 30
+    assert len(pushed) == cap
+    assert processed == cap
     assert len(searched) > 3, (
         f"only searched {searched} — discovery stopped at a fixed multiple of "
         "the headroom instead of refilling until the budget was full"
@@ -111,11 +125,13 @@ def test_keeps_searching_until_the_qualified_budget_is_full(monkeypatch):
 
 def test_stops_as_soon_as_the_budget_is_full(monkeypatch):
     """A generous survival rate must NOT spend quota on every keyword."""
+    cap = main.DAILY_QUALIFIED_CAP
     searched, pushed, _, _ = _run(
-        monkeypatch, [f"kw{i}" for i in range(10)], per_keyword=20, survives_one_in=1,
+        monkeypatch, [f"kw{i}" for i in range(10)],
+        per_keyword=cap * 2, survives_one_in=1,
     )
 
-    assert len(pushed) == 30
+    assert len(pushed) == cap
     assert len(searched) <= 3, f"searched {searched} — should have stopped once full"
 
 
@@ -126,11 +142,13 @@ def test_an_unfillable_flagged_budget_does_not_burn_every_keyword(monkeypatch):
     budget is a ceiling, not a target — the loop must not keep searching for
     rows that cannot exist.
     """
+    cap = main.DAILY_QUALIFIED_CAP
     searched, pushed, _, _ = _run(
-        monkeypatch, [f"kw{i}" for i in range(10)], per_keyword=20, survives_one_in=1,
+        monkeypatch, [f"kw{i}" for i in range(10)],
+        per_keyword=cap * 2, survives_one_in=1,
     )
 
-    assert len(pushed) == 30  # qualified cap reached
+    assert len(pushed) == cap  # qualified cap reached
     assert len(searched) < 10, (
         f"searched {searched} — kept hunting for flagged rows this niche cannot produce"
     )
@@ -140,7 +158,8 @@ def test_flagged_still_gets_a_pass_when_qualified_is_already_full(monkeypatch):
     """Qualified filled earlier today, flagged budget still open: one round runs."""
     searched, _, _, _ = _run(
         monkeypatch, [f"kw{i}" for i in range(10)],
-        per_keyword=20, survives_one_in=1, qualified_today=30,
+        per_keyword=20, survives_one_in=1,
+        qualified_today=main.DAILY_QUALIFIED_CAP,
     )
 
     assert 1 <= len(searched) <= 2, f"searched {searched}"
@@ -186,9 +205,11 @@ def test_already_pushed_candidates_are_not_re_enriched(monkeypatch):
 
 def test_partial_day_headroom_is_respected(monkeypatch):
     """A second run the same day tops up to the cap rather than doubling it."""
+    cap = main.DAILY_QUALIFIED_CAP
+    already = cap - 5          # leave exactly 5 rows of headroom
     _, pushed, _, _ = _run(
         monkeypatch, [f"kw{i}" for i in range(10)],
-        per_keyword=20, survives_one_in=5, qualified_today=25,
+        per_keyword=cap, survives_one_in=5, qualified_today=already,
     )
 
-    assert len(pushed) == 5  # 30 - 25 already added today
+    assert len(pushed) == 5, f"expected the 5 remaining of {cap}, got {len(pushed)}"

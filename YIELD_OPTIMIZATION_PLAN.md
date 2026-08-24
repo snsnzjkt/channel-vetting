@@ -2305,3 +2305,70 @@ were subsequently judged. That is the whole of its 11-row corpus.
   of the other. Lifestyle converts better (§14.18: 51% vs 33% on the paid path)
   and has no measured verdicts at all, which is the worst possible combination.
   Not built — flagged with evidence now instead of a prediction.
+
+---
+
+## 14.21 The cap was refusing rows, not the gates. Raised 30 -> 60.
+
+The 18:40 scheduled run produced nothing, and the reason was not a gate:
+
+```
+  'Home Theater':   28/30 qualified and 0/10 flagged already added today
+  'Lifestyle Sofa': 30/30 qualified and 0/10 flagged already added today
+  Discovery request for 'Lifestyle Sofa': got 50 new candidate(s) (50 backlogged)
+  'Lifestyle Sofa' so far: 0/0 qualified
+```
+
+**Lifestyle had 50 candidates in hand, had already spent 0.50 credits fetching
+them, and had zero headroom to push one.** Home Theater had 2. Both niches were
+capped out by earlier runs the same day.
+
+`DAILY_QUALIFIED_CAP` raised **30 -> 60**, flagged left at 10. This is a
+throughput knob and touches nothing else: no gate, criterion, threshold or score
+moved, so a row admitted at 60 is one that would have been admitted at 30 had it
+arrived earlier in the day. Operator instruction was explicit — more volume, same
+process, *"it will still be manually reviewed before approval"* — so human review
+is the quality gate and the cap is not pretending to be one.
+
+### What the same run also showed, for the record
+
+130 drops, of which **85 (65%) were geography** — `outside_search_zone` 51,
+`no_declared_country` 34. Declared countries seen: IN, NL, RS, AT, ZA, TR. The
+relevance gate dropped **1**. Geography remains the binding constraint and remains
+declined; this change does not touch it.
+
+The scheduled run also uses a **7-day** window by design (`DISCOVERY_DAYS_BACK`),
+not the 90-day one that produced the big sweeps. The workflow comment explains
+why: a wide window is a one-off backlog sweep, and standing 90-day runs re-read
+an already-consumed pool at 100 quota units per keyword.
+
+### Two ceilings still stand above the cap, deliberately
+
+- **Credits.** ~0.20/row for the email lookup, so a fully-filled 60+10 across two
+  niches is ~28 credits/day — over the 200/month ceiling if it ever ran flat out.
+  It will not: actual spend on 2026-08-24 was **0.70**, and the month stands at
+  **10.59 of 200**. The month ledger is the real backstop and it fails closed.
+- **Reviewer attention**, which is what this actually spends. 67 rows were already
+  awaiting review. `rank_pending.py` triages that queue. If the backlog outruns
+  the reviewer, **lower this number rather than tightening a gate** — a gate loses
+  prospects permanently, a cap only defers them.
+
+### Six tests were testing the constant, not the behaviour
+
+Raising the cap failed six tests that hardcoded `30`. Five were behavioural tests
+about the refill loop — "keeps searching until the budget is full", "tops up to
+the cap rather than doubling it" — and they are now expressed against
+`DAILY_QUALIFIED_CAP`, including their fixtures:
+
+- `test_keeps_searching_until_the_qualified_budget_is_full` sizes rows-per-keyword
+  at ~1/8 of the cap, so several keywords are still required whatever the cap is.
+  A fixed `per_keyword` would silently stop testing refill the moment the cap moved.
+- `test_run_niche_fills_the_budget_from_discovery` now supplies `cap + 20`
+  handles. At a fixed 50 it had quietly become supply-bound rather than cap-bound.
+
+The sixth, `test_caps_sum_to_forty`, was a genuine **policy** assertion citing the
+original brief's "~30-40 rows per table per day". It is kept as a policy test at
+the new value rather than deleted, because the number carries a credit and a
+reviewer cost and should fail loudly if it moves by accident.
+
+Suite: **1382 passing**, zero regressions.

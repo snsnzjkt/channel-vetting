@@ -134,10 +134,38 @@ DISCOVERY_SUBSCRIBER_FLOOR_RATIO = float(
 # per day from Airtable's own "Date Added" field, so a second run on the
 # same day tops up to the cap rather than doubling it.
 #
-# Each niche table produces at most 40 new rows per day, total. The two
-# budgets are separate so a weak discovery day cannot fill the table with
-# below-criteria channels and crowd out real prospects.
-DAILY_QUALIFIED_CAP = int(os.getenv("DAILY_QUALIFIED_CAP", 30))
+# The two budgets are separate so a weak discovery day cannot fill the table
+# with below-criteria channels and crowd out real prospects.
+#
+# RAISED 30 -> 60 on 2026-08-25, on measured evidence that the cap and not the
+# gates was refusing rows. The 18:40 scheduled run recorded:
+#
+#   'Lifestyle Sofa': 30/30 qualified and 0/10 flagged already added today.
+#   Discovery request for 'Lifestyle Sofa': got 50 new candidate(s) (50 backlogged)
+#   'Lifestyle Sofa' so far: 0/0 qualified
+#
+# Fifty candidates in hand, 0.50 credits already spent to fetch them, and zero
+# headroom to push any. Home Theater was at 28/30 the same run. Both niches were
+# capped, which is why that run produced nothing.
+#
+# This is a THROUGHPUT knob and nothing else — no gate, criterion, threshold or
+# score changes, so a row admitted at 60 is a row that would have been admitted
+# at 30 had it arrived earlier in the day.
+#
+# Two ceilings still stand above it, deliberately:
+#
+#   - CREDITS. Each pushed row costs ~0.20 for the email lookup, so a fully
+#     filled 60+10 across two niches is ~28 credits/day. That would exceed
+#     INFLUENCERS_MAX_CREDITS_PER_MONTH (200) if it ever ran flat out — and it
+#     will not, because supply does not fill the cap: actual spend on 2026-08-24
+#     was 0.70 credits, and the month stands at 10.59 of 200. The month ledger,
+#     not this number, is the real backstop, and it fails closed.
+#   - REVIEWER ATTENTION, which is the one this actually spends. 67 rows were
+#     already awaiting review when this changed. `rank_pending.py` exists to
+#     triage that queue; if the backlog outruns the reviewer, lower this rather
+#     than tightening a gate, because a gate loses prospects permanently and a
+#     cap only defers them.
+DAILY_QUALIFIED_CAP = int(os.getenv("DAILY_QUALIFIED_CAP", 60))
 DAILY_FLAGGED_CAP = int(os.getenv("DAILY_FLAGGED_CAP", 10))
 
 # Discovery banks this multiple of the remaining headroom in fresh

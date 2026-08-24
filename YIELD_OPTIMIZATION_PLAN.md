@@ -1642,3 +1642,106 @@ for.
 
 Still open: ASMR untested; the 60s-timeout-per-candidate cost when a chain member
 is down; and R4, the underlying reason the video tier cannot be backtested.
+
+---
+
+## 14.14 SHIPPED — two-layer topic gate: metadata proposes, content confirms
+
+Asked for: drop video analysis; use **metadata → transcript as confirmation**.
+
+**The transcript half is not obtainable** — §14.13 re-proved it on three real
+videos, four routes each: captions exist and every fetch returns 200 with 0
+bytes, and `captions.download` needs OAuth as the channel owner. So the
+architecture ships with the nearest real substitute: Gemini ingests the **audio
+track** from the video URL and reports what is SAID in a `spoken_summary` field.
+That string is the readable stand-in for a transcript. It goes to the reviewer
+and is never fed to a second model call.
+
+### The flow
+
+```
+  LAYER 1 — metadata            creator tags + categoryId, whole sampled
+  (free, every candidate)       catalogue, zero requests. Proposes a topic.
+        |
+        |  fires on ~2% of candidates (5 of 211 labelled channels)
+        v
+  LAYER 2 — content             ONE Gemini call on a 90s window. Listens to the
+  (only on a Layer 1 hit)       speech. Confirms or overturns. `spoken_summary`
+        |                       records what was said.
+        v
+  DROP only when BOTH agree
+```
+
+**Why this shape works where content-first did not.** The original §14 proposal
+was 4x over the 70/run request cap because it judged every candidate. This runs
+Layer 2 on the ~2% that metadata already flagged — **~1-3 requests per run**. The
+"efficient and accurate" goal from the brief, with the arithmetic actually
+closing.
+
+### FAIL-OPEN is the whole safety argument
+
+`confirmed` is True **only** on an explicit, confident yes. Every other edge —
+feature off, no verifier, no sampled video, cap reached, timeout, 4xx, malformed,
+low confidence, an explicit no — returns False, and the caller **keeps** the
+candidate. An outage can never remove a row.
+
+That asymmetry matters more here than anywhere else in the pipeline: this is the
+only path where an AI answer reaches `rejected_handles.json`, which excludes the
+creator server-side for **90 days**. So confidence is held at **0.75**, above the
+0.6 the relevance tier runs at.
+
+It is also still consistent with the G1 gate decision. Layer 2 can only
+**overturn** a drop that metadata proposed — it can never originate one. That is
+rescue-shaped, which is exactly what G1 preserved.
+
+### What shipped
+
+| item | detail |
+|---|---|
+| `gemini_verify.py` | `SPOKEN_SCHEMA`, `build_topic_confirmation_request`, `confirmation_window`, `TopicVerdict`, `GeminiVerifier.confirm_topic`, `topics_confirmed` counter |
+| `video_topics.py` | `TOPIC_LABELS` / `topic_label()` — readable phrasing for all 18 vocabulary keys |
+| `main.py` | Layer 2 wired to run only on a Layer 1 hit; both outcomes logged, including the near-miss |
+| `config.py` | `GEMINI_TOPIC_CONFIRM` (on), `_SECONDS` (90), `_MIN_CONFIDENCE` (0.75) |
+| tests | `test_topic_confirmation.py` (20), gate tests extended to 15 |
+| suite | 1307 -> **1332 passing**, zero regressions |
+
+### Three things fixed along the way
+
+- **`_parse_verdict` demanded a `criteria_results` array unconditionally**, so it
+  would have rejected every well-formed confirmation as malformed — the same
+  failure `verdict_key` once had, and which that function's own docstring warns
+  about for "a third tier". Now parameterised (`require_criteria`) rather than
+  padded with a one-element list that exists only to satisfy a validator.
+- **The Gemini ledger had no autouse test isolation.** The fixture lived
+  module-local in `test_gemini_verify.py`, and pytest does not share those across
+  modules — so the new test module read the repo's **real** ledger, found today's
+  video cap already spent by a live run, and five tests failed on
+  `day_cap_reached` while asserting nothing about caps. Promoted to
+  `conftest.isolate_gemini_ledger`. This is the exact gap §10 recorded as "the
+  same latent gap… flagged rather than built".
+- **Topics reached the model as snake_case keys.** `toys_and_kids` made the model
+  guess an identifier's intent before answering. All 18 keys now carry a
+  description, pinned by a test that fails when a vocabulary key is added without
+  one.
+
+### LIVE TEST — partially blocked, and what that did prove
+
+| check | result |
+|---|---|
+| Fail-open under a real third-party outage | **VERIFIED live.** `gemini-3.7-flash` returned 503 on video throughout; both calls returned `confirmed=False` → no drop. The outage could not remove a row. |
+| Confirms a true positive (LEGO build) | **NOT verified live** — `unavailable (unreachable)` |
+| Overturns a false positive (room tour) | **NOT verified live.** It returned `confirmed=False`, but from the outage, not from judgement. Counting that as a pass would be wrong. |
+
+Both flash-lite models were at their 40/day video caps and `gemini-3.7-flash`
+served text in 15.9s while 503-ing on video — consistent, since video ingestion
+does far more server-side work. Discrimination is covered by 20 unit tests
+against stubbed responses; the live pair should be re-run after the Pacific
+midnight cap reset.
+
+### Still open
+- Live discrimination for Layer 2 (above).
+- ASMR remains an unexercised exclusion category.
+- A down chain member still burns the full 60s timeout per candidate against the
+  900s run brake — now doubly relevant, since a Layer 1 hit adds a second request
+  that can also time out. A per-run circuit breaker after N consecutive
+  `UNREACHABLE`s on one model would cap it. Flagged, not fixed.

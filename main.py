@@ -1423,15 +1423,55 @@ def process_candidate(
     # recorded and ignored.
     if topic_category and topic_category not in VIDEO_TOPIC_CATEGORIES:
         topic_category = None
-    if VIDEO_TOPIC_GATE and topic_category:
-        logger.info(
-            "Dropping %s before push — %s (%s at %.0f%% of %d tags: %s).",
-            stats.get("channel_title"), DROP_OFF_TOPIC_TAGS, topic_category,
-            100 * topic_share, topic_evidence["tags_seen"],
-            ", ".join(topic_evidence["terms"].get(topic_category, [])),
+    # LAYER 2 — CONTENT CONFIRMATION, and it runs ONLY on a Layer 1 hit.
+    #
+    # This is the whole two-layer shape: metadata for reach, content for
+    # accuracy. Layer 1 above is free and reads the whole sampled catalogue, but
+    # tags are the CREATOR'S OWN CLAIM about their content. Before a row is
+    # removed, that claim is checked against what the video actually contains.
+    #
+    # Cost is why this works. Confirmation runs on ~2% of candidates (5 of 211
+    # labelled channels fire at the shipping threshold), so it is ~1-3 requests
+    # per run rather than one per candidate — the difference between fitting the
+    # 70/run cap and being 4x over it.
+    #
+    # FAIL-OPEN. `confirmed` is True only on an explicit, confident yes; every
+    # other edge (feature off, no verifier, no sampled video, cap reached,
+    # timeout, malformed, low confidence, an explicit no) leaves it False and the
+    # candidate is KEPT. So an outage can never remove a row. That asymmetry is
+    # load-bearing because this is the only path where an AI answer reaches
+    # rejected_handles.json, which excludes the creator server-side for 90 days.
+    topic_confirmation = None
+    if VIDEO_TOPIC_GATE and topic_category and verifier is not None:
+        topic_confirmation = verifier.confirm_topic(
+            video_topics.topic_label(topic_category),
+            topic_evidence["terms"].get(topic_category, []),
+            performance,
         )
-        return None, DROP_OFF_TOPIC_TAGS
-    if topic_category:
+
+    if VIDEO_TOPIC_GATE and topic_category:
+        tag_detail = (f"{topic_category} at {100 * topic_share:.0f}% of "
+                      f"{topic_evidence['tags_seen']} tags: "
+                      f"{', '.join(topic_evidence['terms'].get(topic_category, []))}")
+        if topic_confirmation is not None and topic_confirmation.confirmed:
+            logger.info(
+                "Dropping %s before push — %s (%s). Content CONFIRMS: %s. Said: %s",
+                stats.get("channel_title"), DROP_OFF_TOPIC_TAGS, tag_detail,
+                topic_confirmation.detail, topic_confirmation.spoken[:200] or "-",
+            )
+            return None, DROP_OFF_TOPIC_TAGS
+        # Tags fired and the content did not back them up. KEPT, and the
+        # disagreement is logged both ways round: a metadata gate that the
+        # content keeps overturning is a gate that needs retuning, and that is
+        # only visible if the near-misses are on the record too.
+        why = (topic_confirmation.detail if topic_confirmation is not None
+               else "no verifier configured")
+        logger.info(
+            "KEEPING %s — tags said %s but content did not confirm (%s). Said: %s",
+            stats.get("channel_title"), tag_detail, why,
+            (topic_confirmation.spoken[:200] if topic_confirmation else "-") or "-",
+        )
+    elif topic_category:
         logger.info(
             "TOPIC ADVISORY %s — %s at %.0f%% of %d tags. Not dropped: "
             "VIDEO_TOPIC_GATE is off.",

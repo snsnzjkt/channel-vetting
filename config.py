@@ -725,3 +725,35 @@ VIDEO_TOPIC_CATEGORIES = tuple(
 # their BENEFIT is unmeasured for the same reason: the labelled corpus contains
 # no tagged firearms channel to catch. They ship on the section 12 precedent for
 # story_recap: an instruction-backed exclusion with zero measured harm.
+
+
+# TOPIC CONFIRMATION — the second layer of the topic gate.
+#
+# Flow: creator TAGS propose a topic (video_topics.py, free, whole catalogue),
+# then ONE Gemini call confirms it against what the video actually contains
+# before anything is dropped. Metadata for reach, content for accuracy.
+#
+# Why confirmation is affordable where full coverage is not: it runs only on
+# candidates whose tags already fired, which is 5 of 211 labelled channels (2.4%)
+# at the shipping threshold. So this costs ~1-3 requests per run against a 70/run
+# cap, not one per candidate. That is the whole reason the two-layer shape works
+# here and a content-first shape does not.
+#
+# There is no transcript. captions.download requires OAuth as the channel owner
+# and every unauthenticated caption route answers 200 with an empty body
+# (measured 2026-08-24, three videos, four routes each). Gemini ingests the audio
+# track from the video URL directly, and `spoken_summary` in the response is the
+# closest readable substitute. See video_topics.py.
+GEMINI_TOPIC_CONFIRM = env_flag("GEMINI_TOPIC_CONFIRM", default=True)
+
+# Longer than GEMINI_CLIP_SECONDS (25) because this runs on ~2% of candidates and
+# "what is this video about" is a question 25 seconds of a long upload answers
+# badly. At MEDIA_RESOLUTION_LOW and 1 FPS this is ~90 x 66 = ~6k tokens.
+GEMINI_TOPIC_CONFIRM_SECONDS = int(os.getenv("GEMINI_TOPIC_CONFIRM_SECONDS", 90))
+
+# Confirmation must be CONFIDENT to remove a row. Higher than
+# GEMINI_MIN_CONFIDENCE (0.6) because this is the only gate in the pipeline where
+# an AI answer can put a handle into rejected_handles.json for 90 days, and a
+# low-conviction guess must never do that.
+GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE = float(
+    os.getenv("GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE", 0.75))

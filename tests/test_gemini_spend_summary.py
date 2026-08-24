@@ -10,9 +10,25 @@ which inverts the one question the summary exists to answer at 2am.
 """
 import json
 
+import pytest
+
 import gemini_tracker as gt
 from config import GEMINI_MAX_REQUESTS_PER_DAY as DAY
 from config import GEMINI_MAX_VIDEO_REQUESTS_PER_DAY as VDAY
+
+
+@pytest.fixture(autouse=True)
+def _real_ceilings(monkeypatch):
+    """
+    Put the SHIPPING ceilings back for this module.
+
+    conftest.isolate_gemini_ledger lifts them to 10,000 so verdict-logic tests do
+    not trip a budget wall they are not about. This module is about how the
+    ceilings are RENDERED, so it needs the real numbers — the whole bug was a
+    ratio printed against them.
+    """
+    monkeypatch.setattr(gt, "GEMINI_MAX_REQUESTS_PER_DAY", DAY)
+    monkeypatch.setattr(gt, "GEMINI_MAX_VIDEO_REQUESTS_PER_DAY", VDAY)
 
 
 def _ledger(tmp_path, monkeypatch, models):

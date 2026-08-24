@@ -9,6 +9,7 @@ gets measured in production as advisory before it is allowed to remove a row.
 """
 import main
 import niches
+import gemini_verify as gv
 from search_zones import ZONE_CORE
 from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_stats
 
@@ -16,6 +17,24 @@ from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_st
 class _Enricher:
     last_email_type = ""
     last_email_note = ""
+
+
+class _StubVerifier:
+    """
+    Stands in for layer 2. Records what it was asked so a test can prove the
+    call is made only on a layer-1 hit, and with a READABLE topic label.
+    """
+
+    def __init__(self, confirmed=True, detail="stub", spoken="they discuss it"):
+        self._v = gv.TopicVerdict(confirmed, detail, spoken=spoken)
+        self.asked = []
+
+    def confirm_topic(self, topic, terms, performance):
+        self.asked.append((topic, tuple(terms)))
+        return self._v
+
+    def judge(self, niche_config, stats, performance, *, flagged):
+        return gv.Judgement(gv.STATE_SCORED, "stub", notes="")
 
 
 NICHE = {"min_avg_views": 10_000, "min_channel_age_months": None,
@@ -27,7 +46,8 @@ LEGO_TAGS = ["lego", "lego moc", "minifigure", "brickheadz", "bricklink"]
 PHONE_TAGS = ["iphone review", "android phone", "smartphone camera", "pixel phone"]
 
 
-def _run(monkeypatch, *, tags=None, gate=False, categories=None, share=0.40):
+def _run(monkeypatch, *, tags=None, gate=False, categories=None, share=0.40,
+         verifier=None):
     monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
     monkeypatch.setattr(main, "get_recent_video_performance",
                         lambda cid, pl: _stub_performance(video_tags=tags or [],
@@ -44,7 +64,7 @@ def _run(monkeypatch, *, tags=None, gate=False, categories=None, share=0.40):
         monkeypatch.setattr(main, "VIDEO_TOPIC_CATEGORIES", categories)
     return main.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
-        {}, _NullBlocklist(), NICHE, None, _Enricher(), verifier=None,
+        {}, _NullBlocklist(), NICHE, None, _Enricher(), verifier=verifier,
     )
 
 
@@ -60,10 +80,64 @@ def test_a_dominant_topic_does_NOT_drop_while_the_gate_is_off(monkeypatch, caplo
     assert "toys_and_kids" in caplog.text
 
 
-def test_the_same_candidate_IS_dropped_once_the_gate_is_armed(monkeypatch):
-    record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True)
+def test_the_same_candidate_IS_dropped_once_the_gate_is_armed_AND_content_confirms(
+        monkeypatch):
+    """Both layers must agree. Tags propose; content decides."""
+    v = _StubVerifier(confirmed=True)
+    record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True, verifier=v)
     assert record is None
     assert reason == main.DROP_OFF_TOPIC_TAGS
+    assert len(v.asked) == 1, "layer 2 runs exactly once on a layer-1 hit"
+
+
+# --- fail-open: layer 2 must be able to overturn layer 1, never the reverse ---
+
+def test_content_overturning_the_tags_KEEPS_the_candidate(monkeypatch):
+    """
+    The point of a confirmation layer. Tags are the creator's own claim; when the
+    video does not back it up, the row survives.
+    """
+    v = _StubVerifier(confirmed=False, detail="content says NOT toys (0.88)")
+    record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True, verifier=v)
+    assert record is not None, f"unconfirmed tags must not drop; got {reason!r}"
+
+
+def test_no_verifier_means_no_drop_however_strong_the_tags(monkeypatch):
+    """Fail-open. Layer 1 alone can never remove a row."""
+    record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True, verifier=None)
+    assert record is not None, f"tags alone must not drop; got {reason!r}"
+
+
+def test_layer_2_is_asked_with_a_readable_label_not_the_internal_key(monkeypatch):
+    """
+    Handing a model `toys_and_kids` instead of a description makes it guess the
+    intent of an identifier before it can answer.
+    """
+    v = _StubVerifier(confirmed=True)
+    _run(monkeypatch, tags=LEGO_TAGS, gate=True, verifier=v)
+    topic, terms = v.asked[0]
+    assert "toys_and_kids" != topic
+    assert "construction-brick" in topic, topic
+    assert "lego" in terms, terms
+
+
+def test_layer_2_is_NOT_called_when_layer_1_does_not_fire(monkeypatch):
+    """
+    The cost argument for the whole design: confirmation runs on ~2% of
+    candidates. If it ran on all of them the request budget would be 4x over.
+    """
+    v = _StubVerifier(confirmed=True)
+    record, _ = _run(monkeypatch, tags=["home theater", "projector"], gate=True,
+                     verifier=v)
+    assert record is not None
+    assert v.asked == [], "no layer-1 hit means no layer-2 request"
+
+
+def test_layer_2_is_NOT_called_while_the_gate_is_off(monkeypatch):
+    """Advisory mode must cost nothing."""
+    v = _StubVerifier(confirmed=True)
+    _run(monkeypatch, tags=LEGO_TAGS, gate=False, verifier=v)
+    assert v.asked == [], "advisory mode must issue no confirmation request"
 
 
 # --- the allowlist is the measurement, not a suggestion ---
@@ -75,18 +149,21 @@ def test_a_measured_harmful_topic_is_recorded_but_never_drops(monkeypatch):
     category anti-predictive. It must not drop even with the gate armed.
     """
     assert "phones_and_pcs" not in main.VIDEO_TOPIC_CATEGORIES
-    record, reason = _run(monkeypatch, tags=PHONE_TAGS, gate=True)
+    record, reason = _run(monkeypatch, tags=PHONE_TAGS, gate=True,
+                          verifier=_StubVerifier(confirmed=True))
     assert record is not None, f"phones_and_pcs must never drop; got {reason!r}"
 
 
 def test_a_topic_outside_the_allowlist_never_drops(monkeypatch):
     record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True,
-                          categories=("gaming",))
+                          categories=("gaming",),
+                          verifier=_StubVerifier(confirmed=True))
     assert record is not None, f"toys_and_kids not allowlisted here; got {reason!r}"
 
 
 def test_an_empty_allowlist_disables_the_gate_as_surely_as_the_flag(monkeypatch):
-    record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True, categories=())
+    record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True, categories=(),
+                          verifier=_StubVerifier(confirmed=True))
     assert record is not None, f"empty allowlist must be inert; got {reason!r}"
 
 
@@ -95,14 +172,16 @@ def test_an_empty_allowlist_disables_the_gate_as_surely_as_the_flag(monkeypatch)
 def test_no_tags_never_drops_however_the_gate_is_set(monkeypatch):
     """Absent data never disqualifies — the rule this repo states everywhere."""
     for tags in ([], None):
-        record, reason = _run(monkeypatch, tags=tags, gate=True)
+        record, reason = _run(monkeypatch, tags=tags, gate=True,
+                              verifier=_StubVerifier(confirmed=True))
         assert record is not None, f"no tags must be no verdict; got {reason!r}"
 
 
 def test_one_stray_tag_in_forty_never_drops(monkeypatch):
     """Share, not count. A home-theatre channel with one Lego tag ships."""
     tags = ["lego"] + [f"home theater {i}" for i in range(39)]
-    record, reason = _run(monkeypatch, tags=tags, gate=True)
+    record, reason = _run(monkeypatch, tags=tags, gate=True,
+                          verifier=_StubVerifier(confirmed=True))
     assert record is not None, f"1 tag in 40 is noise; got {reason!r}"
 
 
@@ -110,9 +189,11 @@ def test_the_threshold_is_what_decides(monkeypatch):
     """Same tags, two thresholds, opposite outcomes — so the knob is real."""
     tags = ["lego", "minifigure"] + [f"home theater {i}" for i in range(4)]
     # share = 2/6 = 33%
-    record, _ = _run(monkeypatch, tags=tags, gate=True, share=0.40)
+    record, _ = _run(monkeypatch, tags=tags, gate=True, share=0.40,
+                     verifier=_StubVerifier(confirmed=True))
     assert record is not None, "33% is below a 40% bar"
-    record, reason = _run(monkeypatch, tags=tags, gate=True, share=0.25)
+    record, reason = _run(monkeypatch, tags=tags, gate=True, share=0.25,
+                          verifier=_StubVerifier(confirmed=True))
     assert record is None and reason == main.DROP_OFF_TOPIC_TAGS
 
 

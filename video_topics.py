@@ -67,6 +67,51 @@ YOUTUBE_CATEGORY_NAMES = {
 }
 
 
+# Human-readable phrasing for each vocabulary key, for the topic-confirmation
+# PROMPT. The keys are internal snake_case identifiers ("toys_and_kids"), and
+# handing a model an identifier instead of a description is a needless handicap:
+# it has to guess the intent of the name before it can answer the question.
+# A key with no entry here falls back to its name with underscores spaced out,
+# which is poor but never silently empty.
+TOPIC_LABELS = {
+    "firearms": "firearms — guns, shooting or ammunition",
+    "toys_and_kids": "toys and children's play — dolls, action figures, "
+                     "construction-brick sets, or toy unboxing",
+    "asmr": "ASMR — whispered or trigger-sound relaxation content",
+    "political": "party politics — elections, campaigning or political commentary",
+    "gaming": "video gaming — playing, reviewing or commentating on video games",
+    "phones_and_pcs": "consumer computing hardware — phones, laptops or PC builds",
+    "generic_gadgets": "general consumer gadget reviews",
+    "ai_and_crypto": "AI tools or cryptocurrency",
+    "automotive": "cars and vehicles",
+    "sports_commentary": "sports commentary, punditry or league coverage",
+    "story_recap": "narrated recaps of films, series or comics",
+    "av_specialist": "specialist hi-fi and audio equipment — speakers, "
+                     "amplifiers, turntables or headphones reviewed as gear",
+    "travel_vlog": "travel vlogging",
+    "property_showcase": "property listings or real-estate showcases",
+    "sim_racing": "sim racing games",
+    "forestry": "forestry, logging or sawmilling",
+    "kids_craft": "children's craft activities",
+    "movie_review_farm": "film reviews and reaction content",
+    "broadcast_tv": "broadcast television programming",
+    "music_perf": "music performance",
+    "food_only": "cooking and food",
+    "news_politics": "news and current affairs",
+    "reaction_farm": "reaction content",
+    "sports_league": "professional sports league coverage",
+    "realestate_listing": "real-estate listings",
+}
+
+
+def topic_label(topic: str) -> str:
+    """A phrase a model can act on, for an internal vocabulary key."""
+    key = (topic or "").strip()
+    if not key:
+        return ""
+    return TOPIC_LABELS.get(key, key.replace("_", " "))
+
+
 def category_name(category_id) -> str:
     """A readable category, or the bare ID when YouTube adds one we don't know."""
     cid = str(category_id or "").strip()

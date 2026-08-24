@@ -57,6 +57,7 @@ from config import (
     GEMINI_CLIP_SECONDS,
     GEMINI_TOPIC_CONFIRM,
     GEMINI_TRANSCRIPT_VIDEOS,
+    GEMINI_VIDEO_FALLBACK,
     GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE,
     GEMINI_CLIP_START_FRACTION,
     GEMINI_FREE_ONLY,
@@ -1620,7 +1621,39 @@ class GeminiVerifier:
                 texts.append(text)
                 urls.append(f"https://www.youtube.com/watch?v={pick['video_id']}")
         if not texts:
-            return Judgement(STATE_SCORED, "no transcript available")
+            # LAYER 3 — the video fallback, and ONLY here.
+            #
+            # Roughly one video in three has captions disabled, so this is a
+            # common path rather than an edge case. Before the fallback those
+            # candidates got no stage-2 verdict at all; now they get one from the
+            # evidence that IS available.
+            #
+            # It is free to arrive here. `transcripts.fetch` spends no request
+            # when it fails, so a failed layer 2 costs nothing and the video call
+            # below is the first spend for this candidate — the fallback adds
+            # coverage without adding waste. Measured per run: ~41 text + ~20
+            # video = 61 requests against a 70 run cap, with the video share
+            # inside its own 30/run ceiling.
+            #
+            # The video criteria are the RIGHT ones to use here, not a
+            # compromise: with no transcript the only evidence is what is on
+            # screen, and "a logo bug throughout" or "no identifiable host" are
+            # exactly the questions frames can answer and text cannot.
+            if not GEMINI_VIDEO_FALLBACK:
+                return Judgement(STATE_SCORED, "no transcript available")
+            if not (niche_config.get("video_criteria") or []):
+                return Judgement(STATE_SCORED,
+                                 "no transcript available, no video_criteria")
+            fallback = self.judge(niche_config, stats, performance, flagged=flagged)
+            # Relabelled so the reviewer's cell says which evidence decided it.
+            # A row whose verdict came from frames because the captions were off
+            # should not be indistinguishable from one read from a transcript.
+            return Judgement(
+                fallback.state,
+                f"layer 3 video fallback, no transcript — {fallback.detail}",
+                notes=fallback.notes, video_url=fallback.video_url,
+                rescued=fallback.rescued, relevance=fallback.relevance,
+            )
 
         reason = self._may_request(video=False)
         if reason:

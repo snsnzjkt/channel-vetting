@@ -2475,3 +2475,92 @@ wrong place. The reason string now names the evidence it actually read.
 | `config.py` | `GEMINI_STAGE2_MODE` (transcript), `GEMINI_TRANSCRIPT_VIDEOS` (2) |
 | tests | video-mode end-to-end pinned and kept; transcript-mode twin added asserting 0 video requests and the summary reaching `Relevance Notes` |
 | suite | 1382 -> **1384 passing**, zero regressions |
+
+---
+
+## 14.23 SHIPPED — LAYER 3: video analysis as a fallback, only when the transcript fails
+
+Final flow:
+
+```
+  1. BROAD METADATA SWEEP      free gates + keyword/tag screen, cap 60/niche/day
+          |
+  2. TRANSCRIPT REVIEW         up to 2 whole videos, ONE text request, writes a
+          |                    summary for the manager
+          |--- no captions? (~1 video in 3) ---> 3. VIDEO ANALYSIS
+          |                                         25s clip, visual criteria
+          v                                              |
+  4. MANUAL APPROVAL BY THE MANAGER  <---------------------
+```
+
+### Why the fallback is free to reach
+
+`transcripts.fetch` spends **no Gemini request** when it fails. So a failed layer
+2 costs nothing, and the layer 3 video call is the first spend for that candidate.
+The fallback adds coverage without adding waste:
+
+```
+  candidates reaching stage 2                    ~61
+  transcript available  -> 1 TEXT request        ~41
+  no transcript         -> 1 VIDEO request       ~20
+  -----------------------------------------------------
+  total                                           61   vs run cap 70
+  of which video                                  20   vs video/run cap 30
+```
+
+**Before this, those ~20 candidates reached the manager with no stage-2 evidence
+at all.** Roughly one video in three has captions disabled, so this is a common
+path and not an edge case.
+
+The video criteria are the right instrument here rather than a compromise: with no
+transcript the only evidence is what is on screen, and "a logo bug throughout" or
+"no identifiable host" are exactly what frames answer and text cannot.
+
+### LIVE — and the two layers DISAGREED, which is the finding
+
+Same channel, **Bricksie**, real Gemini, both paths exercised:
+
+| layer | evidence | verdict |
+|---|---|---|
+| **2** transcript | *"family and home life content centered around organizing living spaces, house tours… balancing a massive LEGO collection with everyday family rooms"* | **RESCUED** — `transcript confirmed 0.95` |
+| **3** video (captions forced off) | the clip shows a Lego build | **REFUSED** — `failed a required criterion: not an excluded subject` |
+
+**Bricksie is labelled Rejected by the reviewer.** Layer 3 agreed with him; layer 2
+did not.
+
+This matters because it is direct evidence that **the visual criteria are not
+redundant**. The transcript describes a channel talking *about* home organisation;
+the video shows what the creator is actually *doing*. The §14.12 excluded-subject
+veto caught it on frames and missed it on text.
+
+It is one channel, so it does not overturn anything. But it does two things:
+
+1. **It justifies keeping layer 3 as a real stage** rather than a degraded
+   fallback. On this candidate the fallback path was the more accurate one.
+2. **It qualifies §14.22's decision.** Replacing the video call with a transcript
+   read is right for *informing the manager* — the summary is far more useful —
+   but on this evidence it is more permissive, consistent with the transcript tier
+   also rescuing New Record Day, another known Reject.
+
+Both of those point the same way: **stage 2 adds rows and adds the context to
+judge them quickly; it does not filter.** Which is exactly what the operator asked
+for — volume, with manual approval as the gate — as long as nobody later mistakes
+it for a quality filter.
+
+### If review load becomes the problem
+
+In order of preference, and none of them a new gate:
+1. `GEMINI_MIN_CRITERIA_RATIO=1.0` — aggregate-only strictness, so a partial
+   confirm stops rescuing.
+2. Turn rescue off entirely — stage 2 then only summarises, and the keyword gate's
+   drops stand.
+3. Lower `DAILY_QUALIFIED_CAP` — defers prospects rather than losing them.
+
+### What shipped
+
+| item | detail |
+|---|---|
+| `gemini_verify.py` | layer 3 fallback inside `review_transcripts`, relabelling the verdict so the manager can see which evidence decided it |
+| `config.py` | `GEMINI_VIDEO_FALLBACK` (on) |
+| tests | `test_layer3_fallback.py` (10): fires only on a missing transcript, never when one exists, free to reach, switchable off, and rescue-only survives the extra hop |
+| suite | 1384 -> **1394 passing**, zero regressions |

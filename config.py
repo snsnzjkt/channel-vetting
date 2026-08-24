@@ -805,3 +805,24 @@ GEMINI_TRANSCRIPT_VIDEOS = int(os.getenv("GEMINI_TRANSCRIPT_VIDEOS", 2))
 # If the summaries turn out to miss brands the video tier caught, this is the way
 # back.
 GEMINI_STAGE2_MODE = os.getenv("GEMINI_STAGE2_MODE", "transcript")
+
+
+# LAYER 3: the video fallback, reached ONLY when layer 2 has no transcript.
+#
+# Flow: broad metadata sweep -> transcript review -> [no captions?] video
+# analysis -> manual approval.
+#
+# Roughly one video in three has captions disabled, so this is a common path and
+# not an edge case. Without the fallback those candidates reach the manager with
+# no stage-2 evidence at all; with it they get a verdict from what IS available.
+#
+# Free to reach: transcripts.fetch spends no request when it fails, so a failed
+# layer 2 costs nothing and the video call is the first spend for that candidate.
+# Measured per run: ~41 text + ~20 video = 61 requests against a 70 run cap, the
+# video share sitting inside its own 30/run ceiling.
+#
+# The video criteria are the right instrument here rather than a compromise: with
+# no transcript the only evidence is what is on screen, and "a logo bug
+# throughout" or "no identifiable host" are precisely what frames answer and text
+# cannot.
+GEMINI_VIDEO_FALLBACK = env_flag("GEMINI_VIDEO_FALLBACK", default=True)

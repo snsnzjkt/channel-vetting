@@ -1380,6 +1380,67 @@ def process_candidate(
         niche_config, stats.get("description", ""), performance.get("video_titles"),
     )
 
+    # Activity/quality signals for the gate, all free from data already
+    # fetched. upload_freq (videos/month over the sampled window) is computed
+    # HERE, before the gate, so the cadence check can read it — and it is
+    # reused unchanged for the Overall Score and the "Upload Frequency" column
+    # below, never recomputed.
+    upload_dates = performance.get("upload_dates", [])
+    upload_freq = calc_upload_frequency(upload_dates)
+    # None (not 0) when the window is too thin to estimate a cadence, so an
+    # unmeasurable channel isn't dropped on a made-up zero — see
+    # pre_push_drop_reason's None rule. Shared with audit_prospects.py; the
+    # rationale lives in calc_uploads_per_year's docstring.
+    uploads_per_year = calc_uploads_per_year(upload_dates)
+    days_since = days_since_last_upload(upload_dates)
+
+    # Pre-push gate, placed before scoring and before the email chain so a
+    # discarded candidate costs no browser session and no deep-scan quota.
+    #
+    # MOVED ABOVE THE GEMINI BLOCK 2026-08-24, and this is the whole point of the
+    # move: every input below is FREE and already in hand as of the performance
+    # fetch, while a Gemini request is the scarcest thing this pipeline spends.
+    # Measured over run_metrics.jsonl's two completed 2026-08-24 runs: of the 169
+    # candidates that reached the Gemini block, 108 (64%) were then dropped right
+    # here on this arithmetic — below_view_minimum 79, shorts_only 20,
+    # too_few_videos 7, not_english 2. Each of those had already cost a request
+    # that could not be spent on a candidate whose verdict was still open.
+    # Running this gate first cuts the population that needs a request from 169
+    # to 61, which at the observed 78 requests/day is the difference between 46%
+    # and 100% coverage of the candidates that reach it.
+    #
+    # The long-form floor is NOT part of this and stays below the Gemini block:
+    # establishing its count can cost quota, so it is correctly split out into
+    # longform_drop_reason. It still spent 16 requests across those two runs.
+    # Moving it up too would trade YouTube quota (3,580 of 10,000 used) for
+    # Gemini requests (78 of ~80) — probably right, but a different decision.
+    #
+    # DO NOT move this back below the Gemini block. tests/
+    # test_gate_order_request_budget.py fails loudly if you do.
+    drop_reason = pre_push_drop_reason(
+        stats.get("subscriber_count"),
+        performance.get("avg_views"),
+        performance.get("shorts_only", False),
+        min_avg_views=niche_config["min_avg_views"],
+        video_count=stats.get("video_count"),
+        content_language=performance.get("content_language"),
+        settled_views=performance.get("settled_views"),
+        uploads_per_year=uploads_per_year,
+        days_since_last_upload=days_since,
+    )
+    if drop_reason:
+        logger.info(
+            "Dropping %s before push — %s (%s subs, %s avg views, min %s, %s videos, "
+            "%s uploads/yr, %s days since upload, lang %s).",
+            stats.get("channel_title"), drop_reason,
+            stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
+            performance.get("min_views"), stats.get("video_count"),
+            round(uploads_per_year, 1) if uploads_per_year is not None else "unknown",
+            days_since if days_since is not None else "unknown",
+            performance.get("content_language") or "unset",
+        )
+        return None, drop_reason
+
     # GEMINI RELEVANCE VERIFICATION — a RESCUE LADDER on the gate above, and
     # nothing else. Read the two branches below carefully, because the whole
     # safety argument for this feature is in their shape:
@@ -1405,10 +1466,18 @@ def process_candidate(
     # functional when Gemini is unavailable" true by construction rather than by
     # careful coding.
     #
-    # Placed HERE and not lower for the same reason off_target_reason is here:
-    # the titles and descriptions it reads arrive free on the response just
-    # fetched, and it is still ahead of the long-form paging and the 0.2-credit
-    # email lookup. A rescue therefore costs nothing a normal candidate does not.
+    # Placed HERE for the same reason off_target_reason is: the titles and
+    # descriptions it reads arrive free on the response just fetched, and it is
+    # still ahead of the long-form paging and the 0.2-credit email lookup. A
+    # rescue therefore costs nothing a normal candidate does not.
+    #
+    # It now sits BELOW pre_push_drop_reason rather than above it (2026-08-24).
+    # That gate is free and was discarding 73% of the candidates this block had
+    # just paid a request for — see the comment on it above. The only candidates
+    # reaching this point are ones whose verdict is genuinely still open, which
+    # is what the request budget should be spent on. Nothing about the rescue
+    # semantics changed: a candidate the free gates drop was already dropped
+    # before this move, it just used to cost a request on the way out.
     judgement = None
     if verifier is not None:
         judgement = verifier.judge(
@@ -1429,46 +1498,6 @@ def process_candidate(
             f" Gemini: {judgement.detail}." if judgement is not None else "",
         )
         return None, off_target
-
-    # Activity/quality signals for the gate, all free from data already
-    # fetched. upload_freq (videos/month over the sampled window) is computed
-    # HERE, before the gate, so the cadence check can read it — and it is
-    # reused unchanged for the Overall Score and the "Upload Frequency" column
-    # below, never recomputed.
-    upload_dates = performance.get("upload_dates", [])
-    upload_freq = calc_upload_frequency(upload_dates)
-    # None (not 0) when the window is too thin to estimate a cadence, so an
-    # unmeasurable channel isn't dropped on a made-up zero — see
-    # pre_push_drop_reason's None rule. Shared with audit_prospects.py; the
-    # rationale lives in calc_uploads_per_year's docstring.
-    uploads_per_year = calc_uploads_per_year(upload_dates)
-    days_since = days_since_last_upload(upload_dates)
-
-    # Pre-push gate, placed before scoring and before the email chain so a
-    # discarded candidate costs no browser session and no deep-scan quota.
-    drop_reason = pre_push_drop_reason(
-        stats.get("subscriber_count"),
-        performance.get("avg_views"),
-        performance.get("shorts_only", False),
-        min_avg_views=niche_config["min_avg_views"],
-        video_count=stats.get("video_count"),
-        content_language=performance.get("content_language"),
-        settled_views=performance.get("settled_views"),
-        uploads_per_year=uploads_per_year,
-        days_since_last_upload=days_since,
-    )
-    if drop_reason:
-        logger.info(
-            "Dropping %s before push — %s (%s subs, %s avg views, min %s, %s videos, "
-            "%s uploads/yr, %s days since upload, lang %s).",
-            stats.get("channel_title"), drop_reason,
-            stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
-            performance.get("min_views"), stats.get("video_count"),
-            round(uploads_per_year, 1) if uploads_per_year is not None else "unknown",
-            days_since if days_since is not None else "unknown",
-            performance.get("content_language") or "unset",
-        )
-        return None, drop_reason
 
     # (The search-zone gate used to sit here, after the performance fetch,
     # because its language-region-subtag fallback needed content_language.

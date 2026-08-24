@@ -2557,7 +2557,23 @@ def run(
     # influencer tables (see external_dedupe.py) — cached, so this is
     # near-instant on any run within EXTERNAL_CACHE_MAX_AGE_HOURS of the
     # last one.
-    external_handles = fetch_external_handles()
+    # force_refresh: ALWAYS rebuild the dedupe index at the start of a run.
+    #
+    # The cache exists to make repeated local iteration cheap, and its 24-hour
+    # max age was fine when these tables were assumed static. They are not — the
+    # team edits the outreach tables continuously — so a run that starts with a
+    # 12-hour-old cache cannot see a channel added externally this morning, and
+    # pushes it as new.
+    #
+    # Measured 2026-08-25: 45 rows across the two niche tables were already
+    # tracked elsewhere, 43 of them matching on HANDLE, i.e. the index simply did
+    # not have them yet. 30 of Lifestyle's 31 arrived in a single day.
+    #
+    # The trade is ~90 seconds and ~180 Airtable reads per run against a
+    # duplicate costing a 0.20-credit email lookup plus a slot in the reviewer's
+    # queue. At 45 duplicates that is ~9 credits and 45 rows of human attention,
+    # so refreshing every run is comfortably the cheaper side.
+    external_handles = fetch_external_handles(force_refresh=True)
 
     total_discovered = 0
     total_processed = 0

@@ -225,3 +225,55 @@ def test_external_index_is_a_drop_in_for_the_handle_dict():
     assert idx["a"] == "T1"
     assert len(idx) == 2
     assert set(idx) == {"a", "b"}   # iterates handles, not names
+
+
+def test_run_rebuilds_the_dedupe_index_instead_of_trusting_the_cache():
+    """
+    REGRESSION, and it cost 45 duplicate rows.
+
+    `fetch_external_handles` caches for EXTERNAL_CACHE_MAX_AGE_HOURS (24). That
+    was fine when the external tables were assumed static; they are not — the
+    team edits the outreach tables continuously. A run starting with a
+    12-hour-old cache cannot see a channel added externally that morning, so it
+    pushes it as new.
+
+    Measured 2026-08-25: 45 rows across the two niche tables were already tracked
+    elsewhere, 43 of them matching on HANDLE — i.e. the index simply did not have
+    them yet — and 30 of Lifestyle's 31 arrived in a single day.
+
+    Asserted on the source rather than by running `run()`, because the cost of
+    the bug is one call site silently losing an argument, and that is exactly
+    what a source assertion catches.
+    """
+    import inspect
+
+    import main
+
+    src = inspect.getsource(main.run)
+    assert "fetch_external_handles(force_refresh=True)" in src, (
+        "run() must rebuild the dedupe index, not trust a cache up to "
+        "EXTERNAL_CACHE_MAX_AGE_HOURS old — see the comment at the call site"
+    )
+
+
+def test_the_cache_is_still_used_when_nobody_forces_a_refresh(tmp_path, monkeypatch):
+    """
+    The cache is not being removed, only bypassed by the pipeline. Local
+    iteration still wants it: rebuilding reads ~18k rows over ~90 seconds.
+    """
+    import json
+    import time
+
+    import external_dedupe as ed
+
+    cache = tmp_path / "ext.json"
+    cache.write_text(json.dumps({
+        "fetched_at": time.time(),
+        "handles": {"someone": "Fake Table"},
+        "names": {"someone": "Fake Table"},
+    }))
+    monkeypatch.setattr(ed, "EXTERNAL_HANDLES_CACHE_FILE", str(cache))
+    monkeypatch.setattr(ed, "_fetch_table_entries",
+                        lambda *a, **k: pytest.fail("must not refetch a fresh cache"))
+    idx = ed.fetch_external_handles()
+    assert idx.match(handle="someone") == "Fake Table"

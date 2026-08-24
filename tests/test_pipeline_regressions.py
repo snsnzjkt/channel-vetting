@@ -133,7 +133,7 @@ def test_run_aborts_when_get_existing_channel_ids_fails(monkeypatch):
     monkeypatch.setattr(main, "get_existing_channel_ids", fake_get_ids)
     monkeypatch.setattr(
         main, "fetch_external_handles",
-        lambda: pytest.fail("must abort before fetching external handles"),
+        lambda **kw: pytest.fail("must abort before fetching external handles"),
     )
 
     niches = {
@@ -693,7 +693,7 @@ def test_daily_cap_flag_caps_both_budgets(monkeypatch):
 def _run_common_stubs(monkeypatch, main):
     monkeypatch.setattr(main, "fetch_blocklist", lambda: _NullBlocklist())
     monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda: {})
+    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
 
 
 def test_run_raises_when_every_niche_skips_for_non_cap_reason(monkeypatch):

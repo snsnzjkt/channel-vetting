@@ -39,3 +39,4 @@ backtest_results.json*
 run_metrics.jsonl
 video_topics_cache.json
 transcript_cache.json
+metadata_screen_cache.json

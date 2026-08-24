@@ -1840,3 +1840,106 @@ and give the tier the whole spoken content instead of 25 seconds. It is also the
 tier that **rescues**, its current behaviour is measured, and swapping its
 evidence source invalidates that measurement — so it needs a backtest, not a
 patch. Flagged, not done.
+
+---
+
+## 14.16 MEASURED — an AI metadata screen as Layer 1. Built, tested, DO NOT SHIP as a gate.
+
+Proposed final pipeline: **AI on metadata → broad list → AI on transcript**.
+Layer 2 is built and passing (§14.15). This is Layer 1: an AI screen on metadata,
+built, and measured against the reviewer's own verdicts before being given
+authority.
+
+**Two things had genuinely changed, so the earlier objection no longer applied:**
+R0 cut the population reaching this point from 169 candidates per run to **61**,
+which fits the 70/run cap; and a text request charges the 80/model total rather
+than the 40/model **video** sub-cap. An AI Layer 1 became affordable.
+
+**And the strongest earlier objection actually argued FOR it.** The positive
+keyword gate was rejected in 2026-08 because *"genuine prospects title videos
+things like 'This Small House Will Make You Fall in Love', which no vocabulary
+anticipates"* (`main.off_target_reason`). That is a limit of **vocabulary**, not
+of the idea — and a language model does recognise that title. So this was the
+rejected gate's stated reason for failing, addressed. Worth measuring.
+
+### The result — n=60, balanced, free tier, zero vendor credits
+
+| Layer 1 variant | recall on Approved | caught of Rejected | net |
+|---|---|---|---|
+| **AI screen, plain** (n=35) | **68.4%** — lost 6 of 19 | 6 of 16 (38%) | 0 |
+| **AI screen + 12 few-shot examples per niche** (n=60) | **63.3%** — lost 11 of 30 | 9 of 30 (30%) | **−2** |
+| **keyword Layer 1 (shipping)** (n=60) | **100.0%** — lost 0 of 30 | 1 of 30 (3%) | +1 |
+
+**The AI screen discards a third of the reviewer's approved prospects.** For a
+pipeline whose entire problem is volume, that is disqualifying. Being told three
+separate times in the prompt to prioritise recall did not prevent it, and adding
+the reviewer's own past verdicts as examples made it **worse**, not better.
+
+### Confidence is INVERTED, so no threshold rescues it
+
+```
+  AI confidence when it KEPT an Approved channel :  0.89
+  AI confidence when it LOST an Approved channel :  0.97
+```
+
+It is *more* certain when it is wrong. A confidence gate — the safety valve used
+everywhere else in this pipeline — cannot work here.
+
+### Why it fails, and it is not a prompt problem
+
+Every Approved channel it threw away, with the reason it gave:
+
+| channel | the AI's reason | reviewer |
+|---|---|---|
+| MAH | "exclusively focused on football and sports commentary" | **Approved** |
+| Moto Feelz | "exclusively focused on motorcycles, automotive" | **Approved** |
+| American Electrician | "strictly electrical how-to and power tool reviews" | **Approved** |
+| The Real Sam Prentice | "entirely focused on 3D printing, laser" | **Approved** |
+| DaBuild | "dedicated to prop making" | **Approved** |
+| Wyrmwood Vlogs | "tabletop gaming furniture and woodworking business vlogs" | **Approved** |
+| Courtney Lynea | "fitness, weight loss, fashion" | **Approved** |
+| Beth Djalali | "strictly fashion, beauty" | **Approved** |
+| Jenny Kleinknecht | "travel vlogs and a clothing brand" | **Approved** |
+
+Every one of those descriptions is **accurate**. The screen is not confused; it
+is answering the wrong question. It reasons about **topical relevance**, and this
+reviewer is not buying topical relevance — §11 named it: he is buying an
+**audience** for home-entertainment furniture. A football channel and a
+motorcycle channel deliver that audience. No model reasoning from a niche
+description reaches that conclusion, because it is not in the niche description;
+it is the reviewer's private strategy.
+
+That is also why few-shot with example *names* did not fix it: a list of channel
+names does not convey the theory behind them.
+
+**This is the fourth inverted relevance criterion found in this repo**, after the
+off-target gate (−38% discrimination), the Gemini text tier (27% vs a 38% base
+rate), and the AV-specialist vocabulary that rescued only rejects. The pattern is
+consistent: anything in this pipeline that reasons about topic fit scores against
+the verdict, and only **negative-evidence-only exclusion** has ever measured
+positive.
+
+### What ships
+
+**Nothing new as a gate.** Layer 1 stays the keyword/tag screen — 100% recall on
+this sample, and §14.11 measured it at 5 rejected caught for 0 approved lost over
+211 channels. `measure_metadata_screen.py` and the request builder are committed
+so the experiment is reproducible and re-runnable when there are more labels.
+
+**One use of the AI screen that costs nothing and loses nothing:** it caught
+30-38% of Rejected channels. Used as a **ranking** signal rather than a gate — to
+order which candidates get a Layer 2 transcript check first, or to sort the
+reviewer's queue — it drops nobody and preserves 100% recall by construction.
+Not built; flagged as the only version the measurement supports.
+
+### Operational finding
+
+The free tier allows **15 requests/minute per model**, not just the daily
+ceilings. The first measurement run lost 25 of 60 screens to `429
+RESOURCE_EXHAUSTED` before that was known. `measure_metadata_screen.py` now paces
+at 12/min. Nothing in the pipeline proper hits this, because it never issues
+requests in a tight loop — but any future batch tool will.
+
+### Cost of this whole investigation
+Zero vendor credits (13.04 before and after). Zero YouTube quota beyond cached
+metadata. 99 Gemini free-tier requests.

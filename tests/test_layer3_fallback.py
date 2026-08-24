@@ -149,3 +149,85 @@ def test_the_video_share_of_the_run_stays_inside_its_own_ceiling():
         "the layer 3 fallback sizes at ~20 video requests per run; a video run "
         "cap below that silently starves it"
     )
+
+
+# --- video must never run when a transcript exists, at the PIPELINE level ---
+
+def test_pipeline_level_a_transcript_means_ZERO_video_requests(monkeypatch):
+    """
+    The operator's constraint, asserted through process_candidate rather than
+    through the verifier alone: video analysis is not always on, it runs only
+    when the transcript fails.
+
+    The verifier-level test above covers review_transcripts in isolation. This
+    one covers the wiring, because a future change to main.py's routing could
+    reintroduce an always-on video call without touching gemini_verify at all.
+    """
+    import main
+    from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_stats
+    from search_zones import ZONE_CORE
+
+    class _Enricher:
+        last_email_type = ""
+        last_email_note = ""
+
+    monkeypatch.setattr(main, "GEMINI_STAGE2_MODE", "transcript")
+    monkeypatch.setattr(gv.transcripts, "fetch",
+                        lambda vid, **kw: "We toured the basement media room. " * 20)
+    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(main, "get_recent_video_performance",
+                        lambda cid, pl: _stub_performance(
+                            settled_longform=[{"video_id": "vX", "views": 5000,
+                                               "duration_s": 900}],
+                            video_titles=["t"], video_descriptions=["d"]))
+    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(main, "resolve_email_with_source",
+                        lambda *a, **k: ("a@b.com", main.EMAIL_SOURCE_REPEATED, None))
+    monkeypatch.setattr(main, "table_has_field", lambda t, f: True)
+    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+
+    real = gv.GeminiVerifier(
+        model="gemini-3.5-flash-lite", cache_path="/dev/null",
+        max_requests_per_run=100, max_video_requests_per_run=50,
+        max_seconds_per_run=900, min_confidence=0.6, verdict_version=1,
+        model_chain=("gemini-3.5-flash-lite",), video_always=True,
+    )
+    stub_post(monkeypatch, FakeResponse(200, _body(matches=True, conf=0.9)))
+    main.process_candidate(
+        {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
+        {}, _NullBlocklist(),
+        {"min_avg_views": 10_000, "min_channel_age_months": None,
+         "allowed_country_codes": ZONE_CORE, "table_name": "tbl",
+         "text_criteria": NICHE["text_criteria"],
+         "video_criteria": NICHE["video_criteria"],
+         "on_target_terms": NICHE["on_target_terms"]},
+        None, _Enricher(), verifier=real,
+    )
+    assert real.video_requests == 0, (
+        "a candidate WITH a transcript must cost zero video requests — video "
+        "analysis is a fallback, not an always-on stage"
+    )
+
+
+def test_the_startup_banner_does_not_claim_video_runs_on_everything(caplog):
+    """
+    The banner read "video=every candidate" straight off GEMINI_VIDEO_ALWAYS,
+    which stopped being true when stage 2 became a transcript review. An operator
+    reading that will reasonably conclude the pipeline does something it does not.
+    """
+    import logging
+
+    import config as cfg
+
+    caplog.set_level(logging.INFO)
+    if cfg.GEMINI_STAGE2_MODE != "transcript":
+        pytest.skip("banner wording under test applies to transcript mode")
+    gv.GeminiVerifier.from_config()
+    # getMessage(), not .message: logging is lazily formatted, so .message is
+    # the raw "%s" template and the mode text lives in .args.
+    line = next((r.getMessage() for r in caplog.records
+                 if "relevance verification" in r.getMessage()), "")
+    if not line:
+        pytest.skip("verification disabled in this environment")
+    assert "every candidate" not in line, line
+    assert "FALLBACK ONLY" in line, line

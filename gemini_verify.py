@@ -1069,11 +1069,24 @@ class GeminiVerifier:
         except gemini_tracker.GeminiLedgerUnavailable as exc:
             logger.error("%s Verification is OFF for this run.", exc)
             return None
+        # Describes the FLOW, not just the flags. The old line said
+        # "video=every candidate", read straight off GEMINI_VIDEO_ALWAYS, and
+        # that stopped being true when stage 2 became a transcript review: video
+        # is now a FALLBACK reached only when a video has no captions. An
+        # operator reading a banner that says video runs on everything will
+        # reasonably conclude the pipeline is doing something it is not.
+        if cfg.GEMINI_STAGE2_MODE == "transcript":
+            stage2 = (f"stage 2 = TRANSCRIPT of up to "
+                      f"{cfg.GEMINI_TRANSCRIPT_VIDEOS} video(s) (text request); "
+                      f"video = " + ("FALLBACK ONLY, when a video has no captions"
+                                     if cfg.GEMINI_VIDEO_FALLBACK else "OFF"))
+        else:
+            stage2 = ("stage 2 = VIDEO clip on "
+                      + ("every candidate" if v.video_always else "the rescue path only"))
         logger.info(
             "Gemini relevance verification: ENABLED (model=%s, free-only=%s, "
-            "video=%s, text tier=%s, run caps %d total / %d video)",
-            " -> ".join(v.model_chain), cfg.GEMINI_FREE_ONLY,
-            "every candidate" if v.video_always else "rescue path only",
+            "%s, text tier=%s, run caps %d total / %d video)",
+            " -> ".join(v.model_chain), cfg.GEMINI_FREE_ONLY, stage2,
             "on (advisory)" if v.text_tier else "off",
             v.max_requests, v.max_video_requests,
         )

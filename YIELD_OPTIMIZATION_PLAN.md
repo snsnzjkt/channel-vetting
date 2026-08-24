@@ -2564,3 +2564,47 @@ In order of preference, and none of them a new gate:
 | `config.py` | `GEMINI_VIDEO_FALLBACK` (on) |
 | tests | `test_layer3_fallback.py` (10): fires only on a missing transcript, never when one exists, free to reach, switchable off, and rescue-only survives the extra hop |
 | suite | 1384 -> **1394 passing**, zero regressions |
+
+### 14.23a Video is a fallback, and the startup banner was saying otherwise
+
+Operator restated the constraint: **video analysis is not always on — only when
+the transcript fails.** That is what §14.23 implemented, and an audit confirms it
+by construction:
+
+- **One** place in the codebase issues a video request: `build_video_request`,
+  called from `judge` and nowhere else.
+- `judge` is reachable from exactly **two** production paths:
+  `main.py` when `GEMINI_STAGE2_MODE != "transcript"` (not the default), and the
+  layer 3 fallback inside `review_transcripts`, which is only entered when no
+  transcript was obtained.
+
+So with the shipping defaults, **a candidate with a transcript costs zero video
+requests.**
+
+**But the startup banner was claiming the opposite.** It read
+`video=every candidate` straight off `GEMINI_VIDEO_ALWAYS`, which stopped being
+true when stage 2 became a transcript review:
+
+```
+  BEFORE:  ... free-only=True, video=every candidate, text tier=off ...
+  AFTER:   ... stage 2 = TRANSCRIPT of up to 2 video(s) (text request);
+               video = FALLBACK ONLY, when a video has no captions ...
+```
+
+`GEMINI_VIDEO_ALWAYS` still governs the right thing — whether `judge`, once
+entered, runs video for an unflagged candidate — but the banner was reporting a
+flag instead of describing the flow, and an operator reading it would reasonably
+conclude the pipeline was doing something it is not. It now describes the flow and
+still distinguishes the two modes.
+
+Two tests pin the constraint rather than trusting the audit:
+
+- `test_pipeline_level_a_transcript_means_ZERO_video_requests` drives
+  `process_candidate` end to end with a transcript present and asserts
+  `video_requests == 0`. The verifier-level test covers `review_transcripts` in
+  isolation; this covers the WIRING, because a future change to main's routing
+  could reintroduce an always-on video call without touching `gemini_verify`.
+- `test_the_startup_banner_does_not_claim_video_runs_on_everything` asserts the
+  banner says `FALLBACK ONLY` and never `every candidate` in transcript mode.
+
+Suite: **1396 passing**.

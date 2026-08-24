@@ -822,11 +822,102 @@ def test_passing_the_veto_still_needs_the_content_ratio():
 
 
 def test_both_niches_mark_the_brand_criterion_required():
+    """
+    The brand veto is required in every niche.
+
+    The count assertion here used to be `== 1`. It became `>= 1` on 2026-08-24
+    when the excluded-subject veto was added — see the next test, which pins that
+    one by name. What this test is FOR is that no niche quietly demotes the brand
+    test to a scored criterion, where the 0.5 ratio would re-admit the
+    manufacturers it exists to catch.
+    """
     import niches
     for name, cfg in niches.NICHES.items():
         req = [c for c in cfg["video_criteria"] if c.get("required")]
-        assert len(req) == 1, f"{name}: expected exactly one required criterion"
-        assert "brand" in req[0]["name"], f"{name}: {req[0]['name']}"
+        assert req, f"{name}: expected at least one required criterion"
+        assert any("brand" in c["name"] for c in req), \
+            f"{name}: the brand veto must stay required, got {[c['name'] for c in req]}"
+
+
+def test_both_niches_veto_the_excluded_subject():
+    """
+    Both niches carry the excluded-subject veto, and it is REQUIRED.
+
+    As a scored criterion it would be worse than useless: at a 0.5 ratio a clip
+    could satisfy it and nothing else and still confirm, so "no guns in this
+    video" would become evidence the channel is on-niche.
+    """
+    import niches
+    for name, cfg in niches.NICHES.items():
+        matches = [c for c in cfg["video_criteria"]
+                   if "excluded subject" in c["name"]]
+        assert len(matches) == 1, f"{name}: expected one excluded-subject criterion"
+        assert matches[0].get("required") is True, \
+            f"{name}: the excluded-subject criterion must be a veto, not scored"
+        # The incidental carve-outs are the whole safety margin: a room tour with
+        # a Lego set on the shelf is the niche, not an exclusion.
+        assert "Incidental" in matches[0]["test"], f"{name}: no incidental carve-out"
+
+
+def test_the_required_exclusion_does_not_loosen_the_relevance_bar():
+    """
+    Adding a second veto must not make the ratio route easier to pass.
+
+    This is the failure the ratio fix exists for. With two scored criteria, one
+    brand veto and a ratio of 0.5, adding a second veto USED to let
+    `0 of 2 scored, both vetoes passed` confirm at 2/4 — a clip showing no home,
+    no living space and no creator would be rescued for being an independent
+    creator who showed no gun. The ratio is now counted over scored criteria
+    only, so both halves of the fraction exclude the vetoes.
+    """
+    required = [{"name": "brand"}, {"name": "topics"}]
+
+    def payload(space, creator, brand, topics):
+        flags = (space, creator, brand, topics)
+        return {"matches": all(flags), "confidence": 0.9,
+                "criteria_results": [
+                    {"criterion": n, "matches": m} for n, m in
+                    zip(("space", "creator", "brand", "topics"), flags)]}
+
+    # Zero scored criteria matched: must NOT confirm, however many vetoes pass.
+    ok, why = gv.verdict_confirms(payload(False, False, True, True), 0.6, 0.5, required)
+    assert ok is False, f"two passing vetoes are not relevance evidence: {why}"
+    assert "0/2" in why, f"the ratio must be over the 2 SCORED criteria: {why}"
+
+    # One scored criterion matched: confirms, exactly as with three criteria.
+    assert gv.verdict_confirms(payload(True, False, True, True), 0.6, 0.5, required)[0]
+    assert gv.verdict_confirms(payload(False, True, True, True), 0.6, 0.5, required)[0]
+
+    # A failing exclusion veto refuses everything, whatever else matched.
+    for space in (True, False):
+        for creator in (True, False):
+            ok, why = gv.verdict_confirms(
+                payload(space, creator, True, False), 0.6, 0.5, required)
+            assert ok is False, f"excluded subject present must never confirm: {why}"
+            assert "topics" in why
+
+
+def test_the_three_criteria_config_is_unchanged_by_the_ratio_fix():
+    """
+    Equivalence check for the SHIPPING config at the time of the fix: 2 scored +
+    1 required, ratio 0.5. All eight verdicts must match the pre-fix behaviour,
+    so the fix is provably a no-op until a second veto is added.
+    """
+    import itertools
+    required = [{"name": "brand"}]
+    expected = {  # (space, creator, brand) -> confirms
+        (True, True, True): True, (True, True, False): False,
+        (True, False, True): True, (True, False, False): False,
+        (False, True, True): True, (False, True, False): False,
+        (False, False, True): False, (False, False, False): False,
+    }
+    for flags in itertools.product((True, False), repeat=3):
+        payload = {"matches": all(flags), "confidence": 0.9,
+                   "criteria_results": [
+                       {"criterion": n, "matches": m} for n, m in
+                       zip(("space", "creator", "brand"), flags)]}
+        ok, why = gv.verdict_confirms(payload, 0.6, 0.5, required)
+        assert ok is expected[flags], f"{flags}: {ok} != {expected[flags]} ({why})"
 
 
 def test_a_model_over_its_day_cap_does_not_block_the_others(monkeypatch, verifier,

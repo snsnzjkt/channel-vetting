@@ -663,3 +663,91 @@ GMAIL_SENDER_EMAIL = os.getenv("GMAIL_SENDER_EMAIL", "")
 GMAIL_CREDENTIALS_B64 = os.getenv("GMAIL_CREDENTIALS_B64", "")
 OUTREACH_FOOTER_TEXT = os.getenv("OUTREACH_FOOTER_TEXT", "")
 OUTREACH_UNSUBSCRIBE_URL = os.getenv("OUTREACH_UNSUBSCRIBE_URL", "")
+
+
+# ---------------------------------------------------------------------------
+# VIDEO TOPIC GATE — what a channel's videos are ABOUT, from creator tags.
+# See video_topics.py for why this exists and why it is not a transcript.
+#
+# Measured 2026-08-24 by measure_video_topics.py over 211 labelled channels
+# (81 Approved / 130 Rejected), 91% of which carry tags at all:
+#
+#   share >= 40%     kills approved   catches rejected   net
+#   gaming                        0                  2    +2
+#   sports_commentary             0                  1    +1
+#   av_specialist                 0                  1    +1
+#   toys_and_kids                 0                  1    +1
+#   ------------------------------------------------------------
+#   total                         0                  5    +5
+#
+# So at a 40% share the gate caught five channels the reviewer rejected and
+# cost nothing: zero of 81 Approved channels fire at that threshold.
+#
+# Two findings are baked into the defaults below rather than left to a reader:
+#
+#   - phones_and_pcs is HARMFUL at every threshold where it fires (-2 at 10%,
+#     -1 at 25%), which matches the 2026-08-21 title backtest that found the
+#     same category anti-predictive (52 approved vs 19 rejected). It is NOT in
+#     the allowlist and must not be added without a fresh measurement.
+#   - Lifestyle Sofa has NOTHING firing at 25% over 113 labelled rows. This is
+#     a Home Theater signal in practice, which is the same per-niche divergence
+#     section 13 found in the drop distributions. It is left enabled for both
+#     because an inert gate costs nothing, not because it was shown to work
+#     there.
+#
+# DEFAULT OFF, following GEMINI_ENABLED's precedent: this is a new DROP
+# authority, and the repo's rule is that a relevance signal is measured before
+# it is trusted. Five catches on 211 rows is a real result and a small one; the
+# operator turns it on.
+VIDEO_TOPIC_GATE = env_flag("VIDEO_TOPIC_GATE", default=False)
+
+# The share at which a topic is judged DOMINANT, counted over tags rather than
+# videos. 0.40 is where the measurement shows zero approved channels lost; 0.25
+# costs 1 approved for 4 more catches and 0.10 turns net-negative overall.
+# Lowering this is a quality decision, not a tuning knob.
+VIDEO_TOPIC_MIN_SHARE = float(os.getenv("VIDEO_TOPIC_MIN_SHARE", 0.40))
+
+# Only these topics may drop a candidate, and each one earned its place in the
+# table above. An empty value disables the gate as surely as the flag does.
+VIDEO_TOPIC_CATEGORIES = tuple(
+    t.strip() for t in os.getenv(
+        "VIDEO_TOPIC_CATEGORIES",
+        "gaming,sports_commentary,av_specialist,toys_and_kids,firearms,asmr,political",
+    ).split(",") if t.strip()
+)
+
+# firearms, asmr and political are in that list on a DIFFERENT basis from the
+# other four, and the distinction matters. They are already excluded topics for
+# this pipeline by instruction (EXCLUDED_TOPIC_TERMS), but they are matched today
+# only against the channel TITLE and About bio, so a firearms channel whose bio
+# never says "firearm" passes. On tags they cost nothing measurable — firearms
+# fires on zero of the 211 labelled channels, so it kills zero Approved — but
+# their BENEFIT is unmeasured for the same reason: the labelled corpus contains
+# no tagged firearms channel to catch. They ship on the section 12 precedent for
+# story_recap: an instruction-backed exclusion with zero measured harm.
+
+
+# TOPIC CONFIRMATION — the second layer of the topic gate.
+#
+# Flow: creator TAGS propose a topic (video_topics.py, free, whole catalogue),
+# then ONE Gemini call confirms it against what the video actually contains
+# before anything is dropped. Metadata for reach, content for accuracy.
+#
+# Why confirmation is affordable where full coverage is not: it runs only on
+# candidates whose tags already fired, which is 5 of 211 labelled channels (2.4%)
+# at the shipping threshold. So this costs ~1-3 requests per run against a 70/run
+# cap, not one per candidate. That is the whole reason the two-layer shape works
+# here and a content-first shape does not.
+#
+# Confirmation reads the video's TRANSCRIPT (transcripts.py) and sends TEXT. No
+# frames, no video request, so it does not touch GEMINI_MAX_VIDEO_REQUESTS_PER_DAY
+# — the tighter of the two per-model ceilings. Measured: 459 and 1,038 tokens for
+# two real uploads END TO END, against ~5,940 for a 90-second video window, and
+# ~1s instead of 30-70s.
+#
+# An earlier version of this used a 90-second VIDEO window, on a conclusion that
+# transcripts were unobtainable. That conclusion was wrong — see transcripts.py.
+GEMINI_TOPIC_CONFIRM = env_flag("GEMINI_TOPIC_CONFIRM", default=True)
+
+GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE = float(
+    os.getenv("GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE", 0.75))

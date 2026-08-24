@@ -860,6 +860,25 @@ def get_recent_video_performance(
     # bare email address), and a bio is written once while titles are written
     # every upload. See main.off_target_reason.
     video_titles = []
+    # CREATOR-DECLARED TOPIC DATA, added 2026-08-24. Both arrive free on the
+    # response above — videos.list is a flat 1 unit regardless of parts, and
+    # `snippet` is already requested for defaultAudioLanguage — and both were
+    # being dropped on the floor exactly as video_titles used to be.
+    #
+    # Why they matter: every relevance signal in this pipeline reads what a
+    # channel is CALLED (channel title, About bio) or what it NAMES its videos
+    # (video titles). None of them read what a video is ABOUT. `tags` is the
+    # creator's own topic labelling of each video and `categoryId` is YouTube's,
+    # so a firearms channel titling videos "Range Day 47" or a Lego channel
+    # titling one "New Build Complete!" is legible here and invisible to
+    # excluded_topic_reason and off_target_reason.
+    #
+    # This is the free half of what a transcript would have given us. The other
+    # half is not available: YouTube's captions.download requires OAuth as the
+    # CHANNEL OWNER, and every unauthenticated caption route now answers 200
+    # with an empty body (measured 2026-08-24). See video_topics.py.
+    video_tags = []
+    video_category_ids = []
     durations = []
     for v in video_items:
         snippet = v.get("snippet", {})
@@ -867,6 +886,16 @@ def get_recent_video_performance(
         # point of pulling EMAIL_SCAN_SAMPLE_SIZE of them.
         video_descriptions.append(snippet.get("description", ""))
         video_titles.append(snippet.get("title", ""))
+        # Flattened across the window rather than kept per-video: every consumer
+        # asks "does this CHANNEL publish X", never "did video 7 carry tag X".
+        # A tagless video contributes nothing, which is the correct reading —
+        # tags are optional and absent data never disqualifies here.
+        tags = snippet.get("tags")
+        if isinstance(tags, list):
+            video_tags.extend(t for t in tags if isinstance(t, str) and t.strip())
+        category_id = snippet.get("categoryId")
+        if category_id:
+            video_category_ids.append(str(category_id))
         # Shorts detection reads the WIDE window (every fetched video, up to
         # EMAIL_SCAN_SAMPLE_SIZE) rather than the 10-video performance
         # window: more videos means more chances to see a long-form upload,
@@ -1081,6 +1110,8 @@ def get_recent_video_performance(
         # above) and read by main.off_target_reason to judge what the channel
         # consistently publishes.
         "video_titles": video_titles,
+        "video_tags": video_tags,
+        "video_category_ids": video_category_ids,
         # Where the newest-EMAIL_SCAN_SAMPLE_SIZE window ended, so
         # scan_older_videos_for_email() can continue from here instead of
         # re-fetching page 1 (2 wasted units) to find the same place.

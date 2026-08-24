@@ -120,17 +120,53 @@ NICHES = {
         #      so retuning costs requests, never correctness.
         # Keep to 2-4 entries per list: each one is a separate judgement the
         # model has to evidence, and a long list dilutes all of them.
+        # REWRITTEN 2026-08-25. The previous version CONTRADICTED the keyword
+        # layer on the exact vocabulary the 2026-08-22 mining measured.
+        #
+        # It asked whether the recurring subject was "home audio-visual equipment
+        # ... speakers, projectors, receivers, soundbars", i.e. it scored
+        # "speakers" as evidence the channel is ON-niche. Meanwhile
+        # OFF_TARGET_TERMS["av_specialist"] contains speaker, subwoofer,
+        # audiophile, turntable, amplifier and IS active for this niche via
+        # off_target_categories — so the keyword layer scores the same word as
+        # evidence the channel is OFF-niche. Two layers, opposite directions, one
+        # vocabulary.
+        #
+        # That was latent only because GEMINI_TEXT_TIER defaults False. Switching
+        # the text tier on without this fix would have had the AI layer score
+        # highest exactly the channels section 12 built the exclusion to catch:
+        # Zero Fidelity, New Record Day, Lenny Florentine, Forever Analog — every
+        # dedicated AV reviewer the reviewer turned down. Measured there:
+        # av_specialist vocabulary rescued 0 approved and 6 rejected channels,
+        # and "speakers" appears in 0 of 21 approved titles and 8 of 31 rejected.
+        #
+        # So these now ask what the labels say the reviewer actually buys — the
+        # AUDIENCE for home-entertainment furniture and the SPACE it lives in —
+        # which is the same correction video_criteria received on 2026-08-21 and
+        # which text_criteria never got. Equipment is no longer the subject; a
+        # room is. Gear-focused channels are left to the keyword exclusion, which
+        # is measured and already catches them.
+        #
+        # STILL ADVISORY. GEMINI_TEXT_TIER stays False: this rewrite removes a
+        # known contradiction, it does not constitute evidence that the tier
+        # predicts anything. The tier measured 27% approved against a 38% base
+        # rate and needs a fresh backtest before it is switched on, not a better
+        # prompt.
         "text_criteria": [
-            {"name": "home AV / entertainment-space focus",
-             "test": "Across these titles and descriptions, is the channel's "
-                     "recurring subject home audio-visual equipment or the "
-                     "entertainment spaces built around it — speakers, "
-                     "projectors, receivers, soundbars, media rooms, man caves — "
-                     "rather than general consumer tech, phones, PCs, or gaming?"},
-            {"name": "reviews or builds, not news",
-             "test": "Does the channel actually review, install or build this "
-                     "equipment, rather than reporting industry news, reacting to "
-                     "other creators, or reselling manufacturer announcements?"},
+            {"name": "home living or entertainment SPACE",
+             "test": "Across these titles and descriptions, does this channel "
+                     "recurrently show or discuss real home living space — room "
+                     "tours, house or apartment tours, renovations, basement or "
+                     "garage conversions, media rooms, man caves, game rooms — or "
+                     "the furniture, seating and fittings in one? A channel whose "
+                     "subject is the ROOM counts. A channel whose subject is "
+                     "specialist audio or video EQUIPMENT reviewed as gear does "
+                     "NOT: that is a different audience and is handled elsewhere."},
+            {"name": "a household, not a storefront",
+             "test": "Does this look like a person or family showing their own "
+                     "home and life in it, rather than a retailer, manufacturer, "
+                     "publisher or industry-news channel? Occasional off-topic "
+                     "uploads are fine — judge what the channel recurrently is."},
         ],
         # LOOSENED 2026-08-21, and deliberately. The previous three criteria
         # required that AV equipment be the video's OWN subject and that the
@@ -177,6 +213,72 @@ NICHES = {
                      "with voiceover and no personality, or a logo bug throughout. "
                      "A single person filming in their own home or workshop is an "
                      "independent creator even when the production is good."},
+            # EXCLUDED SUBJECT — the second veto, added 2026-08-24 on operator
+            # instruction, and the only criterion here that reads the AUDIO as
+            # much as the frames.
+            #
+            # Why it belongs in the VIDEO tier and not in a keyword list: the
+            # keyword lists already carry this vocabulary
+            # (EXCLUDED_TOPIC_TERMS["firearms"], OFF_TARGET_TERMS["toys_and_kids"])
+            # and match it against the channel title, the About bio and the video
+            # titles. None of those is the video. A firearms channel titling
+            # videos "Range Day 47" matches nothing, and video_topics.py closes
+            # only the half of that gap that creator TAGS cover. This closes the
+            # other half: Gemini is handed the video URL and ingests audio and
+            # frames together, so "a gun is being fired" and "someone is
+            # assembling a Lego set" are directly observable here and nowhere
+            # else in this pipeline. A transcript would do the same job and is
+            # not obtainable — see video_topics.py for the measured 200/empty-body
+            # wall on every unauthenticated caption route.
+            #
+            # REQUIRED, i.e. a veto, for the same reason the brand test is: an
+            # exclusion is not two-thirds satisfiable. Note this is only reachable
+            # as a veto because the tier is RESCUE-ONLY: failing it blocks a
+            # rescue, it never drops a candidate the keyword gates already passed.
+            # So the risk this criterion carries is "a legitimate channel loses a
+            # rescue it would have won", never "a prospect is deleted".
+            #
+            # That risk is why every clause below is about the SUBJECT rather than
+            # about presence, with the incidental cases written out explicitly. A
+            # room tour with a Lego set on the shelf, a games console under the
+            # TV, or a rifle on a wall rack is exactly the kind of channel this
+            # niche WANTS, and all three must answer yes. Getting this wrong in
+            # the presence direction would re-create the inversion section 12
+            # found in the AV-specialist vocabulary, where a term meant to
+            # describe the niche was in practice describing the rejects.
+            #
+            # UNMEASURED, and deliberately shipped anyway. It cannot be scored
+            # against the labels the way section 12 scored vocabulary: the
+            # backtest corpus has no cached video verdicts joinable to a channel
+            # (gemini_cache.json keys video verdicts on video_id and no
+            # video_id -> channel_id map is persisted), and firearms fires on zero
+            # of the 211 labelled channels, so there is nothing to measure a catch
+            # against. It ships on the section 12 story_recap precedent —
+            # instruction-backed, zero measured harm — and its blast radius is
+            # bounded by rescue-only. Read the Relevance Detail column for a cycle
+            # before trusting it.
+            {"name": "not an excluded subject",
+             "required": True,
+             # This criterion NAMES excluded vocabulary in order to exclude it,
+             # which is the opposite of praising it. The consistency guard in
+             # tests/test_criteria_consistency.py would otherwise read
+             # "action figure" here as this niche endorsing a term it excludes,
+             # so the intent is declared rather than inferred from the wording.
+             "names_exclusions": True,
+             "test": "Is the SUBJECT of this clip something other than firearms, "
+                     "toys or construction-brick building, ASMR, or party "
+                     "politics? Answer no ONLY when one of those is what the "
+                     "video is actually about: a gun being shown, reviewed, "
+                     "handled or fired; a toy, doll, action figure or Lego-style "
+                     "brick set being played with, unboxed or assembled; "
+                     "whispered or trigger-sound ASMR; or political campaigning "
+                     "or commentary. Incidental presence does NOT count and must "
+                     "still answer yes — a Lego set or action figure on a shelf "
+                     "during a room tour, a games console under a television, a "
+                     "rifle on a wall rack in the background, a child playing in "
+                     "the corner of a family room, or a news broadcast visible on "
+                     "a screen being reviewed. If you cannot tell what the "
+                     "subject is, answer yes and lower your confidence."},
         ],
         "min_avg_views": 10_000,
         "min_channel_age_months": 12,
@@ -517,6 +619,72 @@ NICHES = {
                      "with voiceover and no personality, or a logo bug throughout. "
                      "A single person filming in their own home or workshop is an "
                      "independent creator even when the production is good."},
+            # EXCLUDED SUBJECT — the second veto, added 2026-08-24 on operator
+            # instruction, and the only criterion here that reads the AUDIO as
+            # much as the frames.
+            #
+            # Why it belongs in the VIDEO tier and not in a keyword list: the
+            # keyword lists already carry this vocabulary
+            # (EXCLUDED_TOPIC_TERMS["firearms"], OFF_TARGET_TERMS["toys_and_kids"])
+            # and match it against the channel title, the About bio and the video
+            # titles. None of those is the video. A firearms channel titling
+            # videos "Range Day 47" matches nothing, and video_topics.py closes
+            # only the half of that gap that creator TAGS cover. This closes the
+            # other half: Gemini is handed the video URL and ingests audio and
+            # frames together, so "a gun is being fired" and "someone is
+            # assembling a Lego set" are directly observable here and nowhere
+            # else in this pipeline. A transcript would do the same job and is
+            # not obtainable — see video_topics.py for the measured 200/empty-body
+            # wall on every unauthenticated caption route.
+            #
+            # REQUIRED, i.e. a veto, for the same reason the brand test is: an
+            # exclusion is not two-thirds satisfiable. Note this is only reachable
+            # as a veto because the tier is RESCUE-ONLY: failing it blocks a
+            # rescue, it never drops a candidate the keyword gates already passed.
+            # So the risk this criterion carries is "a legitimate channel loses a
+            # rescue it would have won", never "a prospect is deleted".
+            #
+            # That risk is why every clause below is about the SUBJECT rather than
+            # about presence, with the incidental cases written out explicitly. A
+            # room tour with a Lego set on the shelf, a games console under the
+            # TV, or a rifle on a wall rack is exactly the kind of channel this
+            # niche WANTS, and all three must answer yes. Getting this wrong in
+            # the presence direction would re-create the inversion section 12
+            # found in the AV-specialist vocabulary, where a term meant to
+            # describe the niche was in practice describing the rejects.
+            #
+            # UNMEASURED, and deliberately shipped anyway. It cannot be scored
+            # against the labels the way section 12 scored vocabulary: the
+            # backtest corpus has no cached video verdicts joinable to a channel
+            # (gemini_cache.json keys video verdicts on video_id and no
+            # video_id -> channel_id map is persisted), and firearms fires on zero
+            # of the 211 labelled channels, so there is nothing to measure a catch
+            # against. It ships on the section 12 story_recap precedent —
+            # instruction-backed, zero measured harm — and its blast radius is
+            # bounded by rescue-only. Read the Relevance Detail column for a cycle
+            # before trusting it.
+            {"name": "not an excluded subject",
+             "required": True,
+             # This criterion NAMES excluded vocabulary in order to exclude it,
+             # which is the opposite of praising it. The consistency guard in
+             # tests/test_criteria_consistency.py would otherwise read
+             # "action figure" here as this niche endorsing a term it excludes,
+             # so the intent is declared rather than inferred from the wording.
+             "names_exclusions": True,
+             "test": "Is the SUBJECT of this clip something other than firearms, "
+                     "toys or construction-brick building, ASMR, or party "
+                     "politics? Answer no ONLY when one of those is what the "
+                     "video is actually about: a gun being shown, reviewed, "
+                     "handled or fired; a toy, doll, action figure or Lego-style "
+                     "brick set being played with, unboxed or assembled; "
+                     "whispered or trigger-sound ASMR; or political campaigning "
+                     "or commentary. Incidental presence does NOT count and must "
+                     "still answer yes — a Lego set or action figure on a shelf "
+                     "during a room tour, a games console under a television, a "
+                     "rifle on a wall rack in the background, a child playing in "
+                     "the corner of a family room, or a news broadcast visible on "
+                     "a screen being reviewed. If you cannot tell what the "
+                     "subject is, answer yes and lower your confidence."},
         ],
         "min_avg_views": 10_000,
         "min_channel_age_months": None,

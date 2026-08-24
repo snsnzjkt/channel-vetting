@@ -34,3 +34,4 @@ urllib3==2.7.0
 # ZoneInfoNotFoundError without this package. CI hides the problem because
 # ubuntu-latest has a system tzdb — the failure is local-Windows-only.
 tzdata==2026.3
+youtube-transcript-api

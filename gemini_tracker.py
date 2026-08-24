@@ -355,9 +355,47 @@ def exhaust_day(*, video: bool, model: str = "") -> None:
 
 
 def spend_summary() -> str:
-    """One line for the run summary: today's counts against today's ceilings."""
-    total, video = requests_today()
-    return (
-        f"{total}/{GEMINI_MAX_REQUESTS_PER_DAY} requests today "
-        f"({video}/{GEMINI_MAX_VIDEO_REQUESTS_PER_DAY} video)"
-    )
+    """
+    One line for the run summary: today's counts against today's ceilings,
+    reported PER MODEL because that is how the ceilings are enforced.
+
+    This used to print the day's GLOBAL total against a PER-MODEL cap, and the
+    two are not comparable. Observed 2026-08-24 with three models in the chain:
+    it printed `83/80 requests today (83/40 video)` — reading as a 104% and 208%
+    breach — while every model was inside its own limit at 40/40, 40/40 and 3/40.
+    With N allowlisted models the old line could show N x the cap and still be
+    describing a healthy run, which is exactly backwards for the 2am question
+    the summary exists to answer. See `_model_entry` for why caps are per model.
+
+    A total is still printed, labelled as a SUM with no ratio, because "how many
+    requests did this day cost" is a real question — it just is not a ceiling.
+    """
+    try:
+        entry = _today_entry(load_log())
+    except GeminiLedgerUnavailable as exc:
+        return f"LEDGER UNAVAILABLE ({exc})"
+
+    total = int(entry.get("total", 0))
+    video = int(entry.get(KIND_VIDEO, 0))
+    models = entry.get("models") or {}
+
+    parts = []
+    for model in sorted(models):
+        counts = models[model] or {}
+        m_total = int(counts.get("total", 0))
+        m_video = int(counts.get(KIND_VIDEO, 0))
+        # `exhausted` is Google's own PerDay 429 on this model, which outranks
+        # our ceilings — flag it distinctly from merely reaching our cap.
+        if counts.get("exhausted"):
+            state = " 429-SPENT"
+        elif (m_total >= GEMINI_MAX_REQUESTS_PER_DAY
+              or m_video >= GEMINI_MAX_VIDEO_REQUESTS_PER_DAY):
+            state = " CAPPED"
+        else:
+            state = ""
+        parts.append(f"{model} {m_total}/{GEMINI_MAX_REQUESTS_PER_DAY}"
+                     f" ({m_video}/{GEMINI_MAX_VIDEO_REQUESTS_PER_DAY} video){state}")
+
+    per_model = "; ".join(parts) if parts else "no model recorded yet"
+    return (f"today per model — {per_model} "
+            f"[day sum {total} requests, {video} video]")

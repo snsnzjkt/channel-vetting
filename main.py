@@ -13,6 +13,7 @@ from collections import Counter
 from datetime import datetime, timezone
 
 import config as _config
+import video_topics
 import run_metrics
 import inspect
 import logging
@@ -80,6 +81,9 @@ from config import (
     INFLUENCERS_MAX_EXCLUDE_HANDLES,
     INFLUENCERS_TEST_DISCOVERY_CREDITS,
     USE_PLAYWRIGHT_STEALTH,
+    VIDEO_TOPIC_GATE,
+    VIDEO_TOPIC_MIN_SHARE,
+    VIDEO_TOPIC_CATEGORIES,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -464,6 +468,12 @@ DROP_NON_ENGLISH_DESCRIPTION = "non_english_description"
 OFF_TARGET_MIN_SHARE = 0.10
 
 DROP_OFF_TARGET = "off_target_niche"
+# The tag-based sibling of DROP_EXCLUDED_TOPIC. Distinct because they read
+# DIFFERENT TEXT — that one the channel title and bio, this one the creator's
+# own per-video tags — and collapsing them would hide which input fired, which
+# is the only thing that tells you whether the vocabulary or the surface was
+# wrong. See video_topics.py.
+DROP_OFF_TOPIC_TAGS = "off_topic_tags"
 DROP_NO_HEADROOM = "no_headroom_for_bucket"
 
 # Drop reasons that say nothing about the CHANNEL, only about this run's
@@ -1380,6 +1390,164 @@ def process_candidate(
         niche_config, stats.get("description", ""), performance.get("video_titles"),
     )
 
+    # Activity/quality signals for the gate, all free from data already
+    # fetched. upload_freq (videos/month over the sampled window) is computed
+    # HERE, before the gate, so the cadence check can read it — and it is
+    # reused unchanged for the Overall Score and the "Upload Frequency" column
+    # below, never recomputed.
+    upload_dates = performance.get("upload_dates", [])
+    upload_freq = calc_upload_frequency(upload_dates)
+    # None (not 0) when the window is too thin to estimate a cadence, so an
+    # unmeasurable channel isn't dropped on a made-up zero — see
+    # pre_push_drop_reason's None rule. Shared with audit_prospects.py; the
+    # rationale lives in calc_uploads_per_year's docstring.
+    uploads_per_year = calc_uploads_per_year(upload_dates)
+    days_since = days_since_last_upload(upload_dates)
+
+    # Pre-push gate, placed before scoring and before the email chain so a
+    # discarded candidate costs no browser session and no deep-scan quota.
+    #
+    # MOVED ABOVE THE GEMINI BLOCK 2026-08-24, and this is the whole point of the
+    # move: every input below is FREE and already in hand as of the performance
+    # fetch, while a Gemini request is the scarcest thing this pipeline spends.
+    # Measured over run_metrics.jsonl's two completed 2026-08-24 runs: of the 169
+    # candidates that reached the Gemini block, 108 (64%) were then dropped right
+    # here on this arithmetic — below_view_minimum 79, shorts_only 20,
+    # too_few_videos 7, not_english 2. Each of those had already cost a request
+    # that could not be spent on a candidate whose verdict was still open.
+    # Running this gate first cuts the population that needs a request from 169
+    # to 61, which at the observed 78 requests/day is the difference between 46%
+    # and 100% coverage of the candidates that reach it.
+    #
+    # The long-form floor is NOT part of this and stays below the Gemini block:
+    # establishing its count can cost quota, so it is correctly split out into
+    # longform_drop_reason. It still spent 16 requests across those two runs.
+    # Moving it up too would trade YouTube quota (3,580 of 10,000 used) for
+    # Gemini requests (78 of ~80) — probably right, but a different decision.
+    #
+    # DO NOT move this back below the Gemini block. tests/
+    # test_gate_order_request_budget.py fails loudly if you do.
+    drop_reason = pre_push_drop_reason(
+        stats.get("subscriber_count"),
+        performance.get("avg_views"),
+        performance.get("shorts_only", False),
+        min_avg_views=niche_config["min_avg_views"],
+        video_count=stats.get("video_count"),
+        content_language=performance.get("content_language"),
+        settled_views=performance.get("settled_views"),
+        uploads_per_year=uploads_per_year,
+        days_since_last_upload=days_since,
+    )
+    if drop_reason:
+        logger.info(
+            "Dropping %s before push — %s (%s subs, %s avg views, min %s, %s videos, "
+            "%s uploads/yr, %s days since upload, lang %s).",
+            stats.get("channel_title"), drop_reason,
+            stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
+            performance.get("min_views"), stats.get("video_count"),
+            round(uploads_per_year, 1) if uploads_per_year is not None else "unknown",
+            days_since if days_since is not None else "unknown",
+            performance.get("content_language") or "unset",
+        )
+        return None, drop_reason
+
+    # Placed BELOW pre_push_drop_reason as of 2026-08-25, and for the same reason
+    # the Gemini relevance block is: LAYER 2 below issues a paid Gemini request,
+    # and every input to the free numeric gate above is already in hand. Putting
+    # a paid call ahead of a free gate is precisely the defect R0 fixed for the
+    # relevance tier, and wiring layer 2 in reintroduced it here — the guard test
+    # only compared layer 1 against verifier.judge, so it did not catch a second
+    # paid call appearing in between. It does now.
+    #
+    # TOPIC EVIDENCE FROM CREATOR TAGS — the free half of "what is this video
+    # actually about", and a DIFFERENT input from every other gate here: the
+    # others read what the channel is CALLED or what it NAMES its videos, none
+    # read what a video is about. A firearms channel titling videos "Range Day
+    # 47" and a Lego channel titling one "New Build Complete!" are invisible to
+    # excluded_topic_reason and off_target_reason and legible here.
+    #
+    # Free in every sense: `video_tags` arrived on the videos.list response
+    # already fetched above (a flat 1 unit regardless of parts), so this costs no
+    # quota, no credits, no Gemini request and no network call. It therefore sits
+    # with the other free gates, ahead of the paid Gemini block.
+    #
+    # ADVISORY unless VIDEO_TOPIC_GATE is set. The evidence is always computed
+    # and always recorded; only the DROP is gated. That split is the repo's
+    # standing pattern for a new relevance signal — the Gemini text tier is
+    # advisory for the same reason — and it exists because three separate
+    # relevance criteria in this pipeline have been caught pointing the wrong
+    # way. Measured before shipping: at the default 0.40 share this fires on 0
+    # of 81 Approved and 5 of 130 Rejected channels (measure_video_topics.py).
+    topic_evidence = video_topics.topic_evidence(
+        performance.get("video_tags"),
+        {**EXCLUDED_TOPIC_TERMS, **OFF_TARGET_TERMS},
+    )
+    topic_summary = video_topics.summarise(
+        topic_evidence, performance.get("video_category_ids"))
+    topic_category, topic_share = video_topics.dominant_topic(
+        topic_evidence, VIDEO_TOPIC_MIN_SHARE)
+    # Restricted to the measured allowlist, NOT to whatever fired. phones_and_pcs
+    # is net-harmful at every threshold where it fires and is deliberately absent
+    # from VIDEO_TOPIC_CATEGORIES; a dominant topic outside the allowlist is
+    # recorded and ignored.
+    if topic_category and topic_category not in VIDEO_TOPIC_CATEGORIES:
+        topic_category = None
+    # LAYER 2 — CONTENT CONFIRMATION, and it runs ONLY on a Layer 1 hit.
+    #
+    # This is the whole two-layer shape: metadata for reach, content for
+    # accuracy. Layer 1 above is free and reads the whole sampled catalogue, but
+    # tags are the CREATOR'S OWN CLAIM about their content. Before a row is
+    # removed, that claim is checked against what the video actually contains.
+    #
+    # Cost is why this works. Confirmation runs on ~2% of candidates (5 of 211
+    # labelled channels fire at the shipping threshold), so it is ~1-3 requests
+    # per run rather than one per candidate — the difference between fitting the
+    # 70/run cap and being 4x over it.
+    #
+    # FAIL-OPEN. `confirmed` is True only on an explicit, confident yes; every
+    # other edge (feature off, no verifier, no sampled video, cap reached,
+    # timeout, malformed, low confidence, an explicit no) leaves it False and the
+    # candidate is KEPT. So an outage can never remove a row. That asymmetry is
+    # load-bearing because this is the only path where an AI answer reaches
+    # rejected_handles.json, which excludes the creator server-side for 90 days.
+    topic_confirmation = None
+    if VIDEO_TOPIC_GATE and topic_category and verifier is not None:
+        topic_confirmation = verifier.confirm_topic(
+            video_topics.topic_label(topic_category),
+            topic_evidence["terms"].get(topic_category, []),
+            performance,
+        )
+
+    if VIDEO_TOPIC_GATE and topic_category:
+        tag_detail = (f"{topic_category} at {100 * topic_share:.0f}% of "
+                      f"{topic_evidence['tags_seen']} tags: "
+                      f"{', '.join(topic_evidence['terms'].get(topic_category, []))}")
+        if topic_confirmation is not None and topic_confirmation.confirmed:
+            logger.info(
+                "Dropping %s before push — %s (%s). Content CONFIRMS: %s. Said: %s",
+                stats.get("channel_title"), DROP_OFF_TOPIC_TAGS, tag_detail,
+                topic_confirmation.detail, topic_confirmation.spoken[:200] or "-",
+            )
+            return None, DROP_OFF_TOPIC_TAGS
+        # Tags fired and the content did not back them up. KEPT, and the
+        # disagreement is logged both ways round: a metadata gate that the
+        # content keeps overturning is a gate that needs retuning, and that is
+        # only visible if the near-misses are on the record too.
+        why = (topic_confirmation.detail if topic_confirmation is not None
+               else "no verifier configured")
+        logger.info(
+            "KEEPING %s — tags said %s but content did not confirm (%s). Said: %s",
+            stats.get("channel_title"), tag_detail, why,
+            (topic_confirmation.spoken[:200] if topic_confirmation else "-") or "-",
+        )
+    elif topic_category:
+        logger.info(
+            "TOPIC ADVISORY %s — %s at %.0f%% of %d tags. Not dropped: "
+            "VIDEO_TOPIC_GATE is off.",
+            stats.get("channel_title"), topic_category, 100 * topic_share,
+            topic_evidence["tags_seen"],
+        )
+
     # GEMINI RELEVANCE VERIFICATION — a RESCUE LADDER on the gate above, and
     # nothing else. Read the two branches below carefully, because the whole
     # safety argument for this feature is in their shape:
@@ -1405,10 +1573,18 @@ def process_candidate(
     # functional when Gemini is unavailable" true by construction rather than by
     # careful coding.
     #
-    # Placed HERE and not lower for the same reason off_target_reason is here:
-    # the titles and descriptions it reads arrive free on the response just
-    # fetched, and it is still ahead of the long-form paging and the 0.2-credit
-    # email lookup. A rescue therefore costs nothing a normal candidate does not.
+    # Placed HERE for the same reason off_target_reason is: the titles and
+    # descriptions it reads arrive free on the response just fetched, and it is
+    # still ahead of the long-form paging and the 0.2-credit email lookup. A
+    # rescue therefore costs nothing a normal candidate does not.
+    #
+    # It now sits BELOW pre_push_drop_reason rather than above it (2026-08-24).
+    # That gate is free and was discarding 73% of the candidates this block had
+    # just paid a request for — see the comment on it above. The only candidates
+    # reaching this point are ones whose verdict is genuinely still open, which
+    # is what the request budget should be spent on. Nothing about the rescue
+    # semantics changed: a candidate the free gates drop was already dropped
+    # before this move, it just used to cost a request on the way out.
     judgement = None
     if verifier is not None:
         judgement = verifier.judge(
@@ -1429,46 +1605,6 @@ def process_candidate(
             f" Gemini: {judgement.detail}." if judgement is not None else "",
         )
         return None, off_target
-
-    # Activity/quality signals for the gate, all free from data already
-    # fetched. upload_freq (videos/month over the sampled window) is computed
-    # HERE, before the gate, so the cadence check can read it — and it is
-    # reused unchanged for the Overall Score and the "Upload Frequency" column
-    # below, never recomputed.
-    upload_dates = performance.get("upload_dates", [])
-    upload_freq = calc_upload_frequency(upload_dates)
-    # None (not 0) when the window is too thin to estimate a cadence, so an
-    # unmeasurable channel isn't dropped on a made-up zero — see
-    # pre_push_drop_reason's None rule. Shared with audit_prospects.py; the
-    # rationale lives in calc_uploads_per_year's docstring.
-    uploads_per_year = calc_uploads_per_year(upload_dates)
-    days_since = days_since_last_upload(upload_dates)
-
-    # Pre-push gate, placed before scoring and before the email chain so a
-    # discarded candidate costs no browser session and no deep-scan quota.
-    drop_reason = pre_push_drop_reason(
-        stats.get("subscriber_count"),
-        performance.get("avg_views"),
-        performance.get("shorts_only", False),
-        min_avg_views=niche_config["min_avg_views"],
-        video_count=stats.get("video_count"),
-        content_language=performance.get("content_language"),
-        settled_views=performance.get("settled_views"),
-        uploads_per_year=uploads_per_year,
-        days_since_last_upload=days_since,
-    )
-    if drop_reason:
-        logger.info(
-            "Dropping %s before push — %s (%s subs, %s avg views, min %s, %s videos, "
-            "%s uploads/yr, %s days since upload, lang %s).",
-            stats.get("channel_title"), drop_reason,
-            stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
-            performance.get("min_views"), stats.get("video_count"),
-            round(uploads_per_year, 1) if uploads_per_year is not None else "unknown",
-            days_since if days_since is not None else "unknown",
-            performance.get("content_language") or "unset",
-        )
-        return None, drop_reason
 
     # (The search-zone gate used to sit here, after the performance fetch,
     # because its language-region-subtag fallback needed content_language.
@@ -2432,7 +2568,16 @@ def run(
     # YouTube search.list keyword loop — so the pipeline still runs without it.
     discovery = InfluencerDiscovery.from_config(max_credits=max_discovery_credits)
     if discovery.enabled:
-        logger.info("Discovery source: influencers.club creator search (replacing search.list).")
+        # NOT "replacing search.list" any more. That wording predates the
+        # per-niche `discovery_source` key: a niche set to "search_list" ignores
+        # this source entirely and one set to "both" uses each in turn, so the
+        # old line claimed a global override that stopped being true. The banner
+        # says what is AVAILABLE; run_niche logs what each niche actually uses.
+        logger.info(
+            "Discovery source: influencers.club creator search is available. "
+            "Each niche picks via its discovery_source key (influencers | "
+            "search_list | both) — see the per-niche line below."
+        )
     else:
         logger.info("influencers.club discovery unavailable — discovery falls back to YouTube search.list.")
 

@@ -116,6 +116,38 @@ def isolate_rejected_handles(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_gemini_ledger(tmp_path, monkeypatch):
+    """
+    Point the GEMINI ledger at a per-test temp file and lift its day ceilings.
+
+    Fourth instance of the hazard, after the credit ledger, the reject cache and
+    the run-metrics log — and the one the earlier audit of this file explicitly
+    flagged and left: "the gemini tests DO patch their own path so
+    gemini_log.json has no active bug, but the same gap exists". It stopped being
+    latent the moment a SECOND gemini test module appeared, because the isolation
+    lived in test_gemini_verify.py as a module-local autouse fixture and pytest
+    does not share those across modules. The new module read the repo's real
+    ledger, found today's video cap already spent by a live run, and five tests
+    failed on `day_cap_reached` while asserting nothing about caps.
+
+    Patched on the MODULE, not on `config`: gemini_tracker does
+    `from config import ...`, so the values are copied into its globals at import
+    and patching config afterwards has no effect. Same trap as the credit ledger
+    above.
+
+    Ceilings are lifted rather than merely redirected because most tests here are
+    about verdict logic, not budget; the tests that ARE about budget patch the
+    ceiling down themselves.
+    """
+    import gemini_tracker
+
+    monkeypatch.setattr(gemini_tracker, "GEMINI_LOG_FILE",
+                        str(tmp_path / "gemini_log.json"))
+    monkeypatch.setattr(gemini_tracker, "GEMINI_MAX_REQUESTS_PER_DAY", 10_000)
+    monkeypatch.setattr(gemini_tracker, "GEMINI_MAX_VIDEO_REQUESTS_PER_DAY", 10_000)
+
+
+@pytest.fixture(autouse=True)
 def isolate_run_metrics(tmp_path, monkeypatch):
     """
     Point the per-run metrics log at a per-test temp file.

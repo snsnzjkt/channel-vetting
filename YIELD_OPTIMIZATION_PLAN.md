@@ -2608,3 +2608,91 @@ Two tests pin the constraint rather than trusting the audit:
   banner says `FALLBACK ONLY` and never `every candidate` in transcript mode.
 
 Suite: **1396 passing**.
+
+---
+
+## 14.24 Home Theater keywords: 9 -> 18, mined from the 37 approved rows
+
+§13 listed "new keywords for both niches" as free and untried, and §14.21 showed
+Home Theater is geography-bound rather than cap-bound — so the cap raise does
+little for it and more search is the remaining free lever.
+
+The additions are **mined from what the reviewer approved**, the same method §12
+used on vocabulary, applied to queries.
+
+### Measured record of the original nine
+
+```
+  100%  5/5  home theater products review   <-- best by a wide margin
+   50%  2/4  home theater tech setup
+   44%  4/9  sports podcast commentary
+   33%  2/6  man cave tour
+   25%  1/4  homesteading vlog
+    0%  0/2  car and truck review
+    0%  0/2  movie review and reaction
+    0%  0/1  entertainment room makeover
+```
+
+### What the 37 approved channels actually are
+
+| cluster | channels |
+|---|---|
+| **Consumer tech reviewers** (biggest by far) | Tom's Guide, Bane Tech, Tech Steve, Brains techKnowlogy, Technology Space HQ, Tech It Before You Wreck It, Switch and Click, Paul Antill, DanKamYouKnow, Sander Recommends, HelloVSTV |
+| **Sports commentary** | JTL SPORTS, MAH, Cowboys Report by Chat Sports, The Joel Klatt Show |
+| **Makers and trades** | DaBuild, American Electrician, The Real Sam Prentice, Wyrmwood Vlogs, Owen Cook |
+| **Family / home life** | Your Way Living, Florida Fam Five, Magic Touch |
+
+**The distinction that falls out refines §12: CONSUMER tech is approved,
+SPECIALIST hi-fi is rejected.** `home theater products review` runs 5/5 while the
+`av_specialist` exclusion catches Zero Fidelity, New Record Day and Lenny
+Florentine. So the nine additions lean into consumer-product vocabulary — tv,
+soundbar, projector, streaming device — and stay clear of audiophile vocabulary,
+which is measured to attract the channels this reviewer turns down.
+
+Added: `smart tv review`, `soundbar review`, `projector review home`,
+`streaming device review`, `college football podcast`,
+`diy woodworking shop build`, `home electrical diy`, `basement finishing project`,
+`family home life vlog`.
+
+**Kept despite 0/2:** `car and truck review` and `movie review and reaction`. Two
+labelled rows is not evidence, and §12 already declined to cut the second because
+removing it costs real volume. Re-measure at 5+ verdicts each.
+
+**Cost:** 100 quota units per keyword searched, and the loop stops once the row
+budget fills — so 18 keywords is an 1,800-unit *ceiling*, not a bill. Daily
+allowance is 10,000; 2026-08-24 used 4,417.
+
+### The conflict this surfaced, which matters more than the keywords
+
+Checking the new keywords against the pipeline's own exclusion vocabulary found
+**`sports_commentary` in `VIDEO_TOPIC_CATEGORIES`** — the topic gate's drop
+allowlist — while the niche carries two keywords aimed squarely at that cluster:
+
+```
+  'sports podcast commentary'  4/9 APPROVED (44%), second-best in the niche
+  'college football podcast'   NEW, same cluster
+  approved sports channels     JTL SPORTS, MAH, Cowboys Report, The Joel Klatt Show
+```
+
+**The pipeline would have paid 100 quota units per search to find sports channels,
+then listed their category as a reason to drop them.** §14.11 scored
+`sports_commentary` at +1 (1 rejected caught, 0 approved lost), which is why it
+was there — that number stands, but it predates aiming more search at the cluster,
+and 44% of that cluster is approved. A +1 catch is not worth standing between the
+reviewer and something he buys.
+
+**Removed from the allowlist.** The gate is off by default, so this is pre-emptive
+consistency rather than a behaviour change.
+
+`tests/test_keyword_gate_consistency.py` guards the general case: no niche may
+carry a discovery keyword targeting a category the topic gate is allowed to drop.
+Same class of defect as the `text_criteria`/`av_specialist` contradiction, but
+worse — that one wasted a verdict, this one wastes quota to find rows it discards.
+
+Also noted, not changed: `car and truck review` matches the `automotive`
+exclusion and `movie review and reaction` matches `movie_review_farm`. Both are
+0/2 and both are deliberate per §12 — the query is broader than the excluded
+content type. Worth re-measuring, not worth cutting on two rows.
+
+Suite: 1399 -> **1403 passing**, green locally and with the CI environment
+reproduced.

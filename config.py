@@ -737,10 +737,28 @@ VIDEO_TOPIC_MIN_SHARE = float(os.getenv("VIDEO_TOPIC_MIN_SHARE", 0.40))
 
 # Only these topics may drop a candidate, and each one earned its place in the
 # table above. An empty value disables the gate as surely as the flag does.
+# sports_commentary REMOVED 2026-08-25. A pipeline must not deliberately SEARCH
+# for a category and also list it as a reason to drop one.
+#
+# Home Theater carries two discovery keywords aimed squarely at that cluster —
+# "sports podcast commentary" and "college football podcast" — and the first runs
+# 4 of 9 APPROVED (44%), the second-best record of any keyword in the niche. The
+# reviewer's approved list includes JTL SPORTS, MAH, Cowboys Report by Chat
+# Sports and The Joel Klatt Show.
+#
+# The 14.11 measurement scored it +1 (1 rejected caught, 0 approved lost), which
+# is why it was in the list. That number stands, but it was taken before the
+# keyword expansion aimed MORE search at the cluster — so the population it would
+# act on is about to grow, and 44% of that population is approved. A +1 catch is
+# not worth standing between the reviewer and a cluster he buys.
+#
+# The gate is off by default, so this is pre-emptive consistency rather than a
+# behaviour change. tests/test_keyword_gate_consistency.py fails if a niche's own
+# discovery keywords ever target a category in this list again.
 VIDEO_TOPIC_CATEGORIES = tuple(
     t.strip() for t in os.getenv(
         "VIDEO_TOPIC_CATEGORIES",
-        "gaming,sports_commentary,av_specialist,toys_and_kids,firearms,asmr,political",
+        "gaming,av_specialist,toys_and_kids,firearms,asmr,political",
     ).split(",") if t.strip()
 )
 

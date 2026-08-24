@@ -132,21 +132,67 @@ def test_a_candidate_that_clears_every_free_gate_still_reaches_the_verifier(monk
     assert v.calls == [False], "an unflagged surviving candidate is judged exactly once"
 
 
-def test_the_free_gate_runs_before_the_paid_one_in_source_order():
+def test_every_free_gate_runs_before_every_paid_call_in_source_order():
     """
-    Belt and braces on the ordering itself, because the tests above would also
-    pass if `judge` were simply never called. Reads the source so a future
-    reorder fails here with a message that says what happened, rather than
-    silently restoring a 73% request leak.
+    Belt and braces on the ordering, and it is deliberately written as ALL free
+    gates before ALL paid calls rather than as one named pair.
+
+    The narrow version of this test compared `pre_push_drop_reason` against
+    `verifier.judge` only. When the topic gate gained a second paid call
+    (`verifier.confirm_topic`) that landed BETWEEN them, the test still passed
+    while a paid Gemini request had moved ahead of a free numeric gate — the
+    exact defect R0 existed to fix. A guard naming one paid call cannot see a new
+    one appear, so this names the free gates and requires every paid call to
+    follow all of them.
+
+    Add a paid call to process_candidate and it must be added here too. That is
+    the point: the list is a decision record, not a convenience.
     """
     import inspect
 
     src = inspect.getsource(main.process_candidate)
-    free_gate = src.index("pre_push_drop_reason(")
-    paid_call = src.index("verifier.judge(")
-    assert free_gate < paid_call, (
-        "pre_push_drop_reason must run ABOVE verifier.judge — see the comment on "
-        "the pre-push gate. Moving it back below spends a Gemini request on every "
-        "candidate the free numeric gates were about to discard (64% of them on "
-        "2026-08-24)."
+
+    free_gates = {
+        "off_target_reason(": "keyword relevance, reads titles already fetched",
+        "pre_push_drop_reason(": "views/shorts/cadence, all free from stats",
+        "video_topics.topic_evidence(": "creator tags, already on the response",
+    }
+    paid_calls = {
+        "verifier.confirm_topic(": "one Gemini request, topic confirmation",
+        "verifier.judge(": "one Gemini request, relevance tier",
+        "resolve_email_with_source(": "0.20 vendor credits",
+    }
+
+    for gate in free_gates:
+        assert gate in src, f"free gate {gate} vanished from process_candidate"
+    for call in paid_calls:
+        assert call in src, f"paid call {call} vanished from process_candidate"
+
+    last_free = max(src.index(g) for g in free_gates)
+    first_paid = min(src.index(c) for c in paid_calls)
+    latest_free = next(g for g in free_gates if src.index(g) == last_free)
+    earliest_paid = next(c for c in paid_calls if src.index(c) == first_paid)
+
+    assert last_free < first_paid, (
+        f"{earliest_paid} (paid: {paid_calls[earliest_paid]}) runs BEFORE "
+        f"{latest_free} (free: {free_gates[latest_free]}). Every free gate must "
+        f"precede every paid call — a candidate the free gates discard must not "
+        f"cost a request on the way out. See the comment on the pre-push gate."
+    )
+
+
+def test_the_topic_confirmation_call_is_the_first_paid_call_after_the_free_gates():
+    """
+    Ordering AMONG the paid calls also matters, in one specific way: topic
+    confirmation can drop a candidate outright, so running it before the
+    relevance tier saves that tier's request on the ~2% it removes. The reverse
+    order would spend both.
+    """
+    import inspect
+
+    src = inspect.getsource(main.process_candidate)
+    assert src.index("verifier.confirm_topic(") < src.index("verifier.judge("), (
+        "topic confirmation can drop a candidate, so it must run before the "
+        "relevance tier — otherwise both requests are spent on a row that is "
+        "about to be removed"
     )

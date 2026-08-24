@@ -1390,6 +1390,75 @@ def process_candidate(
         niche_config, stats.get("description", ""), performance.get("video_titles"),
     )
 
+    # Activity/quality signals for the gate, all free from data already
+    # fetched. upload_freq (videos/month over the sampled window) is computed
+    # HERE, before the gate, so the cadence check can read it — and it is
+    # reused unchanged for the Overall Score and the "Upload Frequency" column
+    # below, never recomputed.
+    upload_dates = performance.get("upload_dates", [])
+    upload_freq = calc_upload_frequency(upload_dates)
+    # None (not 0) when the window is too thin to estimate a cadence, so an
+    # unmeasurable channel isn't dropped on a made-up zero — see
+    # pre_push_drop_reason's None rule. Shared with audit_prospects.py; the
+    # rationale lives in calc_uploads_per_year's docstring.
+    uploads_per_year = calc_uploads_per_year(upload_dates)
+    days_since = days_since_last_upload(upload_dates)
+
+    # Pre-push gate, placed before scoring and before the email chain so a
+    # discarded candidate costs no browser session and no deep-scan quota.
+    #
+    # MOVED ABOVE THE GEMINI BLOCK 2026-08-24, and this is the whole point of the
+    # move: every input below is FREE and already in hand as of the performance
+    # fetch, while a Gemini request is the scarcest thing this pipeline spends.
+    # Measured over run_metrics.jsonl's two completed 2026-08-24 runs: of the 169
+    # candidates that reached the Gemini block, 108 (64%) were then dropped right
+    # here on this arithmetic — below_view_minimum 79, shorts_only 20,
+    # too_few_videos 7, not_english 2. Each of those had already cost a request
+    # that could not be spent on a candidate whose verdict was still open.
+    # Running this gate first cuts the population that needs a request from 169
+    # to 61, which at the observed 78 requests/day is the difference between 46%
+    # and 100% coverage of the candidates that reach it.
+    #
+    # The long-form floor is NOT part of this and stays below the Gemini block:
+    # establishing its count can cost quota, so it is correctly split out into
+    # longform_drop_reason. It still spent 16 requests across those two runs.
+    # Moving it up too would trade YouTube quota (3,580 of 10,000 used) for
+    # Gemini requests (78 of ~80) — probably right, but a different decision.
+    #
+    # DO NOT move this back below the Gemini block. tests/
+    # test_gate_order_request_budget.py fails loudly if you do.
+    drop_reason = pre_push_drop_reason(
+        stats.get("subscriber_count"),
+        performance.get("avg_views"),
+        performance.get("shorts_only", False),
+        min_avg_views=niche_config["min_avg_views"],
+        video_count=stats.get("video_count"),
+        content_language=performance.get("content_language"),
+        settled_views=performance.get("settled_views"),
+        uploads_per_year=uploads_per_year,
+        days_since_last_upload=days_since,
+    )
+    if drop_reason:
+        logger.info(
+            "Dropping %s before push — %s (%s subs, %s avg views, min %s, %s videos, "
+            "%s uploads/yr, %s days since upload, lang %s).",
+            stats.get("channel_title"), drop_reason,
+            stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
+            performance.get("min_views"), stats.get("video_count"),
+            round(uploads_per_year, 1) if uploads_per_year is not None else "unknown",
+            days_since if days_since is not None else "unknown",
+            performance.get("content_language") or "unset",
+        )
+        return None, drop_reason
+
+    # Placed BELOW pre_push_drop_reason as of 2026-08-25, and for the same reason
+    # the Gemini relevance block is: LAYER 2 below issues a paid Gemini request,
+    # and every input to the free numeric gate above is already in hand. Putting
+    # a paid call ahead of a free gate is precisely the defect R0 fixed for the
+    # relevance tier, and wiring layer 2 in reintroduced it here — the guard test
+    # only compared layer 1 against verifier.judge, so it did not catch a second
+    # paid call appearing in between. It does now.
+    #
     # TOPIC EVIDENCE FROM CREATOR TAGS — the free half of "what is this video
     # actually about", and a DIFFERENT input from every other gate here: the
     # others read what the channel is CALLED or what it NAMES its videos, none
@@ -1478,67 +1547,6 @@ def process_candidate(
             stats.get("channel_title"), topic_category, 100 * topic_share,
             topic_evidence["tags_seen"],
         )
-
-    # Activity/quality signals for the gate, all free from data already
-    # fetched. upload_freq (videos/month over the sampled window) is computed
-    # HERE, before the gate, so the cadence check can read it — and it is
-    # reused unchanged for the Overall Score and the "Upload Frequency" column
-    # below, never recomputed.
-    upload_dates = performance.get("upload_dates", [])
-    upload_freq = calc_upload_frequency(upload_dates)
-    # None (not 0) when the window is too thin to estimate a cadence, so an
-    # unmeasurable channel isn't dropped on a made-up zero — see
-    # pre_push_drop_reason's None rule. Shared with audit_prospects.py; the
-    # rationale lives in calc_uploads_per_year's docstring.
-    uploads_per_year = calc_uploads_per_year(upload_dates)
-    days_since = days_since_last_upload(upload_dates)
-
-    # Pre-push gate, placed before scoring and before the email chain so a
-    # discarded candidate costs no browser session and no deep-scan quota.
-    #
-    # MOVED ABOVE THE GEMINI BLOCK 2026-08-24, and this is the whole point of the
-    # move: every input below is FREE and already in hand as of the performance
-    # fetch, while a Gemini request is the scarcest thing this pipeline spends.
-    # Measured over run_metrics.jsonl's two completed 2026-08-24 runs: of the 169
-    # candidates that reached the Gemini block, 108 (64%) were then dropped right
-    # here on this arithmetic — below_view_minimum 79, shorts_only 20,
-    # too_few_videos 7, not_english 2. Each of those had already cost a request
-    # that could not be spent on a candidate whose verdict was still open.
-    # Running this gate first cuts the population that needs a request from 169
-    # to 61, which at the observed 78 requests/day is the difference between 46%
-    # and 100% coverage of the candidates that reach it.
-    #
-    # The long-form floor is NOT part of this and stays below the Gemini block:
-    # establishing its count can cost quota, so it is correctly split out into
-    # longform_drop_reason. It still spent 16 requests across those two runs.
-    # Moving it up too would trade YouTube quota (3,580 of 10,000 used) for
-    # Gemini requests (78 of ~80) — probably right, but a different decision.
-    #
-    # DO NOT move this back below the Gemini block. tests/
-    # test_gate_order_request_budget.py fails loudly if you do.
-    drop_reason = pre_push_drop_reason(
-        stats.get("subscriber_count"),
-        performance.get("avg_views"),
-        performance.get("shorts_only", False),
-        min_avg_views=niche_config["min_avg_views"],
-        video_count=stats.get("video_count"),
-        content_language=performance.get("content_language"),
-        settled_views=performance.get("settled_views"),
-        uploads_per_year=uploads_per_year,
-        days_since_last_upload=days_since,
-    )
-    if drop_reason:
-        logger.info(
-            "Dropping %s before push — %s (%s subs, %s avg views, min %s, %s videos, "
-            "%s uploads/yr, %s days since upload, lang %s).",
-            stats.get("channel_title"), drop_reason,
-            stats.get("subscriber_count"), round(performance.get("avg_views") or 0, 1),
-            performance.get("min_views"), stats.get("video_count"),
-            round(uploads_per_year, 1) if uploads_per_year is not None else "unknown",
-            days_since if days_since is not None else "unknown",
-            performance.get("content_language") or "unset",
-        )
-        return None, drop_reason
 
     # GEMINI RELEVANCE VERIFICATION — a RESCUE LADDER on the gate above, and
     # nothing else. Read the two branches below carefully, because the whole

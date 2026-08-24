@@ -56,22 +56,90 @@ MIN_LABELLED_FOR_RATE = 3
 # zero would bury every candidate whose keyword is simply new.
 NEUTRAL_PRIOR = 0.5
 
-_SOURCE_KEYWORDS = re.compile(r"\(([^)]*)\)\s*$")
+# A vendor label carries its niche in a NESTED group:
+#   "influencers.club discovery (Lifestyle Sofa)"
+# The niche is already implied by which table the row is in, so it is stripped to
+# keep one stable bucket per source rather than one per (source, niche) pair.
+_NESTED_QUALIFIER = re.compile(r"^(.*?)\s*\([^()]*\)\s*$")
+
+
+def _last_balanced_group(text: str) -> str:
+    r"""
+    The contents of the last BALANCED parenthesised group, or "".
+
+    Scanned rather than matched with a regex because the three real shapes need
+    three different answers and no single pattern gets all of them:
+
+        "LABEL (a, b)"                      -> "a, b"
+        "LABEL (vendor (Niche))"            -> "vendor (Niche)"   nested
+        "LABEL (US) (man cave tour)"        -> "man cave tour"    siblings
+
+    A tail pattern of `\(([^)]*)\)$` gets the first and third and returns nothing
+    at all for the second. A greedy `\((.*)\)$` gets the first two and mangles
+    the third. Walking back from the final ")" and counting depth gets all three,
+    and is the same amount of code.
+    """
+    body = (text or "").rstrip()
+    if not body.endswith(")"):
+        return ""
+    depth = 0
+    for i in range(len(body) - 1, -1, -1):
+        char = body[i]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                return body[i + 1:-1]
+    return ""  # unbalanced — treat as no provenance rather than guessing
 
 
 def source_keywords(source: str) -> list:
-    """
-    The finding keywords recorded in a row's `Source` field.
+    r"""
+    The finding keyword(s) recorded in a row's `Source` field.
 
-    `main.push_record` writes `"{SOURCE_LABEL} (kw1, kw2)"`, so the keywords are
+    `main.push_record` writes `"{SOURCE_LABEL} (kw1, kw2)"`, so the provenance is
     the parenthesised tail. Parsed rather than stored separately because that
-    field is what exists on the ~280 rows already in the tables, and a signal
+    field is what already exists on the ~280 rows in the tables, and a signal
     that needs a migration before it can be measured does not get measured.
+
+    ## The nested-parenthesis bug this function had
+
+    The vendor discovery path does not write a bare constant. `main.run_niche`
+    passes `source_label=f"influencers.club discovery ({niche_name})"`, so those
+    rows read:
+
+        YouTube Discovery Pipeline (influencers.club discovery (Home Theater))
+
+    The original pattern was `\(([^)]*)\)\s*$` — a tail group containing no ")".
+    Against a string ending in "))" that cannot match at all, so it returned
+    NOTHING for **64 Home Theater and 112 Lifestyle rows**: the entire paid
+    discovery path, silently, in both niches. That is what produced "0 of 31
+    pending rows are rankable" for Lifestyle, and it was read as "the pipeline
+    records no keyword for the vendor path". The pipeline records it fine. This
+    function threw it away.
+
+    Worth stating plainly, because the wrong conclusion nearly became a change to
+    `main.py`: the data was already there, and the fix belonged in the reader, not
+    in the writer.
+
+    The nested niche qualifier is stripped, so the vendor path is ONE bucket
+    rather than one per niche — the niche is already implied by the table the row
+    came from, and splitting it would halve every cell count for no gain.
     """
-    match = _SOURCE_KEYWORDS.search(source or "")
-    if not match:
+    group = _last_balanced_group(source)
+    if not group:
         return []
-    return [k.strip() for k in match.group(1).split(",") if k.strip()]
+    out = []
+    for part in group.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        nested = _NESTED_QUALIFIER.match(item)
+        if nested and nested.group(1).strip():
+            item = nested.group(1).strip()
+        out.append(item)
+    return out
 
 
 def approval_rates(labelled_rows) -> dict:

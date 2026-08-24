@@ -2026,3 +2026,94 @@ otherwise. This is CEO-2 from §14.6 landing in practice.
 ### Cost
 Zero. No Gemini request, no vendor credit, no YouTube quota — it reads Airtable
 and does arithmetic. Vendor credits 13.04 before and after.
+
+---
+
+## 14.18 The "Source fix" was not needed. The reader was broken, not the writer.
+
+Asked for the one-line `main.py` change I proposed in §14.17, to give the paid
+vendor path a real keyword instead of a constant.
+
+**I checked the live data first, and my premise was wrong.** The vendor path never
+wrote a bare constant. `main.run_niche` already passes
+`source_label=f"influencers.club discovery ({niche_name})"`, so those rows read:
+
+```
+  YouTube Discovery Pipeline (influencers.club discovery (Home Theater))
+```
+
+The provenance was there all along. `ranking.source_keywords` was throwing it
+away: the pattern `\(([^)]*)\)\s*$` needs a tail group containing no `)`, and
+against a string ending `))` it matches **nothing**. It returned `[]` for **64
+Home Theater and 112 Lifestyle rows** — the entire paid discovery path, silently,
+in both niches. That is what produced "0 of 31 pending rows are rankable", which I
+then read as evidence about the pipeline.
+
+**So no change to `main.py`. Three lines in the reader.** Parsing the last
+*balanced* group handles all three real shapes, where no single regex does:
+
+| `Source` | correct answer |
+|---|---|
+| `LABEL (a, b)` | `a`, `b` |
+| `LABEL (vendor (Niche))` | `vendor` — nested, niche stripped |
+| `LABEL (US) (man cave tour)` | `man cave tour` — siblings |
+
+### The payoff: the paid path now has a measured approval rate
+
+| source | Home Theater | Lifestyle Sofa |
+|---|---|---|
+| **influencers.club discovery (paid)** | **33%** (21/63) | **51%** (41/81) |
+| `home theater products review` | 100% (5/5) | — |
+| `home theater tech setup` | 50% (2/4) | — |
+| `sports podcast commentary` | 44% (4/9) | — |
+| `man cave tour` | 33% (2/6) | — |
+| `homesteading vlog` | 25% (1/4) | — |
+| `house tour apartment tour` | — | 33% (2/6) |
+| `seasonal home decor` | — | 33% (1/3) |
+| `country living home` | — | 11% (1/9) |
+| `home cleaning and organizing` | — | 0% (0/3) |
+| `home decor tour` | — | 0% (0/4) |
+
+This answers a question the plan has carried unanswered since §1 — **is paid
+discovery worth the credits?** — and the answer differs sharply by niche:
+
+- **Lifestyle: yes, emphatically.** At 51% the paid path beats **every one of its
+  eleven free keywords**, the best of which manages 33%. The credits are buying
+  the best-converting source this niche has.
+- **Home Theater: no.** At 33% it is beaten by `home theater products review`
+  (100%, 5/5) and `home theater tech setup` (50%). This is independent
+  confirmation that the §10 switch of Home Theater to `discovery_source:
+  "search_list"` was right — and it was made on *supply* grounds, before any
+  approval-rate evidence existed.
+
+Rows rankable went from **0 of 31 to 31 of 31** for Lifestyle and 16 to 16 of 34
+for Home Theater (the vendor bucket added a rate, not new rows).
+
+### A second honesty check, because the first one was not enough
+
+"31 of 31 rankable" is true and misleading: all 31 share one bucket, so the
+*order* is arrival order with a number attached. `rank_pending.py` now reports
+**bucket count and spread** alongside the count, and says so out loud:
+
+```
+  Home Theater    16 of 34 scored; 8 distinct source bucket(s); spread 0.25
+  Lifestyle Sofa  31 of 31 scored; 1 distinct source bucket(s); spread 0.00
+    -> the ORDER here is uninformative ... the per-source RATE above is the
+       useful output, not the sequence.
+```
+
+For Lifestyle the valuable output is the **51% rate**, not the sequence. Those are
+different things and the tool now distinguishes them.
+
+### Cost
+
+**Zero, as asked.** No pipeline change, so no new requests of any kind. Vendor
+credits `13.04 → 13.04`, YouTube quota `0` today, Gemini requests `0`. The whole
+change is a parser and two report lines; the data was already paid for.
+
+| item | detail |
+|---|---|
+| `ranking.py` | `_last_balanced_group` + nested-qualifier stripping |
+| `rank_pending.py` | bucket-count and spread reporting |
+| tests | +3 regression tests, `test_ranking.py` now 20 |
+| suite | 1373 -> **1376 passing**, zero regressions |

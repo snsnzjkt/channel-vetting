@@ -28,8 +28,46 @@ def test_a_source_with_no_keyword_yields_none():
 
 
 def test_only_the_trailing_parenthesis_group_is_read():
-    """A channel name containing parentheses must not be mistaken for keywords."""
+    """Sibling groups: the LAST balanced one is the provenance."""
     assert ranking.source_keywords("Search (US) (man cave tour)") == ["man cave tour"]
+
+
+def test_the_NESTED_vendor_label_is_read_and_its_niche_stripped():
+    """
+    REGRESSION, and it silently disabled this signal for 176 rows.
+
+    main.run_niche passes source_label=f"influencers.club discovery ({niche})",
+    so the paid path's rows end in "))". The original tail pattern here required
+    a group containing no ")", so it matched nothing at all and returned [] for
+    the ENTIRE paid discovery path — 64 Home Theater rows and 112 Lifestyle rows.
+    That is what produced "0 of 31 pending rows are rankable" and was misread as
+    the pipeline not recording a keyword. It records it; this function dropped it.
+
+    The niche qualifier is stripped so the vendor path is ONE bucket: the niche is
+    already implied by the table, and splitting would halve every cell count.
+    """
+    for niche in ("Home Theater", "Lifestyle Sofa"):
+        src = f"YouTube Discovery Pipeline (influencers.club discovery ({niche}))"
+        assert ranking.source_keywords(src) == ["influencers.club discovery"], src
+
+
+def test_an_unbalanced_source_is_no_provenance_rather_than_a_guess():
+    assert ranking.source_keywords("YouTube Discovery Pipeline (oops") == []
+
+
+def test_the_vendor_path_gets_a_rate_like_any_other_source():
+    """
+    The point of the fix: the paid path becomes measurable. Measured live after
+    it, Home Theater 33% (21/63) and Lifestyle 51% (41/81) — and for Lifestyle
+    that beat every one of its free keywords.
+    """
+    rows = ([{"source": "P (influencers.club discovery (Lifestyle Sofa))",
+              "label": "Approved"}] * 5
+            + [{"source": "P (influencers.club discovery (Lifestyle Sofa))",
+                "label": "Rejected"}] * 5)
+    rates = ranking.approval_rates(rows)
+    assert rates["influencers.club discovery"]["rate"] == 0.5
+    assert "Lifestyle Sofa" not in rates, "the niche must not become its own bucket"
 
 
 # --- learning rates ---

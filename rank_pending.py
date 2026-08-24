@@ -91,15 +91,30 @@ def main(argv=None) -> int:
             print(f"  {i:3d}  {r['priority']:8.2f}  {r['name'][:32]:32s} "
                   f"{r['priority_reason']}")
 
-        # The distribution matters more than the order: if every pending row
-        # scores the neutral prior, this tool is telling the reviewer nothing and
-        # should say so rather than implying an informative ranking.
-        informative = [r for r in ordered if r["priority"] != ranking.NEUTRAL_PRIOR]
-        print(f"\n  {len(informative)} of {len(ordered)} rows have a keyword with "
-              f"enough history to rank on.")
-        if not informative:
-            print("  -> this ordering carries NO information for this niche. "
-                  "Every pending row fell back to the neutral prior.")
+        # Two DIFFERENT questions, and reporting only the first was misleading.
+        #
+        #   1. How many rows could be scored at all?
+        #   2. Is there any SPREAD between the scores?
+        #
+        # A niche whose every pending row came from one source scores 31 of 31
+        # "rankable" and is still a flat list in arrival order. That reads as an
+        # informative ranking and is not one. The rate itself may still be the
+        # useful output — knowing the vendor path converts at 51% is worth having
+        # even when it orders nothing — so say which of the two you got.
+        scored = [r for r in ordered if r["priority"] != ranking.NEUTRAL_PRIOR]
+        spread = (max(r["priority"] for r in ordered)
+                  - min(r["priority"] for r in ordered)) if ordered else 0.0
+        buckets = len({r["priority_reason"] for r in ordered})
+        print(f"\n  {len(scored)} of {len(ordered)} rows scored on real history; "
+              f"{buckets} distinct source bucket(s); spread {spread:.2f}")
+        if not scored:
+            print("  -> NO information: every pending row fell back to the "
+                  "neutral prior.")
+        elif spread < 0.05:
+            print("  -> the ORDER here is uninformative: every row scores about "
+                  "the same, so this is arrival order with a number attached. "
+                  "The per-source RATE above is the useful output, not the "
+                  "sequence.")
     return 0
 
 

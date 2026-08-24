@@ -25,15 +25,79 @@ logger = logging.getLogger(__name__)
 # in or results drift off-niche.
 NICHES = {
     "Home Theater": {
+        # EXPANDED 2026-08-25. The additions are MINED FROM THE 37 APPROVED ROWS,
+        # not invented — the same method section 12 used on vocabulary, applied
+        # to queries. Measured record of the original nine:
+        #
+        #   100%  5/5  home theater products review   <-- best by a wide margin
+        #    50%  2/4  home theater tech setup
+        #    44%  4/9  sports podcast commentary
+        #    33%  2/6  man cave tour
+        #    25%  1/4  homesteading vlog
+        #     0%  0/2  car and truck review
+        #     0%  0/2  movie review and reaction
+        #     0%  0/1  entertainment room makeover
+        #
+        # What the approved list actually contains, by cluster:
+        #
+        #   CONSUMER TECH REVIEWERS, and this is the biggest group by far —
+        #     Tom's Guide, Bane Tech, Tech Steve, Brains techKnowlogy, Technology
+        #     Space HQ, Tech It Before You Wreck It, Switch and Click, Paul
+        #     Antill, DanKamYouKnow, Sander Recommends, HelloVSTV.
+        #   SPORTS COMMENTARY — JTL SPORTS, MAH, Cowboys Report by Chat Sports,
+        #     The Joel Klatt Show.
+        #   MAKERS AND TRADES — DaBuild, American Electrician, The Real Sam
+        #     Prentice, Wyrmwood Vlogs, Owen Cook.
+        #   FAMILY / HOME LIFE — Your Way Living, Florida Fam Five, Magic Touch.
+        #
+        # The sharp distinction that falls out, and it refines section 12:
+        # CONSUMER tech is approved; SPECIALIST hi-fi is rejected. "home theater
+        # products review" runs 5/5 while the av_specialist exclusion catches
+        # Zero Fidelity, New Record Day and Lenny Florentine. So the additions
+        # below lean into consumer product vocabulary (tv, soundbar, projector,
+        # streaming device) and stay clear of audiophile vocabulary
+        # (speaker, amplifier, turntable, hi-fi), which is measured to attract
+        # the channels this reviewer turns down.
+        #
+        # KEPT DESPITE 0/2, both of them: "car and truck review" and "movie
+        # review and reaction". Two labelled rows is not evidence, and section 12
+        # already declined to cut "movie review and reaction" on the grounds that
+        # removing it costs real volume. Re-measure at 5+ verdicts each before
+        # touching them.
+        #
+        # Cost: 100 YouTube quota units per keyword searched, and the loop stops
+        # once the row budget fills — so 17 keywords is a 1,700-unit ceiling
+        # rather than a bill. The daily allowance is 10,000 and 2026-08-24 used
+        # 4,417.
+        #
+        # NOT addressed here: geography takes ~50% of this niche's candidates,
+        # and tech-review vocabulary skews global (the 18:40 run dropped channels
+        # declared IN, NL, RS, AT, ZA, TR). More keywords widen the funnel; they
+        # do not change that ratio.
         "keywords": [
+            # --- the proven one, and vocabulary adjacent to it ---
             "home theater products review",
+            "home theater tech setup",
+            "smart tv review",              # consumer TV, the core product
+            "soundbar review",              # consumer TV audio, NOT hi-fi gear
+            "projector review home",        # "home" to skew away from business AV
+            "streaming device review",      # Firestick/Roku; cf. pending "newtech firestick"
+            # --- sports commentary, 4/9 and the second-best cluster ---
+            "sports podcast commentary",
+            "college football podcast",     # The Joel Klatt Show, Cowboys Report
+            # --- makers and trades: DaBuild, American Electrician, Sam Prentice ---
+            "power tools review",
+            "diy woodworking shop build",
+            "home electrical diy",
+            # --- rooms and spaces, US idiom to skew toward the search zone ---
             "man cave tour",
             "entertainment room makeover",
+            "basement finishing project",
+            # --- family and home life: Your Way Living, Florida Fam Five ---
+            "family home life vlog",
+            # --- kept on prior instruction / too thin to judge ---
             "car and truck review",
-            "power tools review",
-            "sports podcast commentary",
             "movie review and reaction",
-            "home theater tech setup",
             "homesteading vlog",
         ],
         "table_name": AIRTABLE_TABLE_HOME_THEATER,

@@ -1495,3 +1495,150 @@ available, where before the reorder 169 did.
 | `gemini_verify.py` | ratio counted over scored criteria only |
 | tests | +3 (`excluded_subject` veto, the loosening guard, the equivalence proof) |
 | suite | 1299 -> **1302 passing**, zero regressions |
+
+---
+
+## 14.13 TEST REPORT — 2026-08-24/25
+
+Asked: does the transcript reader work, and does everything work?
+
+**There is no transcript reader.** None was built — §14.11 records why. What
+shipped reads creator TAGS (`video_topics.py`) and asks GEMINI to watch the video
+(the §14.12 veto). Both were tested; results below.
+
+### 1. Transcript availability — re-proven on three real videos
+
+| video | duration | caption tracks | `baseUrl` | `+Referer` | `json3` | `srv3` |
+|---|---|---|---|---|---|---|
+| LEGO Ninjago build | 13m08s | **exist** (`en/asr`) | 200 / **0 bytes** | 200 / 0 | 200 / 0 | 200 / 0 |
+| Home theater room tour | 4m12s | **exist** (`en/asr`) | 200 / **0 bytes** | 200 / 0 | 200 / 0 | 200 / 0 |
+| ASMR whispers | 17m38s | **none at all** | — | — | — | — |
+
+English auto-captions demonstrably exist on two of three and are unreadable on
+all three. A transcript reader is not buildable here. Third video had no captions
+at all, so even a working reader would cover 2 of 3.
+
+### 2. Live Gemini — the §14.12 excluded-subject veto, through `judge()`
+
+Real videos, real API, the shipping 4-criteria Home Theater config, `flagged=True`.
+
+| case | verdict | detail |
+|---|---|---|
+| LEGO Ninjago build | **refused** | `failed a required criterion: not an excluded subject` |
+| Home theater room tour | **rescued** | `video confirmed 0.90` |
+| ASMR whispers | untested | `unavailable (unreachable)` — see §3 |
+
+The veto's own evidence on the LEGO case: *"solely focused on assembling a
+Lego-style construction set, which is an excluded subject"*, and
+`[home entertainment or living space: no] shows only hands building a
+construction-brick model against a white background`. It also correctly answered
+`[a real creator, not a repost: yes]` — so it is discriminating per criterion,
+not failing everything.
+
+The room tour is the **negative control that matters**: the new veto did not
+over-fire on a genuine home-theatre channel. Both halves work.
+
+**ASMR remains untested.** Not a logic failure — every failure edge behaved
+correctly (`state=unavailable`, `rescued=False`, run continues, candidate keeps
+its existing verdict). It is an unproven category.
+
+### 3. `gemini-3.7-flash` was down — and my first diagnosis was wrong
+
+Four video attempts on `gemini-3.7-flash` hit the 60s read timeout, on both a
+4m12s and a 17m38s video. My initial reading was "the third model in the chain is
+unusable for video". A one-request text probe corrected it:
+
+```
+  gemini-3.7-flash       TEXT -> 503 in 10.8s
+      "This model is currently experiencing high demand. Spikes in demand
+       are usually temporary. Please try again later."
+  gemini-3.5-flash-lite  TEXT -> ok in 1.2s
+```
+
+So it was **Google-side capacity, not video-specific and not our code.** A 503
+maps to `UNREACHABLE`, which is correctly non-terminal, so the model is retried
+rather than blacklisted.
+
+**The real cost is wall clock.** While a chain member is down, each candidate
+routed to it burns the full 60s `GEMINI_TIMEOUT`. Against
+`GEMINI_MAX_SECONDS_PER_RUN = 900`, fifteen such candidates end the run. It
+degrades safely (`time_budget_reached`) but expensively. Worth considering a
+shorter timeout or a per-run circuit breaker after N consecutive `UNREACHABLE`s
+on the same model. **Not fixed — flagged.**
+
+### 4. BUG FOUND AND FIXED — the summary compared a global sum to a per-model cap
+
+`spend_summary()` printed the day's GLOBAL total against a PER-MODEL ceiling.
+Live output during this test:
+
+```
+  BEFORE:  83/80 requests today (83/40 video)      <- reads as 104% and 208% over
+  REALITY: gemini-3.5-flash-lite 40/80 (40/40 video)
+           gemini-3.1-flash-lite 40/80 (40/40 video)
+           gemini-3.7-flash       3/80  (3/40 video)   <- every model inside its limit
+```
+
+With N allowlisted models the line could show N x the cap while describing a
+healthy run — inverting the one question the summary exists to answer. Caps are
+per model, documented at `gemini_tracker._model_entry`; the reporting path never
+got the memo.
+
+```
+  AFTER: today per model — gemini-3.1-flash-lite 40/80 (40/40 video) CAPPED;
+         gemini-3.5-flash-lite 40/80 (40/40 video) CAPPED;
+         gemini-3.7-flash 3/80 (3/40 video) [day sum 83 requests, 83 video]
+```
+
+Google's own PerDay 429 now reads `429-SPENT`, distinctly from our own `CAPPED` —
+different operator actions. The sum survives, labelled as a sum. +5 tests.
+
+### 5. Topic gate end-to-end on 211 real channels — 5 fires, all correct
+
+Offline against cached tags, zero cost. Joined to the reviewer's own verdicts:
+
+| topic | share | channel | verdict |
+|---|---|---|---|
+| gaming | 72% of 1450 tags | Grxnt (`fortnite`, `gamer`, `battle pass`) | **Rejected** |
+| gaming | 65% of 1145 tags | Octorious (`playstation`, `ps5`, `dualsense`) | **Rejected** |
+| toys_and_kids | 64% of 479 tags | Bricksie (`lego`, `bricklink`) | **Rejected** |
+| av_specialist | 53% of 1073 tags | New Record Day (`audiophile`, `hi-fi`, `speaker`) | **Rejected** |
+| sports_commentary | 40% of 400 tags | Club 520 Podcast (`podcast`, `nba`) | **Rejected** |
+
+**5 of 5 Rejected. Zero Approved killed.** 20 of 211 channels carry no tags and
+can never be dropped. `New Record Day` is one of the channels §12 named.
+
+### 6. The decisive check — the six channels that broke the old gate
+
+`main.off_target_reason`'s docstring called these six "hand-verified off-target".
+The 2026-08-21 backtest found **four of them were Approved**, and that gate
+measured **-38% discrimination**.
+
+| channel | verdict | tag gate fires? | outcome |
+|---|---|---|---|
+| Bane Tech | Approved | no | correctly spared |
+| DanKamYouKnow | Approved | no | correctly spared |
+| NFT TIGERS SPOTON | Approved | no | correctly spared |
+| Paul Antill | Approved | no | correctly spared |
+| Grxnt | Rejected | gaming 72% | correctly caught |
+| Octorious | Rejected | gaming 65% | correctly caught |
+
+**Six for six.** The tag gate splits exactly the way the reviewer did, on the
+precise set that inverted the title gate. That is because `phones_and_pcs`,
+`generic_gadgets` and `ai_and_crypto` — the categories those four Approved
+channels trip — are deliberately **excluded** from `VIDEO_TOPIC_CATEGORIES` on
+the measurement in §14.11. The exclusion is doing exactly the work it was added
+for.
+
+### Verdict
+
+| component | status |
+|---|---|
+| Transcript reader | **does not exist and cannot** — captions closed, re-proven on 3 videos |
+| Tag topic gate | **works.** 5/5 correct on real data, 6/6 on the historical trap set |
+| Excluded-subject veto | **works** on LEGO (refused) and the room-tour control (rescued); ASMR unproven |
+| Fail-soft paths | **correct** under a live third-party outage |
+| `spend_summary` | **was misreporting; fixed** with 5 tests |
+| Suite | 1302 -> **1307 passing**, zero regressions |
+
+Still open: ASMR untested; the 60s-timeout-per-candidate cost when a chain member
+is down; and R4, the underlying reason the video tier cannot be backtested.

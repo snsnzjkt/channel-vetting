@@ -2179,3 +2179,129 @@ flagged criteria. Inferring intent from wording is the same guessing that caused
 the bug.
 
 Suite: 1376 -> **1382 passing**, zero regressions. Zero credits.
+
+---
+
+## 14.20 R4 RUN — the video tier still cannot be evaluated, and the blocker is labels
+
+Built `backtest_video_tier.py` and ran it. It reads `Relevance State` /
+`Relevance Detail` from Airtable — where `push_record` already writes them —
+instead of `gemini_cache.json`, which cannot be joined to a channel at all
+because video verdicts are keyed on the VIDEO id with no video→channel map
+persisted. Zero requests, zero credits.
+
+**Correction to what I said before running it.** I reported "75 rows carry both a
+Gemini verdict and a reviewer verdict". Wrong: 75 rows carry a verdict, and only
+**11** also carry a label. Of those 11, only **5** carry a *real* verdict — the
+other 6 are `unavailable (video_run_cap_reached)` or "no long-form video". I
+conflated "has a verdict" with "has a verdict and a label", and the second number
+is the one that matters.
+
+### The corpus
+
+```
+                       rows   verdict   labelled   JOINED   real verdict + label
+  Home Theater          133      45        99        11              5
+  Lifestyle Sofa        144      30       113         0              0
+```
+
+**Lifestyle has 30 verdicts and 113 labels and zero overlap.** Every verdict sits
+on a row still marked `New`. The tier only started running recently; the labelled
+rows predate it.
+
+### Where the 75 verdicts went
+
+| kind | count | share |
+|---|---|---|
+| **destroyed by the run cap** (`video_run_cap_reached`) | **38** | **51%** |
+| real verdict | 30 | 40% |
+| no long-form video to sample | 5 | 7% |
+| other unavailable | 2 | 3% |
+
+**Half of every verdict this tier has ever produced was a budget artifact, not a
+judgement.** Those are pre-R0 rows — R0 took coverage from 46% to 100%, so this
+should stop — but it means the historical record is half noise.
+
+### What the 5 rows say, and why it is not an answer
+
+```
+  n=5, base rate 80% Approved
+  CONFIRMED by the tier     n=3    3 Approved (100%)
+  NOT confirmed             n=2    1 Approved  (50%)
+  lift from confirming: +50 percentage points
+
+  the required brand veto fired twice:
+    killed 1 Approved (HelloVSTV), caught 1 Rejected (Hi My Car)  -> net 0
+```
+
+Directionally positive. Statistically nothing: that "+50 points" is three rows
+against two. The veto is 1-for-1, which is the coin flip. **No architecture
+decision may rest on this**, and the tool prints a warning below `--min-rows`
+for exactly that reason.
+
+### Consequence for the OpenAI question
+
+The thing blocking this decision is **human labelling, not AI capacity.** There
+are 75 rows carrying verdicts, mostly unjudged. Judging *those* is what builds
+the corpus — an OpenAI key buys nothing here, because this measurement issues no
+requests at all.
+
+Where a key would genuinely have helped is visible in the table above: 51% of
+verdicts lost to a run cap. R0 already fixed that for free.
+
+### The sequence that settles it
+1. Get the pending rows judged — **prioritising the 75 that already carry a
+   verdict**, since those are the only ones that grow this corpus.
+2. Re-run `backtest_video_tier.py`. It needs ~30+ joined rows to say anything.
+3. If the tier confirms everything, drop it and go transcript-only on one
+   provider. If it discriminates, it stays Gemini, because the video tier is the
+   one thing that cannot port.
+
+### 14.20a Why Lifestyle has ZERO usable rows — the predicted starvation, confirmed
+
+Rows per day added, and what each carries:
+
+```
+  HOME THEATER                          LIFESTYLE SOFA
+  date        rows verdict lab BOTH     date        rows verdict lab BOTH
+  2026-08-12    17    0     17   0      2026-08-12    24    0     24   0
+  2026-08-14    29    0     29   0      2026-08-14    28    0     28   0
+  2026-08-17    12    0     12   0      2026-08-17    21    0     21   0
+  2026-08-20     3    0      3   0      2026-08-20    21    0     21   0
+  2026-08-21    31    6     31   6  <-- 2026-08-21     9    0      8   0  <--
+  2026-08-23    11   11      5   5      2026-08-24    30   30      0   0
+  2026-08-24    28   28      0   0
+```
+
+Two separate causes, and neither is a Lifestyle-specific bug:
+
+**1. The 08-21 run gave Home Theater 6 verdicts and Lifestyle 0.** Home Theater
+iterates first (`main.py` dict order, §2c) and per-run caps are per PROCESS
+(`GEMINI_MAX_REQUESTS_PER_RUN = 70`, video 30). Home Theater took 6 of its 31 rows
+and walled out; Lifestyle, running behind it, got nothing at all.
+
+**This is exactly the failure the eng review named as F2** — *"the second niche
+systematically unjudged (dict-order starvation)"* — and it is now confirmed in
+production data rather than predicted. §2c had already documented the same
+first-come starvation for *credits*; it reproduces on the request budget.
+
+**2. Lifestyle's only verdict-bearing rows are from 08-24, which the reviewer has
+not reached.** Labels stop at 08-21; verdicts start at 08-24. The two ranges do
+not even touch, so the intersection is empty by construction rather than by
+accident.
+
+Home Theater escaped only because its 08-21 and 08-23 rows got verdicts *and*
+were subsequently judged. That is the whole of its 11-row corpus.
+
+### What this changes
+
+- **Judging Lifestyle's 30 verdict-bearing rows takes it from 0 usable to 30** —
+  on its own that crosses the `--min-rows 30` bar the backtest needs. It is the
+  single highest-leverage action available, and it costs reviewer time only.
+- **The per-niche request reservation (eng F2) is no longer hypothetical.** It was
+  dropped from v1 as "wrong-signed" when framed as a *credit* floor, and that
+  reasoning does not carry over: a REQUEST reservation is not guaranteeing spend
+  to a poor converter, it is stopping one niche from consuming the evidence budget
+  of the other. Lifestyle converts better (§14.18: 51% vs 33% on the paid path)
+  and has no measured verdicts at all, which is the worst possible combination.
+  Not built — flagged with evidence now instead of a prediction.

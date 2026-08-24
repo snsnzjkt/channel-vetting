@@ -1943,3 +1943,86 @@ requests in a tight loop — but any future batch tool will.
 ### Cost of this whole investigation
 Zero vendor credits (13.04 before and after). Zero YouTube quota beyond cached
 metadata. 99 Gemini free-tier requests.
+
+---
+
+## 14.17 SHIPPED — queue ranking, and the signal it is NOT built on
+
+Asked for: build the ranking use of the AI screen, since ranking drops nobody.
+
+**I tested whether the AI screen ranks before building a ranker on it. It does
+not.** AUC over the labelled channels, higher is better, 0.50 is a coin flip:
+
+| signal | AUC | 95% CI (bootstrap) | cost/candidate | legible? |
+|---|---|---|---|---|
+| AI metadata screen | **0.432** | [0.288, 0.588] | 1 Gemini request | no |
+| per-keyword approval rate | **0.602** | [0.442, 0.749] | **zero** | yes, it is a table |
+
+The AI screen's point estimate is **below random**, and its top quartile was
+5/15 approved against a bottom quartile of 9/15 — the channels it liked were less
+likely to be approved than the ones it dismissed. Building a ranker on it would
+have shipped something worse than arrival order.
+
+Neither CI excludes 0.50, so neither signal is proven at n=60-65. **But an
+ordering drops nobody, so its worst case is the order we already have.** That
+bound is what makes shipping an unproven signal reasonable here and made shipping
+the AI screen as a *gate* unreasonable (§14.16). The keyword signal wins on three
+grounds that do not need significance: a better point estimate, zero cost, and a
+human can read the table and overrule it.
+
+### What shipped
+
+| item | detail |
+|---|---|
+| `ranking.py` | `source_keywords`, `approval_rates`, `priority_score`, `rank`. Learns from rows already judged; scores new ones |
+| `rank_pending.py` | read-only CLI that orders the pending queue and prints the keyword table it learned |
+| tests | `test_ranking.py` (17) |
+| suite | 1356 -> **1373 passing**, zero regressions |
+
+Three rules carried over from the gates: the **best** keyword wins rather than
+the average (a candidate found by a strong and a weak keyword is one the strong
+keyword found); a keyword under **3 verdicts** gets no rate at all, so one
+decision cannot order every future candidate; and a candidate with no usable
+keyword gets the **neutral prior**, not zero, because a zero would bury it on
+absent data.
+
+### Run against the live queue — and it reports its own uselessness
+
+**Home Theater — 34 pending, 16 rankable**, learned from 98 judged rows:
+
+```
+  100%  5/5  home theater products review
+   50%  2/4  home theater tech setup
+   44%  4/9  sports podcast commentary
+   33%  2/6  man cave tour
+   25%  1/4  homesteading vlog
+```
+
+The value is in the **tail**, not the head. 16 rows are deprioritised, and **10
+of them are one keyword** — `sports podcast commentary` at 44%: Sky Sports
+Cricket, The Big Podcast with Shaq, Nightcap, Jim Cornette, The Pivot Podcast.
+Then `man cave tour` (33%) and `homesteading vlog` (25%). The reviewer can now
+see that a third of his queue arrived from a single keyword, and decide.
+
+**Lifestyle Sofa — 31 pending, 0 rankable.** All 31 came from the paid vendor
+path, whose `Source` is the constant `"influencers.club discovery"` with no
+keyword. The tool prints:
+
+> `0 of 31 rows have a keyword with enough history to rank on.`
+> `-> this ordering carries NO information for this niche.`
+
+That check exists because a flat ordering rendered as a numbered list looks
+informative. It is not, for Lifestyle, and the tool says so rather than implying
+otherwise. This is CEO-2 from §14.6 landing in practice.
+
+### What would make this actually good
+- **The 65 pending verdicts.** Every rate here rests on 3-9 rows; the CI closes
+  with more labels, and this signal is the direct beneficiary.
+- **Give the vendor path a real keyword.** Writing the `ai_search` variant into
+  `Source` instead of a constant would make Lifestyle rankable at all. One line
+  at `main.py:1638`, and it makes both §14.7 and this tool work for the niche
+  that produces most of the rows.
+
+### Cost
+Zero. No Gemini request, no vendor credit, no YouTube quota — it reads Airtable
+and does arithmetic. Vendor credits 13.04 before and after.

@@ -300,13 +300,35 @@ def verdict_confirms(payload: dict, min_confidence: float,
 
     if not results:
         return False, f"video did not confirm ({conf:.2f})"
-    matched = sum(1 for c in results if c.get("matches") is True)
-    ratio = matched / len(results)
+
+    # THE RATIO IS COUNTED OVER SCORED CRITERIA ONLY — required ones are excluded
+    # from BOTH halves of the fraction.
+    #
+    # A required criterion is a veto, and passing a veto is not evidence of
+    # relevance. Leaving them in the denominator meant a channel earned ratio
+    # credit for not being a brand, which is measurably wrong: with two scored
+    # criteria, one brand veto, and a ratio of 0.5, adding a SECOND veto made
+    # `scored 0/2, both vetoes passed` confirm at 2/4 — i.e. a clip showing no
+    # home, no living space and no creator activity would be rescued purely for
+    # being an independent creator who did not show an excluded topic.
+    #
+    # Verified equivalent for the shipping config: with 2 scored + 1 required and
+    # ratio 0.5, every one of the 8 possible verdicts is unchanged by this line
+    # (test_the_required_exclusion_does_not_loosen_the_relevance_bar). It only
+    # changes what happens when a SECOND veto is added, which is the whole point
+    # — vetoes must be addable without silently loosening relevance.
+    scored = [c for c in results if c.get("criterion") not in required]
+    if not scored:
+        # Every criterion is a veto and the aggregate still said no. There is no
+        # relevance evidence to weigh, so there is nothing to confirm.
+        return False, f"video did not confirm ({conf:.2f}, no scored criteria)"
+    matched = sum(1 for c in scored if c.get("matches") is True)
+    ratio = matched / len(scored)
     if ratio >= min_criteria_ratio:
         return True, (f"video partly confirmed {conf:.2f} "
-                      f"({matched}/{len(results)} criteria)")
+                      f"({matched}/{len(scored)} criteria)")
     return False, (f"video did not confirm ({conf:.2f}, "
-                   f"{matched}/{len(results)} criteria)")
+                   f"{matched}/{len(scored)} criteria)")
 
 
 def _classify_error(resp) -> str:

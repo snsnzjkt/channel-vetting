@@ -1407,3 +1407,91 @@ the same shape and scale as §12's shipped `av_specialist` change.
 VIDEO_TOPIC_GATE=true          # after a cycle of advisory logs
 VIDEO_TOPIC_MIN_SHARE=0.40     # 0.25 costs 1 approved for 4 more catches
 ```
+
+---
+
+## 14.12 SHIPPED — excluded-subject veto in `video_criteria`, 2026-08-24
+
+The other half of the topic gap. `video_topics.py` (§14.11) closed the half that
+creator TAGS cover; this closes the half that only the video itself can answer.
+Gemini is handed the video URL and ingests **audio and frames together**, so "a
+gun is being fired" and "someone is assembling a Lego set" are directly
+observable here and nowhere else in this pipeline.
+
+Added to **both** niches as a fourth criterion, `required: True`:
+
+> **not an excluded subject** — Is the SUBJECT of this clip something other than
+> firearms, toys or construction-brick building, ASMR, or party politics? Answer
+> no ONLY when one of those is what the video is actually about… Incidental
+> presence does NOT count and must still answer yes — a Lego set or action figure
+> on a shelf during a room tour, a games console under a television, a rifle on a
+> wall rack in the background… If you cannot tell what the subject is, answer yes
+> and lower your confidence.
+
+Every clause is about the **subject**, not presence, with the incidental cases
+written out. A room tour with a Lego set on the shelf is the niche, not an
+exclusion. Getting that backwards would re-create the §12 inversion where
+vocabulary meant to describe the niche was in practice describing the rejects.
+
+### A latent bug this exposed, and fixed
+
+Adding a second veto would have **silently loosened** the relevance bar. Proven
+before the change, with 2 scored criteria + 1 brand veto at ratio 0.5:
+
+```
+  BEFORE the fix, with a 2nd veto added and passing:
+    space=0 creator=0 brand=1 topics=1  ->  CONFIRM   (2 of 4 = 0.50)
+```
+
+A clip showing **no home, no living space and no creator** would be rescued for
+being an independent creator who showed no gun. Passing a veto was counting as
+evidence of relevance, because required criteria sat in the ratio denominator.
+
+**Fix:** `verdict_confirms` now counts the ratio over **scored criteria only** —
+both halves of the fraction exclude vetoes. A veto is a veto, not evidence.
+
+Proven equivalent for the config shipping at the time of the fix: **all 8**
+possible verdicts for 2 scored + 1 required at ratio 0.5 are unchanged, so the
+fix is a provable no-op until a second veto exists. Pinned by
+`test_the_three_criteria_config_is_unchanged_by_the_ratio_fix`.
+
+```
+  AFTER the fix, 2nd veto passing:
+    space=0 creator=0 brand=1 topics=1  ->  no   (0 of 2 scored criteria)
+    space=1 creator=0 brand=1 topics=1  ->  CONFIRM (1 of 2)   <- as with 3 criteria
+  AFTER the fix, exclusion veto FAILING:
+    all 8 combinations  ->  refused
+```
+
+### What this can and cannot do
+
+**It cannot drop anything.** The tier is rescue-only (G1), so this veto only ever
+**blocks a rescue**. A firearms channel that the keyword gates never flagged is
+still pushed — this criterion cannot remove it. The risk it carries is therefore
+"a legitimate channel loses a rescue it would have won", never "a prospect is
+deleted". That bound is why an unmeasured veto is acceptable here at all.
+
+**It is unmeasured, and cannot currently be measured.** It cannot be scored
+against the labels the way §12 scored vocabulary: `gemini_cache.json` keys video
+verdicts on `video_id` and no `video_id -> channel_id` map is persisted, so the
+118 cached verdicts cannot be joined to reviewer labels at all. And `firearms`
+fires on zero of the 211 labelled channels, so there is no catch to measure
+against. It ships on the §12 `story_recap` precedent — instruction-backed, zero
+measured harm — with its blast radius bounded by rescue-only. **Read the
+`Relevance Detail` column for a cycle before trusting it.** R4 remains the fix
+for the underlying measurability gap.
+
+### Cost
+
+Adding a criterion changes `criteria_hash`, so **all 118 cached video verdicts
+are invalidated** — verified: zero cache entries match either niche's new hash.
+Each previously cached candidate costs one request again when next examined. Post-R0
+that absorbs inside a run or two: 61 candidates per run need a request against 78
+available, where before the reorder 169 did.
+
+| item | detail |
+|---|---|
+| `niches.py` | fourth `required` criterion on both niches |
+| `gemini_verify.py` | ratio counted over scored criteria only |
+| tests | +3 (`excluded_subject` veto, the loosening guard, the equivalence proof) |
+| suite | 1299 -> **1302 passing**, zero regressions |

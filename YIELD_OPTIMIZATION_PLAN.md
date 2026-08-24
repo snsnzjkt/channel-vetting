@@ -1745,3 +1745,98 @@ midnight cap reset.
   900s run brake — now doubly relevant, since a Layer 1 hit adds a second request
   that can also time out. A per-run circuit breaker after N consecutive
   `UNREACHABLE`s on one model would cap it. Flagged, not fixed.
+
+---
+
+## 14.15 CORRECTION — transcripts ARE obtainable. §14.11/14.13 were wrong.
+
+**I got this wrong twice and wrote the wrong conclusion down as measured fact.**
+
+§14.11 and §14.13 recorded that transcripts were unobtainable, on evidence that
+looked airtight: the caption `baseUrl` from the watch page, `&fmt=json3`,
+`&fmt=srv3` and bare `/api/timedtext`, with and without a `Referer`, across three
+real videos — **HTTP 200 with an empty body from every one**. §14.13 tabulated it.
+
+The probes were right. **The inference was not.** Those raw endpoints really are
+closed; `youtube_transcript_api` reaches the same captions through a different
+client context. Measured 2026-08-25 on the identical video IDs that returned zero
+bytes:
+
+| video | raw HTTP | `youtube-transcript-api` |
+|---|---|---|
+| LEGO Ninjago build | 200 / **0 bytes** | **1,838 chars** |
+| Home theater room tour | 200 / **0 bytes** | **4,155 chars** |
+| ASMR whispers | no caption tracks | `TranscriptsDisabled` (genuinely none) |
+
+What I should have done: tried the libraries that exist specifically to work
+around these blocks before concluding the data was unavailable. "The obvious HTTP
+route is closed" and "the data cannot be had" are different findings, and the gap
+between them is a library somebody wrote to close it.
+
+`captions.download` on the Data API is still genuinely unusable — it needs OAuth
+as the CHANNEL OWNER. That part was right.
+
+### Transcripts are strictly better than the video window they replace
+
+| | 90s video window | full transcript |
+|---|---|---|
+| coverage | 90 seconds | **the whole video** |
+| tokens | ~5,940 | **459 / 1,038** (two real uploads) |
+| latency | 30-70s | **~1-2s** |
+| ceiling charged | `MAX_VIDEO_REQUESTS_PER_DAY` (40/model) | total only (80/model) |
+| cost | free tier | free tier, **no API key, no quota** |
+
+Six to thirteen times fewer tokens, for more coverage, on the looser ceiling.
+
+### What shipped
+
+| item | detail |
+|---|---|
+| `transcripts.py` (new) | `fetch()` — free spoken text, disk-cached, every failure path returns `None`. Negative results cached; an **IP block is deliberately NOT cached**, since it is about us, not the video |
+| `gemini_verify.py` | `build_transcript_topic_request` — a **TEXT** request, no `fileData`, no `videoMetadata`. `confirm_topic` rewired to it |
+| **deleted** | `build_topic_confirmation_request`, `confirmation_window`, `GEMINI_TOPIC_CONFIRM_SECONDS` — the video path is **gone, not kept as a fallback**. An unused video builder is an invitation to reuse it |
+| `requirements.in/.txt` | `youtube-transcript-api==1.2.4`. Imported lazily, so a missing library degrades to "no transcript" rather than breaking `main.py`'s import graph |
+| tests | `test_transcripts.py` (21), confirmation tests retargeted (22) |
+| suite | 1333 -> **1356 passing**, zero regressions |
+
+### LIVE TEST — free tier, zero vendor credits, and it PASSES
+
+The discrimination that was blocked for two days now runs in ~2 seconds:
+
+| case | expected | result | evidence the model quoted |
+|---|---|---|---|
+| LEGO build | confirm | **PASS** (1.00) | *"I think we should directly start unboxing and building it"* |
+| Home theater room tour | overturn | **PASS** (1.00) | *"what size space you need for a home theater"* |
+| ASMR (captions disabled) | no verdict | **PASS** | `no transcript available` — fail-open, no drop |
+
+`2 request(s) this run (0 video)`, served by `gemini-3.5-flash-lite` — **a model
+that was at its 40/40 video cap but had text headroom**. That is the capacity win
+in one line. Vendor credits before and after: **13.04 → 13.04**, asserted in the
+test.
+
+### Layer 2 is now genuinely text-only
+
+```
+  LAYER 1   channel metadata (title, bio, country) + video metadata
+            (~50 titles, ~50 descriptions, tags, categoryIds)     FREE
+                    │  fires on ~2% of candidates
+                    ▼
+  LAYER 2   transcript of ONE representative video -> Gemini TEXT   FREE tier
+                    │  fail-open: no transcript, low confidence,
+                    │  or an explicit no  ->  KEEP the candidate
+                    ▼
+            drop only when BOTH layers agree
+```
+
+### Still video, and still your call
+
+`verifier.judge` — the **relevance tier** — remains a video request on every
+candidate (25s clip, frames + audio), and the §14.12 excluded-subject veto lives
+inside it. It was not touched here.
+
+Now that transcripts are known to work, converting it is the obvious next move:
+it would remove the last video call, drop off the 40/model video ceiling entirely,
+and give the tier the whole spoken content instead of 25 seconds. It is also the
+tier that **rescues**, its current behaviour is measured, and swapping its
+evidence source invalidates that measurement — so it needs a backtest, not a
+patch. Flagged, not done.

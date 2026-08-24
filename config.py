@@ -739,21 +739,15 @@ VIDEO_TOPIC_CATEGORIES = tuple(
 # cap, not one per candidate. That is the whole reason the two-layer shape works
 # here and a content-first shape does not.
 #
-# There is no transcript. captions.download requires OAuth as the channel owner
-# and every unauthenticated caption route answers 200 with an empty body
-# (measured 2026-08-24, three videos, four routes each). Gemini ingests the audio
-# track from the video URL directly, and `spoken_summary` in the response is the
-# closest readable substitute. See video_topics.py.
+# Confirmation reads the video's TRANSCRIPT (transcripts.py) and sends TEXT. No
+# frames, no video request, so it does not touch GEMINI_MAX_VIDEO_REQUESTS_PER_DAY
+# — the tighter of the two per-model ceilings. Measured: 459 and 1,038 tokens for
+# two real uploads END TO END, against ~5,940 for a 90-second video window, and
+# ~1s instead of 30-70s.
+#
+# An earlier version of this used a 90-second VIDEO window, on a conclusion that
+# transcripts were unobtainable. That conclusion was wrong — see transcripts.py.
 GEMINI_TOPIC_CONFIRM = env_flag("GEMINI_TOPIC_CONFIRM", default=True)
 
-# Longer than GEMINI_CLIP_SECONDS (25) because this runs on ~2% of candidates and
-# "what is this video about" is a question 25 seconds of a long upload answers
-# badly. At MEDIA_RESOLUTION_LOW and 1 FPS this is ~90 x 66 = ~6k tokens.
-GEMINI_TOPIC_CONFIRM_SECONDS = int(os.getenv("GEMINI_TOPIC_CONFIRM_SECONDS", 90))
-
-# Confirmation must be CONFIDENT to remove a row. Higher than
-# GEMINI_MIN_CONFIDENCE (0.6) because this is the only gate in the pipeline where
-# an AI answer can put a handle into rejected_handles.json for 90 days, and a
-# low-conviction guess must never do that.
 GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE = float(
     os.getenv("GEMINI_TOPIC_CONFIRM_MIN_CONFIDENCE", 0.75))

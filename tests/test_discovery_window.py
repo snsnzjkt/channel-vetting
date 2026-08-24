@@ -7,13 +7,36 @@ def test_default_window_is_recent_not_ninety_days():
     assert config.DISCOVERY_DAYS_BACK == 7
 
 
-def test_caps_sum_to_forty():
-    """The requirement is ~30-40 new rows per table per day, total."""
+def test_the_daily_caps_are_the_operator_s_chosen_throughput():
+    """
+    Was `test_caps_sum_to_forty`, asserting 30 + 10 against the original brief's
+    "~30-40 new rows per table per day".
+
+    RAISED to 60 + 10 on 2026-08-25 by operator decision, on measured evidence
+    that the cap and not the gates was refusing rows. From the 18:40 run:
+
+        'Lifestyle Sofa': 30/30 qualified and 0/10 flagged already added today.
+        Discovery request: got 50 new candidate(s) (50 backlogged)
+        'Lifestyle Sofa' so far: 0/0 qualified
+
+    Fifty candidates in hand, 0.50 credits already spent fetching them, zero
+    headroom to push any. Home Theater was at 28/30 the same run.
+
+    The operator's instruction was explicit: more volume, same process, and
+    "it will still be manually reviewed before approval" — so the cap is a
+    throughput knob, not a quality one, and human review is the gate.
+
+    This test is kept as a POLICY assertion rather than deleted. The number is a
+    deliberate choice with a credit and a reviewer-attention cost behind it (see
+    config.py), so it should fail loudly if someone changes it by accident.
+    """
     import config
 
-    assert config.DAILY_QUALIFIED_CAP == 30
-    assert config.DAILY_FLAGGED_CAP == 10
-    assert config.DAILY_QUALIFIED_CAP + config.DAILY_FLAGGED_CAP == 40
+    assert config.DAILY_QUALIFIED_CAP == 60
+    assert config.DAILY_FLAGGED_CAP == 10, (
+        "the flagged budget is a separate ceiling so a weak discovery day cannot "
+        "crowd out real prospects — raising it is a different decision"
+    )
 
 
 def test_run_passes_configured_window_to_discovery(monkeypatch):

@@ -257,10 +257,14 @@ def _run_niche_discovery(monkeypatch, discovery, survives_one_in=1, blocklist=No
 
 
 def test_run_niche_fills_the_budget_from_discovery(monkeypatch):
-    disc = _FakeDiscovery([[f"h{i}" for i in range(50)]])
+    # Supply MORE than the cap, so the assertion below is about the cap binding
+    # rather than about the fixture running out. A fixed 50 handles silently
+    # became supply-bound when the cap was raised to 60.
+    cap = main.DAILY_QUALIFIED_CAP
+    disc = _FakeDiscovery([[f"h{i}" for i in range(cap + 20)]])
     pushed, (discovered, processed, pushed_ids, cap_ok) = _run_niche_discovery(monkeypatch, disc)
 
-    assert len(pushed) == main.DAILY_QUALIFIED_CAP == 30
+    assert len(pushed) == cap
     assert cap_ok is True
     assert len(disc.calls) == 1  # one round filled it
 

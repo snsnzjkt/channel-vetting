@@ -34,6 +34,11 @@ class _CountingVerifier:
         self.calls.append(flagged)
         return gv.Judgement(gv.STATE_SCORED, "stub", notes="")
 
+    # Counted the same way: this test is about WHEN the paid call happens, and
+    # stage 2 is one paid call either way.
+    def review_transcripts(self, niche_config, stats, performance, *, flagged):
+        return self.judge(niche_config, stats, performance, flagged=flagged)
+
 
 NICHE = {"min_avg_views": 10_000, "min_channel_age_months": None,
          "allowed_country_codes": ZONE_CORE, "table_name": "tbl"}

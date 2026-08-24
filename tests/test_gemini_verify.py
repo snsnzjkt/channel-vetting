@@ -960,3 +960,25 @@ def test_the_gate_refuses_only_when_every_model_is_over_its_cap(monkeypatch, ver
     calls = stub_post(monkeypatch, FakeResponse(200, body_for()))
     assert verifier.judge(NICHE, STATS, PERF, flagged=True).rescued is False
     assert calls == [], "zero requests when every model is over its cap"
+
+
+def test_the_verdict_reason_names_the_evidence_it_actually_read():
+    """
+    The reason string reaches the reviewer's Airtable cell, so it must not claim
+    a source it did not use.
+
+    It said "video confirmed" unconditionally. That became wrong the moment
+    stage 2 started reading transcripts: a cell reading "video confirmed" for a
+    verdict taken from a transcript sends whoever audits it to the wrong place.
+    """
+    payload = {"matches": True, "confidence": 0.9,
+               "criteria_results": [{"criterion": "a", "matches": True}]}
+    assert "transcript confirmed" in gv.verdict_confirms(
+        payload, 0.6, 0.5, evidence="transcript")[1]
+    assert "video confirmed" in gv.verdict_confirms(payload, 0.6, 0.5)[1], \
+        "the default stays 'video' so the video mode reads as it always did"
+
+    denied = {"matches": False, "confidence": 0.9,
+              "criteria_results": [{"criterion": "a", "matches": False}]}
+    assert "transcript did not confirm" in gv.verdict_confirms(
+        denied, 0.6, 0.5, evidence="transcript")[1]

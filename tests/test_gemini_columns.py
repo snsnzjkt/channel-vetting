@@ -33,6 +33,12 @@ class _FakeVerifier:
         self.seen.append(flagged)
         return self._j
 
+    # Stage 2 routes to one of these by GEMINI_STAGE2_MODE. Delegating keeps the
+    # stub's behaviour identical either way, so these tests stay about the
+    # RECORD the verdict produces rather than about which mode produced it.
+    def review_transcripts(self, niche_config, stats, performance, *, flagged):
+        return self.judge(niche_config, stats, performance, flagged=flagged)
+
 
 def _record(monkeypatch, *, columns, verifier=None, off_target=None):
     monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
@@ -238,14 +244,22 @@ def _record_real(monkeypatch, verifier, *, off_target, performance_extra=None):
     )
 
 
-def test_real_verifier_rescues_a_flagged_candidate(monkeypatch, real_verifier):
+def test_real_verifier_rescues_a_flagged_candidate_in_VIDEO_mode(monkeypatch,
+                                                                 real_verifier):
     """
-    End to end: the title gate flags it, both tiers confirm, a row comes out.
+    End to end: the title gate flags it, the video tier confirms, a row comes out.
+
+    Pinned to GEMINI_STAGE2_MODE="video" as of 2026-08-25. That mode is no longer
+    the default — stage 2 reads transcripts now — but it is still reachable and is
+    the way back if transcript summaries turn out to miss the brand-vs-creator
+    signal the visual criteria catch. A supported mode with no end-to-end test is
+    a mode that quietly rots, so this keeps covering it.
 
     The performance dict here carries the REAL keys enrichment now returns, so a
     rename in either direction fails this test rather than silently producing an
     unavailable verdict forever.
     """
+    monkeypatch.setattr(main, "GEMINI_STAGE2_MODE", "video")
     monkeypatch.setattr(gv.HTTP, "post",
                         lambda *a, **k: _Resp(_gemini_body(matches=True, confidence=0.88)))
     record, _ = _record_real(
@@ -260,6 +274,50 @@ def test_real_verifier_rescues_a_flagged_candidate(monkeypatch, real_verifier):
     assert real_verifier.rescued == 1
     assert real_verifier.requests == 1, "video decides; the text tier is off by default"
     assert real_verifier.video_requests == 1
+
+
+def test_real_verifier_rescues_a_flagged_candidate_in_TRANSCRIPT_mode(monkeypatch,
+                                                                      real_verifier):
+    """
+    The same rescue, through the SHIPPING stage-2 mode.
+
+    Two properties matter beyond "a row comes out". The request must be booked as
+    TEXT — booking it as video would charge the 30/run video ceiling for a call
+    that sends no video, and that ceiling is the reason the video mode could only
+    ever cover half the candidates. And the model's `summary` must reach
+    `Relevance Notes`, because informing the human who approves the row is the
+    whole point of this stage.
+    """
+    monkeypatch.setattr(main, "GEMINI_STAGE2_MODE", "transcript")
+    monkeypatch.setattr(gv.transcripts, "fetch",
+                        lambda vid, **kw: "We toured the basement media room and "
+                                          "talked through the seating layout.")
+    body = _gemini_body(matches=True, confidence=0.88)
+    body["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+        "matches": True, "confidence": 0.88, "reason": "on niche",
+        "summary": "A homeowner walking through their own basement media room.",
+        "criteria_results": [{"criterion": "home living or entertainment SPACE",
+                              "matches": True, "evidence": "basement media room"}],
+    })
+    monkeypatch.setattr(gv.HTTP, "post", lambda *a, **k: _Resp(body))
+    record, _ = _record_real(
+        monkeypatch, real_verifier, off_target=main.DROP_OFF_TARGET,
+        performance_extra={
+            "video_titles": ["a"], "video_descriptions": ["d"],
+            "settled_longform": [{"video_id": "vX", "views": 5_000, "duration_s": 900}],
+        })
+    assert record is not None, "a confirmed transcript rescue must produce a row"
+    assert record["Relevance State"] == gv.STATE_RESCUED
+    assert real_verifier.rescued == 1
+    assert real_verifier.requests == 1
+    assert real_verifier.video_requests == 0, (
+        "a transcript review sends no video and must not be charged against "
+        "GEMINI_MAX_VIDEO_REQUESTS_PER_RUN"
+    )
+    assert "basement media room" in record["Relevance Notes"], (
+        "the summary is written for the human who approves the row — it has to "
+        "reach the record"
+    )
 
 
 def test_real_verifier_reads_a_stub_performance_dict_without_crashing(monkeypatch,

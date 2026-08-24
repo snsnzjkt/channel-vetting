@@ -2305,3 +2305,306 @@ were subsequently judged. That is the whole of its 11-row corpus.
   of the other. Lifestyle converts better (§14.18: 51% vs 33% on the paid path)
   and has no measured verdicts at all, which is the worst possible combination.
   Not built — flagged with evidence now instead of a prediction.
+
+---
+
+## 14.21 The cap was refusing rows, not the gates. Raised 30 -> 60.
+
+The 18:40 scheduled run produced nothing, and the reason was not a gate:
+
+```
+  'Home Theater':   28/30 qualified and 0/10 flagged already added today
+  'Lifestyle Sofa': 30/30 qualified and 0/10 flagged already added today
+  Discovery request for 'Lifestyle Sofa': got 50 new candidate(s) (50 backlogged)
+  'Lifestyle Sofa' so far: 0/0 qualified
+```
+
+**Lifestyle had 50 candidates in hand, had already spent 0.50 credits fetching
+them, and had zero headroom to push one.** Home Theater had 2. Both niches were
+capped out by earlier runs the same day.
+
+`DAILY_QUALIFIED_CAP` raised **30 -> 60**, flagged left at 10. This is a
+throughput knob and touches nothing else: no gate, criterion, threshold or score
+moved, so a row admitted at 60 is one that would have been admitted at 30 had it
+arrived earlier in the day. Operator instruction was explicit — more volume, same
+process, *"it will still be manually reviewed before approval"* — so human review
+is the quality gate and the cap is not pretending to be one.
+
+### What the same run also showed, for the record
+
+130 drops, of which **85 (65%) were geography** — `outside_search_zone` 51,
+`no_declared_country` 34. Declared countries seen: IN, NL, RS, AT, ZA, TR. The
+relevance gate dropped **1**. Geography remains the binding constraint and remains
+declined; this change does not touch it.
+
+The scheduled run also uses a **7-day** window by design (`DISCOVERY_DAYS_BACK`),
+not the 90-day one that produced the big sweeps. The workflow comment explains
+why: a wide window is a one-off backlog sweep, and standing 90-day runs re-read
+an already-consumed pool at 100 quota units per keyword.
+
+### Two ceilings still stand above the cap, deliberately
+
+- **Credits.** ~0.20/row for the email lookup, so a fully-filled 60+10 across two
+  niches is ~28 credits/day — over the 200/month ceiling if it ever ran flat out.
+  It will not: actual spend on 2026-08-24 was **0.70**, and the month stands at
+  **10.59 of 200**. The month ledger is the real backstop and it fails closed.
+- **Reviewer attention**, which is what this actually spends. 67 rows were already
+  awaiting review. `rank_pending.py` triages that queue. If the backlog outruns
+  the reviewer, **lower this number rather than tightening a gate** — a gate loses
+  prospects permanently, a cap only defers them.
+
+### Six tests were testing the constant, not the behaviour
+
+Raising the cap failed six tests that hardcoded `30`. Five were behavioural tests
+about the refill loop — "keeps searching until the budget is full", "tops up to
+the cap rather than doubling it" — and they are now expressed against
+`DAILY_QUALIFIED_CAP`, including their fixtures:
+
+- `test_keeps_searching_until_the_qualified_budget_is_full` sizes rows-per-keyword
+  at ~1/8 of the cap, so several keywords are still required whatever the cap is.
+  A fixed `per_keyword` would silently stop testing refill the moment the cap moved.
+- `test_run_niche_fills_the_budget_from_discovery` now supplies `cap + 20`
+  handles. At a fixed 50 it had quietly become supply-bound rather than cap-bound.
+
+The sixth, `test_caps_sum_to_forty`, was a genuine **policy** assertion citing the
+original brief's "~30-40 rows per table per day". It is kept as a policy test at
+the new value rather than deleted, because the number carries a credit and a
+reviewer cost and should fail loudly if it moves by accident.
+
+Suite: **1382 passing**, zero regressions.
+
+---
+
+## 14.22 SHIPPED — the three-stage flow. Stage 2 is a transcript review now.
+
+Operator's stated flow: **1. broad metadata sweep, many records → 2. transcript
+review of 1-2 of the creator's videos → 3. manual approval by the manager.**
+
+Stage 3 being a human is what determines stage 2's job: **inform, don't judge.**
+
+### The change
+
+`verifier.judge` (25 seconds of frames, one video) is replaced as the default by
+`verifier.review_transcripts` (up to 2 whole transcripts, one request) via
+`GEMINI_STAGE2_MODE=transcript`.
+
+**It is request-neutral and still a large gain.** Both cost one request per
+candidate — both transcripts travel in one body rather than one each. But the
+transcript call is TEXT, so it leaves the ceiling that actually binds:
+
+```
+  GEMINI_MAX_VIDEO_REQUESTS_PER_RUN = 30   vs  ~61 candidates reaching stage 2
+  -> video mode could never cover more than half of them
+  -> as text, all ~61 fit inside the 70/run cap
+```
+
+Token cost measured: two real transcripts came to 459 and 1,038 tokens **end to
+end**, against ~1,650 for a 25-second window at `MEDIA_RESOLUTION_LOW`.
+
+| | video mode (was) | transcript mode (now) |
+|---|---|---|
+| evidence | 25s of one video | up to 2 whole videos |
+| requests/candidate | 1 | 1 |
+| ceiling charged | video, 30/run | total only, 70/run |
+| coverage of ~61 candidates | 30 | **61** |
+| output for the manager | a score | **a written summary** |
+
+### What it gives up
+
+The **visual** criteria. "A logo bug throughout", "polished agency-style
+production with no identifiable host", "product B-roll with voiceover" are not
+answerable from a transcript, and the brand-vs-creator veto rests on them.
+`GEMINI_STAGE2_MODE=video` is kept reachable, with its own end-to-end test, as
+the way back if summaries start missing brands.
+
+Judged against each niche's **`text_criteria`**, not `video_criteria` — these are
+text questions, and those lists were rewritten in §14.19 to ask about the SPACE
+rather than the gear, which is the direction the labels support.
+
+### LIVE — and the summaries are the point
+
+Two real channels, free tier, **zero credits, zero video requests**:
+
+**New Record Day** (the AV reviewer §12 built the exclusion to catch)
+> *"This creator runs an audio gear review channel called New Record Day, hosted
+> by Ron, targeting audiophiles and music enthusiasts. The videos consist of
+> in-depth component evaluations, specifically focusing on high-end
+> loudspeakers, technical specifications, and listening impressions."*
+
+**Bricksie** (flagged 88% `toys_and_kids` on titles, 64% on tags)
+> *"The creator shares family and home life content centered around organizing
+> living spaces, house tours, and balancing a massive LEGO collection with
+> everyday family rooms. They talk directly to an audience of hobbyists,
+> families, and home enthusiasts interested in home organization and DIY room
+> usage."*
+
+That second one is a materially better read than "Lego channel", and it is the
+kind of thing only the actual content could have told us.
+
+### THE FINDING THAT MATTERS: stage 2 rescued both, and one is a known Reject
+
+Both candidates were flagged by the keyword gate and **both were rescued**. New
+Record Day is labelled **Rejected** by the reviewer, and §12 added the
+`av_specialist` exclusion specifically to catch it.
+
+So the transcript tier overturned a correct drop. That is consistent with the
+only measurement available for the deciding tier — it confirms nearly everything
+(6/6 Approved, 2/2 Rejected).
+
+**Under this operator's instruction that is acceptable, and it is worth being
+explicit about why.** The goal is volume, stage 3 is a human, and the summary
+told the truth even when the verdict did not: a manager reading *"audio gear
+review channel… high-end loudspeakers, technical specifications"* has exactly
+what they need to reject it in one line. The verdict adds a row; the summary
+makes the row cheap to judge.
+
+What it is NOT is a relevance filter, and it should not be described as one. If
+review load becomes the problem, the lever is `GEMINI_MIN_CRITERIA_RATIO` (1.0
+restores aggregate-only strictness) or turning rescue off — not a new gate.
+
+### Also fixed
+
+`verdict_confirms` said **"video confirmed"** unconditionally. A reviewer cell
+reading that for a verdict taken from a transcript sends whoever audits it to the
+wrong place. The reason string now names the evidence it actually read.
+
+| item | detail |
+|---|---|
+| `gemini_verify.py` | `TRANSCRIPT_SCHEMA`, `build_transcript_review_request`, `_pick_videos`, `review_transcripts`, evidence-naming in `verdict_confirms` |
+| `main.py` | stage 2 routed by `GEMINI_STAGE2_MODE` |
+| `config.py` | `GEMINI_STAGE2_MODE` (transcript), `GEMINI_TRANSCRIPT_VIDEOS` (2) |
+| tests | video-mode end-to-end pinned and kept; transcript-mode twin added asserting 0 video requests and the summary reaching `Relevance Notes` |
+| suite | 1382 -> **1384 passing**, zero regressions |
+
+---
+
+## 14.23 SHIPPED — LAYER 3: video analysis as a fallback, only when the transcript fails
+
+Final flow:
+
+```
+  1. BROAD METADATA SWEEP      free gates + keyword/tag screen, cap 60/niche/day
+          |
+  2. TRANSCRIPT REVIEW         up to 2 whole videos, ONE text request, writes a
+          |                    summary for the manager
+          |--- no captions? (~1 video in 3) ---> 3. VIDEO ANALYSIS
+          |                                         25s clip, visual criteria
+          v                                              |
+  4. MANUAL APPROVAL BY THE MANAGER  <---------------------
+```
+
+### Why the fallback is free to reach
+
+`transcripts.fetch` spends **no Gemini request** when it fails. So a failed layer
+2 costs nothing, and the layer 3 video call is the first spend for that candidate.
+The fallback adds coverage without adding waste:
+
+```
+  candidates reaching stage 2                    ~61
+  transcript available  -> 1 TEXT request        ~41
+  no transcript         -> 1 VIDEO request       ~20
+  -----------------------------------------------------
+  total                                           61   vs run cap 70
+  of which video                                  20   vs video/run cap 30
+```
+
+**Before this, those ~20 candidates reached the manager with no stage-2 evidence
+at all.** Roughly one video in three has captions disabled, so this is a common
+path and not an edge case.
+
+The video criteria are the right instrument here rather than a compromise: with no
+transcript the only evidence is what is on screen, and "a logo bug throughout" or
+"no identifiable host" are exactly what frames answer and text cannot.
+
+### LIVE — and the two layers DISAGREED, which is the finding
+
+Same channel, **Bricksie**, real Gemini, both paths exercised:
+
+| layer | evidence | verdict |
+|---|---|---|
+| **2** transcript | *"family and home life content centered around organizing living spaces, house tours… balancing a massive LEGO collection with everyday family rooms"* | **RESCUED** — `transcript confirmed 0.95` |
+| **3** video (captions forced off) | the clip shows a Lego build | **REFUSED** — `failed a required criterion: not an excluded subject` |
+
+**Bricksie is labelled Rejected by the reviewer.** Layer 3 agreed with him; layer 2
+did not.
+
+This matters because it is direct evidence that **the visual criteria are not
+redundant**. The transcript describes a channel talking *about* home organisation;
+the video shows what the creator is actually *doing*. The §14.12 excluded-subject
+veto caught it on frames and missed it on text.
+
+It is one channel, so it does not overturn anything. But it does two things:
+
+1. **It justifies keeping layer 3 as a real stage** rather than a degraded
+   fallback. On this candidate the fallback path was the more accurate one.
+2. **It qualifies §14.22's decision.** Replacing the video call with a transcript
+   read is right for *informing the manager* — the summary is far more useful —
+   but on this evidence it is more permissive, consistent with the transcript tier
+   also rescuing New Record Day, another known Reject.
+
+Both of those point the same way: **stage 2 adds rows and adds the context to
+judge them quickly; it does not filter.** Which is exactly what the operator asked
+for — volume, with manual approval as the gate — as long as nobody later mistakes
+it for a quality filter.
+
+### If review load becomes the problem
+
+In order of preference, and none of them a new gate:
+1. `GEMINI_MIN_CRITERIA_RATIO=1.0` — aggregate-only strictness, so a partial
+   confirm stops rescuing.
+2. Turn rescue off entirely — stage 2 then only summarises, and the keyword gate's
+   drops stand.
+3. Lower `DAILY_QUALIFIED_CAP` — defers prospects rather than losing them.
+
+### What shipped
+
+| item | detail |
+|---|---|
+| `gemini_verify.py` | layer 3 fallback inside `review_transcripts`, relabelling the verdict so the manager can see which evidence decided it |
+| `config.py` | `GEMINI_VIDEO_FALLBACK` (on) |
+| tests | `test_layer3_fallback.py` (10): fires only on a missing transcript, never when one exists, free to reach, switchable off, and rescue-only survives the extra hop |
+| suite | 1384 -> **1394 passing**, zero regressions |
+
+### 14.23a Video is a fallback, and the startup banner was saying otherwise
+
+Operator restated the constraint: **video analysis is not always on — only when
+the transcript fails.** That is what §14.23 implemented, and an audit confirms it
+by construction:
+
+- **One** place in the codebase issues a video request: `build_video_request`,
+  called from `judge` and nowhere else.
+- `judge` is reachable from exactly **two** production paths:
+  `main.py` when `GEMINI_STAGE2_MODE != "transcript"` (not the default), and the
+  layer 3 fallback inside `review_transcripts`, which is only entered when no
+  transcript was obtained.
+
+So with the shipping defaults, **a candidate with a transcript costs zero video
+requests.**
+
+**But the startup banner was claiming the opposite.** It read
+`video=every candidate` straight off `GEMINI_VIDEO_ALWAYS`, which stopped being
+true when stage 2 became a transcript review:
+
+```
+  BEFORE:  ... free-only=True, video=every candidate, text tier=off ...
+  AFTER:   ... stage 2 = TRANSCRIPT of up to 2 video(s) (text request);
+               video = FALLBACK ONLY, when a video has no captions ...
+```
+
+`GEMINI_VIDEO_ALWAYS` still governs the right thing — whether `judge`, once
+entered, runs video for an unflagged candidate — but the banner was reporting a
+flag instead of describing the flow, and an operator reading it would reasonably
+conclude the pipeline was doing something it is not. It now describes the flow and
+still distinguishes the two modes.
+
+Two tests pin the constraint rather than trusting the audit:
+
+- `test_pipeline_level_a_transcript_means_ZERO_video_requests` drives
+  `process_candidate` end to end with a transcript present and asserts
+  `video_requests == 0`. The verifier-level test covers `review_transcripts` in
+  isolation; this covers the WIRING, because a future change to main's routing
+  could reintroduce an always-on video call without touching `gemini_verify`.
+- `test_the_startup_banner_does_not_claim_video_runs_on_everything` asserts the
+  banner says `FALLBACK ONLY` and never `every candidate` in transcript mode.
+
+Suite: **1396 passing**.

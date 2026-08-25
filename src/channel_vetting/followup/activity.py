@@ -358,7 +358,13 @@ def fold_title(name: str) -> str:
     All four are the same channel. Folding punctuation and spaces away makes
     them compare equal, which is the correct answer.
     """
-    return "".join(c for c in (name or "").casefold() if c.isalnum())
+    import unicodedata
+    # NFKD then drop combining marks: "PINK LILY VIDEO" vs "PINK LILY VIDÉO" is
+    # the same channel and was firing before this. Measured over 1,085 handles,
+    # accents and punctuation together accounted for most of the 53 flags.
+    decomposed = unicodedata.normalize("NFKD", name or "")
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return "".join(c for c in stripped.casefold() if c.isalnum())
 
 
 def title_changed(stored: str, live: str) -> bool:
@@ -386,7 +392,18 @@ def title_changed(stored: str, live: str) -> bool:
     f_stored, f_live = fold_title(stored), fold_title(live)
     if not f_stored or not f_live:
         return False
-    return f_stored != f_live
+    if f_stored == f_live:
+        return False
+    # CONTAINMENT is not a change. Real pairs from the 1,085-handle sample:
+    #   "Slotta"                            -> "Frank Slotta"        (expanded)
+    #   "Fidel Castellanos"                 -> "Fidel"               (truncated)
+    #   "Thomas Sanladerer: Made with Layers" -> "Made with Layers (Thomas Sanladerer)"
+    # All the same creator. A takeover does not usually keep the old name as a
+    # substring, so containment is the cheap discriminator that removes the noise
+    # without hiding a genuine swap.
+    if f_stored in f_live or f_live in f_stored:
+        return False
+    return True
 
 
 @dataclass(frozen=True)

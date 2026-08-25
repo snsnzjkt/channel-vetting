@@ -73,6 +73,18 @@ EXIT_ABORTED = 1
 EXIT_NOTHING_DONE = 2
 
 
+def load_activity_verdicts() -> dict:
+    """
+    handle -> True/False from the sweep cache. A handle ABSENT from the cache is
+    absent from this dict, which is what routes it to Activity Unknown rather
+    than to a verdict — the distinction between "checked and fine" and "not
+    checked" is the whole reason the Unknown buckets exist.
+    """
+    c = load_cache()
+    return {h: (v.get("verdict") == "alive") for h, v in c.items()
+            if v.get("verdict") in ("alive", "gone")}
+
+
 def load_cache() -> dict:
     if FOLLOWUP_ACTIVITY_CACHE.exists():
         return json.loads(FOLLOWUP_ACTIVITY_CACHE.read_text())
@@ -161,21 +173,26 @@ def main() -> int:
     # --- population + free screens ------------------------------------------
     main_rows, follow_rows = legacy.load_population(refresh=args.refresh_population)
     bl = fetch_blocklist()
-    buckets, unjoinable = legacy.free_screen(
-        main_rows, follow_rows, bl, now=now, floor_days=OUTREACH_RESPAM_MIN_DAYS)
+    from collections import Counter
+    from channel_vetting.config import OUTREACH_MAX_TOUCHES
+    from channel_vetting.followup import categorizer as C
 
-    print(f"\nFREE SCREENS  ({len(main_rows)} rows, {OUTREACH_RESPAM_MIN_DAYS}d floor)")
-    for b in legacy.FREE_BUCKETS:
-        print(f"   {b:<22} {len(buckets[b]):>6}")
-    print(f"   unjoinable follow-up rows (forced to Touch Limit): {unjoinable}")
+    cats = legacy.categorize_population(
+        main_rows, follow_rows, bl, now=now,
+        floor_days=OUTREACH_RESPAM_MIN_DAYS, max_touches=OUTREACH_MAX_TOUCHES,
+        activity=load_activity_verdicts())
 
-    survivors = buckets[legacy.B_SURVIVES]
-    by_handle: dict[str, list] = {}
-    for r in survivors:
-        by_handle.setdefault(r.handle, []).append(r)
-    print(f"\n   {len(survivors)} rows -> {len(by_handle)} DISTINCT handles to probe")
-    print(f"   (rows exceed handles because 174 handles are duplicated — the "
-          f"verdict is per handle)")
+    counts = Counter(c for c, _ in cats.values())
+    print(f"\nCATEGORIES  ({len(main_rows)} rows -> {len(cats)} handles, "
+          f"{OUTREACH_RESPAM_MIN_DAYS}d floor)")
+    for cat in C.CATEGORIES:
+        print(f"   {cat:<22} {counts.get(cat, 0):>6}")
+    assert sum(counts.values()) == len(cats), "coverage bug"
+    print(f"   {'':22} {'-'*6}\n   {'TOTAL':<22} {sum(counts.values()):>6}   (invariant holds)")
+
+    to_probe = legacy.needs_paid_signal(cats)
+    by_handle = {h: [] for h in to_probe if not h.startswith("rec:")}
+    print(f"\n   {len(to_probe)} handles still undecided -> need a paid signal")
 
     cache = load_cache()
     todo = [h for h in by_handle if h not in cache]
@@ -187,8 +204,9 @@ def main() -> int:
         return EXIT_NOTHING_DONE
     print(f"\n   this run will probe {n} handles ({n * units_each} free units, {mode})")
     full_pass_units = len(todo) * units_each
+    per_day = max(QUOTA_CEILING - args.reserve, 1)
     print(f"   full remaining pass: {full_pass_units} free units "
-          f"(~{full_pass_units / max(budget, 1):.1f} days at today's reserve)")
+          f"(~{full_pass_units / per_day:.1f} days at {per_day} units/day after the reserve)")
     if not args.confirm:
         print("\n[dry run] nothing called, nothing written. Add --confirm to sweep.")
         return EXIT_OK

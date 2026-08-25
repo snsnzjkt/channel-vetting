@@ -1,22 +1,25 @@
 """
-Tests for followup/legacy.py — the FREE screens.
+Tests for followup/legacy.py + followup/categorizer.py.
 
-The refusal ORDER is the safety property here, not an implementation detail: a
-row that is both suppressed and inactive must read as suppressed, because
-`DNC Blocked` is a decision and `Inactive Channel` is a reviewable bucket.
+These assert through `categorize_population()`, which is the ONE rule. An earlier
+version of this file tested a separate `free_screen()` that computed its own date
+floor and touch count — a second implementation of "may this creator be
+re-contacted" living beside `followup_eligibility()`. That function is gone and
+these tests are the reason it cannot come back: they pin the behaviour to the
+delegated path.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from channel_vetting.followup import categorizer as C
 from channel_vetting.followup import legacy as L
 
 NOW = datetime(2026, 8, 26, tzinfo=timezone.utc)
-FLOOR = 180
+FLOOR, TOUCHES = 180, 2
 
 
 class FakeBlocklist:
-    """Stands in for do_not_contact.Blocklist, matching on all three keys."""
     def __init__(self, handles=(), emails=(), names=()):
         self.h, self.e, self.n = set(handles), set(emails), set(names)
 
@@ -38,115 +41,179 @@ def row(**kw):
     return L.LegacyRow(**base)
 
 
-def screen(rows, follow=(), bl=None):
-    return L.free_screen(list(rows), list(follow), bl or FakeBlocklist(),
-                         now=NOW, floor_days=FLOOR)
+def cat(main, follow=(), bl=None, key="foo", **kw):
+    out = L.categorize_population(list(main), list(follow), bl or FakeBlocklist(),
+                                  now=NOW, floor_days=FLOOR, max_touches=TOUCHES, **kw)
+    return out[key]
 
 
-# --- the coverage invariant --------------------------------------------------
+# --- the single-rule guarantee -----------------------------------------------
 
-def test_every_row_lands_in_exactly_one_bucket():
+def test_free_screen_is_gone_so_the_rule_cannot_diverge():
+    assert not hasattr(L, "free_screen")
+    assert not hasattr(L, "FREE_BUCKETS")
+
+
+def test_the_categoriser_delegates_rather_than_recomputing():
     """
-    The repo's standing rule: 'an excluded row is also an INVISIBLE row unless
-    some other page claims it'. free_screen raises rather than lose a row.
+    No date arithmetic and no touch counting in the categoriser: those come from
+    followup_eligibility() via REASON_TO_CATEGORY.
     """
-    rows = [row(record_id=f"rec{i}", handle=f"h{i}") for i in range(20)]
-    buckets, _ = screen(rows)
-    assert sum(len(v) for v in buckets.values()) == 20
-
-
-def test_a_dropped_row_is_a_hard_error_not_a_silent_loss(monkeypatch):
-    monkeypatch.setattr(L, "FREE_BUCKETS", L.FREE_BUCKETS)
-    # Force the invariant by handing free_screen a row it cannot bucket is not
-    # reachable through the public API, so assert the guard exists instead.
     import inspect
-    assert "coverage bug" in inspect.getsource(L.free_screen)
+    src = inspect.getsource(C.categorize)
+    for forbidden in ("timedelta", "days", "min_days", "max_touches", "len(prior"):
+        assert forbidden not in src, f"categorize() recomputes {forbidden!r}"
 
 
-# --- refusal ORDER ----------------------------------------------------------
+def test_every_ledger_refusal_reason_maps_to_a_category():
+    from channel_vetting.outreach import ledger as LG
+    reasons = {LG.REASON_NO_PRIOR_SEND, LG.REASON_MAX_TOUCHES, LG.REASON_REPLIED,
+               LG.REASON_REPLY_STATE_UNKNOWN, LG.REASON_TOO_SOON, LG.REASON_NOT_QUALIFIED}
+    assert reasons <= set(C.REASON_TO_CATEGORY)
+
+
+def test_an_unmapped_reason_raises_instead_of_falling_through_to_eligible():
+    from channel_vetting.outreach.ledger import FollowUpVerdict
+    with pytest.raises(ValueError, match="unmapped"):
+        C.categorize(FollowUpVerdict(False, "some_new_reason"),
+                     C.Signals(handle="foo"))
+
+
+def test_every_category_is_in_the_ordered_vocabulary():
+    for name, val in vars(C).items():
+        if name.startswith("CAT_"):
+            assert val in C.CATEGORIES, f"{name} missing from CATEGORIES"
+
+
+# --- refusal ORDER -----------------------------------------------------------
 
 def test_dnc_outranks_every_other_refusal():
-    """A suppressed creator who is ALSO unjoinable, unsent and undated is DNC."""
-    r = row(handle="blocked", email="", mail_sent=False, date="")
-    buckets, _ = screen([r], bl=FakeBlocklist(handles=["blocked"]))
-    assert buckets[L.B_DNC] == [r]
-    assert buckets[L.B_NO_EMAIL] == []
+    c, r = cat([row(handle="blocked", email="", mail_sent=False, date="")],
+               bl=FakeBlocklist(handles=["blocked"]), key="blocked")
+    assert c == C.CAT_DNC_BLOCKED
+    assert "no action needed" in r
 
 
 def test_dnc_matches_on_handle_alone():
     """
-    MEASURED: 476 of 560 suppressed legacy creators match by handle and only 84
-    by email. An email-only check — all an Airtable automation can do — misses 85%.
+    MEASURED: of 560 suppressed legacy creators, 476 match by handle and only 84
+    by email. An email-only check misses 85% of them.
     """
-    r = row(handle="onlyhandle", email="notlisted@x.com")
-    buckets, _ = screen([r], bl=FakeBlocklist(handles=["onlyhandle"]))
-    assert buckets[L.B_DNC] == [r]
+    c, _ = cat([row(handle="onlyhandle", email="notlisted@x.com")],
+               bl=FakeBlocklist(handles=["onlyhandle"]), key="onlyhandle")
+    assert c == C.CAT_DNC_BLOCKED
 
 
 def test_dnc_matches_on_name_alone():
-    r = row(handle="clean", email="clean@x.com", name="Suppressed Co")
-    buckets, _ = screen([r], bl=FakeBlocklist(names=["suppressed co"]))
-    assert buckets[L.B_DNC] == [r]
+    c, _ = cat([row(name="Suppressed Co")], bl=FakeBlocklist(names=["suppressed co"]))
+    assert c == C.CAT_DNC_BLOCKED
 
 
-def test_touch_limit_outranks_unresolvable_and_date():
-    r = row(handle="", date="")
-    buckets, _ = screen([r], follow=[row(record_id="f1", handle="", name="Foo")])
-    assert buckets[L.B_TOUCH_LIMIT] == [r]
+def test_a_dead_channel_outranks_the_touch_ceiling():
+    c, _ = cat([row()], [row(record_id="f1")], activity={"foo": False})
+    assert c == C.CAT_INACTIVE
 
 
-# --- the fail-closed rules --------------------------------------------------
+# --- delegated refusals ------------------------------------------------------
 
 def test_no_prior_send_when_mail_sent_is_unticked():
-    """A Date with Mail Sent off is no evidence of touch 1."""
-    buckets, _ = screen([row(mail_sent=False)])
-    assert len(buckets[L.B_NO_PRIOR_SEND]) == 1
+    c, _ = cat([row(mail_sent=False)])
+    assert c == C.CAT_NO_PRIOR_SEND
 
 
-def test_an_unreadable_date_refuses_rather_than_surviving():
-    """
-    Mirrors followup_eligibility()'s 'cannot prove enough time passed'. The
-    dangerous direction is treating an unparseable date as old.
-    """
-    for bad in ["", "not-a-date", "2023-13-45"]:
-        buckets, _ = screen([row(date=bad)])
-        assert len(buckets[L.B_NOT_YET]) == 1, bad
-        assert len(buckets[L.B_SURVIVES]) == 0, bad
+def test_touch_limit_comes_from_the_ledger_not_from_a_local_count():
+    c, r = cat([row()], [row(record_id="f1")], activity={"foo": True})
+    assert c == C.CAT_TOUCH_LIMIT
+    assert "ceiling" in r or "send(s) already" in r
 
 
 def test_a_row_inside_the_floor_is_not_yet_eligible():
-    buckets, _ = screen([row(date="2026-08-01")])   # 25 days
-    assert len(buckets[L.B_NOT_YET]) == 1
+    c, _ = cat([row(date="2026-08-01")], activity={"foo": True})
+    assert c == C.CAT_NOT_YET
 
 
-def test_a_row_past_the_floor_survives():
-    buckets, _ = screen([row(date="2023-07-12")])   # 1140 days
-    assert len(buckets[L.B_SURVIVES]) == 1
+def test_boundary_at_the_floor():
+    older = (NOW - timedelta(days=181)).strftime("%Y-%m-%d")
+    newer = (NOW - timedelta(days=179)).strftime("%Y-%m-%d")
+    assert cat([row(date=older)], activity={"foo": True})[0] != C.CAT_NOT_YET
+    assert cat([row(date=newer)], activity={"foo": True})[0] == C.CAT_NOT_YET
 
 
-def test_boundary_exactly_at_the_floor_is_refused():
-    """< floor refuses, so exactly 180 days must survive and 179 must not."""
-    from datetime import timedelta
-    b1, _ = screen([row(date=(NOW - timedelta(days=180)).strftime("%Y-%m-%d"))])
-    b2, _ = screen([row(date=(NOW - timedelta(days=179)).strftime("%Y-%m-%d"))])
-    assert len(b1[L.B_SURVIVES]) == 1
-    assert len(b2[L.B_NOT_YET]) == 1
+def test_an_unreadable_date_refuses_rather_than_becoming_eligible():
+    for bad in ["", "not-a-date", "2023-13-45"]:
+        c, _ = cat([row(date=bad)], activity={"foo": True})
+        assert c != C.CAT_FOLLOW_UP, bad
+
+
+# --- the unknowns never read as eligible -------------------------------------
+
+def test_no_reply_history_is_reply_unknown_not_follow_up_needed():
+    """
+    The legacy tables have no Reply State column, so 'did not reply' is unproven.
+    """
+    c, r = cat([row()], activity={"foo": True}, relevance={"foo": True})
+    assert c == C.CAT_REPLY_UNKNOWN
+    assert "unproven" in r
+
+
+def test_unchecked_activity_is_its_own_bucket_not_eligible():
+    c, r = cat([row()], relevance={"foo": True})
+    assert c != C.CAT_FOLLOW_UP
+    assert "not a judgement" in r or "unproven" in r
+
+
+def test_follow_up_needed_requires_positive_proof_on_every_axis():
+    """Reachable only when reply, activity and relevance are all established."""
+    from channel_vetting.outreach.ledger import FollowUpVerdict
+    v = FollowUpVerdict(True, "granted", touch_number=2, detail="1140d since touch 1")
+    c, _ = C.categorize(v, C.Signals(handle="foo", reply_known=True,
+                                     channel_alive=True, relevant=True))
+    assert c == C.CAT_FOLLOW_UP
+    # remove any one axis and it is no longer actionable
+    for kw in ({"reply_known": False}, {"channel_alive": None}, {"relevant": None},
+               {"relevant": False}):
+        base = {"handle": "foo", "reply_known": True, "channel_alive": True,
+                "relevant": True}
+        base.update(kw)
+        assert C.categorize(v, C.Signals(**base))[0] != C.CAT_FOLLOW_UP, kw
+
+
+# --- monotonicity ------------------------------------------------------------
+
+@pytest.mark.parametrize("terminal", sorted(C.TERMINAL))
+def test_a_terminal_category_is_never_demoted_to_follow_up_needed(terminal):
+    """
+    Idempotence is not the property that matters: the INPUTS change every run, so
+    a half-failed read could otherwise re-open someone already filed as
+    suppressed or replied.
+    """
+    from channel_vetting.outreach.ledger import FollowUpVerdict
+    v = FollowUpVerdict(True, "granted", detail="ok")
+    c, r = C.categorize(v, C.Signals(handle="foo", reply_known=True,
+                                     channel_alive=True, relevant=True),
+                        previous=terminal)
+    assert c == terminal
+    assert "terminal" in r
+
+
+def test_a_non_terminal_previous_category_does_not_stick():
+    from channel_vetting.outreach.ledger import FollowUpVerdict
+    v = FollowUpVerdict(True, "granted", detail="ok")
+    c, _ = C.categorize(v, C.Signals(handle="foo", reply_known=True,
+                                     channel_alive=True, relevant=True),
+                        previous=C.CAT_ACTIVITY_UNKNOWN)
+    assert c == C.CAT_FOLLOW_UP
 
 
 # --- the touch-2 join -------------------------------------------------------
 
 def test_join_on_handle():
-    m = row(record_id="m1", handle="samehandle")
-    f = row(record_id="f1", handle="samehandle", name="Different Name")
+    m, f = row(record_id="m1", handle="samehandle"), row(record_id="f1", handle="samehandle")
     matched, misses = L.touch2_record_ids([m], [f])
     assert matched == {"m1"} and misses == 0
 
 
 def test_join_falls_back_to_name_when_the_handle_is_missing():
-    """
-    22 of 1,054 follow-up rows joined only on name. The name index exists for
-    the recorded rename case (@Newrecordday2013 -> @newrecordday).
-    """
     m = row(record_id="m1", handle="newhandle", name="New Record Day")
     f = row(record_id="f1", handle="", name="new record  day")
     matched, misses = L.touch2_record_ids([m], [f])
@@ -154,10 +221,6 @@ def test_join_falls_back_to_name_when_the_handle_is_missing():
 
 
 def test_an_unjoinable_followup_row_is_counted_not_swallowed():
-    """
-    MEASURED: 9 of 1,054 do not join. A miss reads touch 1 instead of 2, which
-    is a third cold email — so it must surface as a number.
-    """
     matched, misses = L.touch2_record_ids(
         [row(record_id="m1", handle="a", name="A")],
         [row(record_id="f1", handle="zzz", name="Unknown Co")])
@@ -165,11 +228,49 @@ def test_an_unjoinable_followup_row_is_counted_not_swallowed():
 
 
 def test_a_duplicated_handle_marks_every_copy_at_touch_two():
-    """
-    174 handles appear more than once. One follow-up row must mark ALL rows for
-    that handle, or a duplicate copy stays wrongly eligible.
-    """
-    m1 = row(record_id="m1", handle="dup", name="Dup")
-    m2 = row(record_id="m2", handle="dup", name="Dup")
-    matched, _ = L.touch2_record_ids([m1, m2], [row(record_id="f1", handle="dup", name="Dup")])
+    """174 handles are duplicated; one follow-up row must mark all copies."""
+    rows = [row(record_id="m1", handle="dup"), row(record_id="m2", handle="dup")]
+    matched, _ = L.touch2_record_ids(rows, [row(record_id="f1", handle="dup")])
     assert matched == {"m1", "m2"}
+
+
+def test_one_verdict_per_handle_even_with_duplicate_rows():
+    out = L.categorize_population(
+        [row(record_id="m1", handle="dup"), row(record_id="m2", handle="dup")],
+        [], FakeBlocklist(), now=NOW, floor_days=FLOOR, max_touches=TOUCHES)
+    assert list(out) == ["dup"]
+
+
+def test_a_handle_less_row_still_gets_a_bucket():
+    out = L.categorize_population([row(record_id="m9", handle="")], [], FakeBlocklist(),
+                                  now=NOW, floor_days=FLOOR, max_touches=TOUCHES)
+    assert out["rec:m9"][0] == C.CAT_UNRESOLVABLE
+
+
+# --- the store ---------------------------------------------------------------
+
+def test_the_legacy_store_refuses_to_be_used_for_writes():
+    """It must never reach claim() — the legacy tables are not the Outreach Log."""
+    store = L.LegacyLedgerStore([row()], [])
+    for meth in ("find_by_key", "create_claim", "patch", "count_claimed_on", "find_stranded"):
+        with pytest.raises(NotImplementedError):
+            getattr(store, meth)("x")
+
+
+def test_the_store_emits_one_sent_row_per_recorded_touch():
+    store = L.LegacyLedgerStore([row()], [])
+    assert len(store.find_sent_for_channel("foo")) == 1
+    store2 = L.LegacyLedgerStore([row()], [row(record_id="f1")])
+    assert len(store2.find_sent_for_channel("foo")) == 2
+
+
+def test_an_unsent_row_contributes_no_touch():
+    store = L.LegacyLedgerStore([row(mail_sent=False)], [])
+    assert store.find_sent_for_channel("foo") == []
+
+
+def test_needs_paid_signal_selects_only_the_unknown_buckets():
+    cats = {"a": (C.CAT_REPLY_UNKNOWN, ""), "b": (C.CAT_DNC_BLOCKED, ""),
+            "c": (C.CAT_ACTIVITY_UNKNOWN, ""), "d": (C.CAT_TOUCH_LIMIT, ""),
+            "e": (C.CAT_FOLLOW_UP, "")}
+    assert sorted(L.needs_paid_signal(cats)) == ["a", "c"]

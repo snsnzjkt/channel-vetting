@@ -217,6 +217,57 @@ def get_queued_prospects(table_name: str) -> list[dict]:
     return rows
 
 
+def get_followup_queue(table_name: str) -> list[dict]:
+    """
+    Prospect rows a human has TICKED for a follow-up, read server-side.
+
+    This is `get_queued_prospects()`'s sibling for touch 2, and the differences
+    are the interesting part:
+
+      * it reads `Follow-up Requested At`, not `Send Requested At`. Two separate
+        stamps, so a first-touch queue and a follow-up queue can never be
+        confused for one another, and de-queueing one does not touch the other.
+
+      * it does NOT require `Status = 'Approved'`. After touch 1 the row reads
+        `Contacted`, and filtering on either value would be wrong: `Approved`
+        excludes every genuine follow-up candidate, and `Contacted` excludes a
+        row whose `mark_contacted()` PATCH failed after a successful send — a
+        documented case, see that function. The authoritative evidence of a
+        first touch is a `Sent` ledger row, which `followup_eligibility()`
+        precondition 3 checks. The ledger is the truth; `Status` is a
+        consequence.
+
+      * it requires `Reply State = 'No Reply'` EXACTLY. A blank or an
+        unrecognised value is excluded here and refused again by
+        `followup_eligibility()` rule 4. Defence in depth, the same shape as
+        `SENDABLE_QUALIFICATION` being both a formula clause and a constant
+        check: this filter is a hand-built `filterByFormula` and a typo in one
+        fails OPEN.
+
+    `!= ""` on the dateTime, NOT `!= BLANK()`. Measured live 2026-08-14 on this
+    base: `!= BLANK()` matched all 47 rows on an empty dateTime where `!= ""`
+    correctly matched 0. Had that shipped in `get_queued_prospects()` it would
+    have emailed 47 creators nobody queued.
+
+    Raises `LedgerUnavailable` rather than returning a partial page, for the same
+    reason `get_queued_prospects()` does.
+    """
+    formula = (
+        "AND("
+        f"{{Qualification}} = '{_quote_formula_value(SENDABLE_QUALIFICATION)}',"
+        ' {Follow-up Requested At} != "",'
+        " {Email} != '',"
+        " {Outreach Ineligible Reason} = '',"
+        f" {{Reply State}} = '{_quote_formula_value(REPLY_NONE)}'"
+        ")"
+    )
+    rows = _select(table_name, formula, what=f"get_followup_queue({table_name})")
+    # Oldest request first, matching get_queued_prospects: a row that has been
+    # waiting must not be starved by a fresher tick every run.
+    rows.sort(key=lambda r: (r.get("fields", {}) or {}).get("Follow-up Requested At") or "")
+    return rows
+
+
 def mark_contacted(table_name: str, record_id: str) -> bool:
     """
     Flip a prospect row to Contacted after a successful send.

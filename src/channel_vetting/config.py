@@ -683,8 +683,50 @@ OUTREACH_LEASE_STALE_MINUTES = int(os.getenv("OUTREACH_LEASE_STALE_MINUTES", 60)
 # a minimum age and a hard ceiling on total touches — prior Sent rows are the
 # counter, so it cannot be reset by editing a field. A follow-up cadence with
 # no ceiling is indistinguishable from spam.
-OUTREACH_RESPAM_MIN_DAYS = int(os.getenv("OUTREACH_RESPAM_MIN_DAYS", 90))
 OUTREACH_MAX_TOUCHES = int(os.getenv("OUTREACH_MAX_TOUCHES", 2))
+
+# --- Follow-up categorization (FOLLOWUP_PLAN.md) ------------------------------
+# The legacy-population triage. Every number here cites its measurement, per
+# this file's convention that a constant is not a guess.
+
+# D2, decided 2026-08-26: a FLOOR, not a window. MEASURED the same day over
+# tblFDvQiElfy7sER7: zero rows fall in the 6-8 month band the request named —
+# 11,663 of 11,666 are 18 months+, median 37 months. So the floor admits the
+# whole population on age and the other gates do the real work.
+OUTREACH_RESPAM_MIN_DAYS = int(os.getenv("OUTREACH_RESPAM_MIN_DAYS", 180))
+
+# Defaults to MAX_DAYS_SINCE_LAST_UPLOAD (365, pipeline.py) ON PURPOSE. Two
+# constants for "is this channel dead?" would let discovery and follow-up
+# disagree about the same channel and nobody would notice. Diverge only with a
+# measurement and a comment saying why.
+FOLLOWUP_INACTIVE_MAX_DAYS = int(os.getenv("FOLLOWUP_INACTIVE_MAX_DAYS", 365))
+
+# Free YouTube units held back for discovery on any day the activity sweep runs.
+# MEASURED from quota_log.json 2026-08-20..25: peak daily discovery spend 5,400,
+# mean of non-zero days 2,707. Reserving the PEAK means the sweep never starves
+# the pipeline's primary function; it also means the sweep gets ~2,600 units/day
+# out of QUOTA_CEILING 8,000, so a 9,991-channel first pass at 2 units each is
+# ~8 days rather than the 2.5 a whole-ceiling calculation suggests.
+FOLLOWUP_ACTIVITY_QUOTA_RESERVE = int(os.getenv("FOLLOWUP_ACTIVITY_QUOTA_RESERVE", 5400))
+
+# Hard per-run channel cap, checked INDEPENDENTLY of the quota log. quota_tracker
+# fails OPEN on a truncated log (it catches JSONDecodeError and reads as "0 spent
+# today"), so an 11k-iteration loop that trusts only that guard can spend the
+# full daily allowance on a bad day. This cap does not consult the log.
+FOLLOWUP_ACTIVITY_CHANNELS_PER_RUN = int(os.getenv("FOLLOWUP_ACTIVITY_CHANNELS_PER_RUN", 1200))
+
+# Consecutive probe failures before the sweep halts. get_channel_stats() returns
+# None for a 404, a 403 quotaExceeded and an auth failure alike, so a run cannot
+# tell them apart from the return value. A breaker is how a quota wall stops the
+# loop instead of silently marking thousands of live channels unreadable.
+FOLLOWUP_ACTIVITY_FAILURE_BREAKER = int(os.getenv("FOLLOWUP_ACTIVITY_FAILURE_BREAKER", 25))
+
+# Opt-in, following GEMINI_ENABLED and VIDEO_TOPIC_GATE: this is the largest new
+# consumer of a shared free resource in the repo, so the operator turns it on.
+FOLLOWUP_ACTIVITY_SWEEP_ENABLED = env_flag("FOLLOWUP_ACTIVITY_SWEEP_ENABLED", default=False)
+
+FOLLOWUP_POPULATION_CACHE = data_path("followup_population.json")
+FOLLOWUP_ACTIVITY_CACHE = data_path("followup_activity.json")
 
 # --- Outreach mail transport ---
 # No defaults: --send refuses to start without these, which turns "we forgot

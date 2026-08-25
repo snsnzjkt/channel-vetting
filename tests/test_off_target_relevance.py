@@ -18,8 +18,8 @@ measurements and a synthetic fixture would not have caught what did that:
     reading, and "High-quality Tech, Unboxing, Reviews" is the bio of a real
     hi-fi channel (OCM Reviews).
 """
-import main
-from niches import NICHES
+from channel_vetting import pipeline
+from channel_vetting.discovery.niches import NICHES
 
 HT = NICHES["Home Theater"]
 LS = NICHES["Lifestyle Sofa"]
@@ -52,57 +52,57 @@ def _titles(*specs):
 
 def test_a_fortnite_channel_is_rejected():
     """@grxnt, in the Home Theater table: 76% of titles are Fortnite."""
-    reason, detail = main.off_target_reason(
+    reason, detail = pipeline.off_target_reason(
         ALL_CATEGORIES, "I make Fortnite family friendly content and live streams.",
         _titles(("NEW FORTNITE *SEASON 4* UPDATE RIGHT NOW!! NEW MAP, BATTLE PASS", 38),
                 ("Some other video", 12)),
     )
-    assert reason == main.DROP_OFF_TARGET
+    assert reason == pipeline.DROP_OFF_TARGET
     assert "gaming" in detail
 
 
 def test_a_pc_building_channel_is_rejected():
     """@dankamyouknow: 86% PC builds. The brief names PC hardware explicitly."""
-    reason, _ = main.off_target_reason(
+    reason, _ = pipeline.off_target_reason(
         ALL_CATEGORIES, "Collab: dankamcontact@gmail.com",
         _titles(("Building a DOUBLE DECKER PC in the Thermaltake Capo X!", 43),
                 ("Watch until the end", 7)),
     )
-    assert reason == main.DROP_OFF_TARGET
+    assert reason == pipeline.DROP_OFF_TARGET
 
 
 def test_a_phone_and_camera_reviewer_is_rejected():
     """@paulantill was IN the Home Theater table reviewing Pixels and DJI gear.
     The brief's own bad-match example."""
-    reason, _ = main.off_target_reason(
+    reason, _ = pipeline.off_target_reason(
         ALL_CATEGORIES, "Tech and camera reviews",
         _titles(("Google Pixel 11 Pro Fold is $200 Cheaper vs Galaxy Z Fold 8", 21),
                 ("DJI Osmo Pocket 4P vs Insta360 Luna Ultra Zoom", 15),
                 ("A home cinema video", 14)),
     )
-    assert reason == main.DROP_OFF_TARGET
+    assert reason == pipeline.DROP_OFF_TARGET
 
 
 def test_an_ai_and_crypto_channel_is_rejected():
     """@cryptonfttigers_spoton reached the Home Theater table."""
-    reason, _ = main.off_target_reason(
+    reason, _ = pipeline.off_target_reason(
         ALL_CATEGORIES, "#1 Crypto Youtuber, NFT TIGERS SPOTON",
         _titles(("Fetra AI Review 2026: Best AI Automation Platform Demo", 17),
                 ("Unrelated upload", 33)),
     )
-    assert reason == main.DROP_OFF_TARGET
+    assert reason == pipeline.DROP_OFF_TARGET
 
 
 def test_a_generic_gadget_channel_is_rejected():
     """@banetech: treadmills, dehumidifiers, earbuds, phone cases. Its own bio
     says "sharing my experiences about technology"."""
-    reason, _ = main.off_target_reason(
+    reason, _ = pipeline.off_target_reason(
         ALL_CATEGORIES, "Simply sharing my experiences about technology.",
         _titles(("UREVO Strol 2E Pro Review: Smart Treadmill for Working From Home?", 5),
                 ("Southern Humidity CRUSHED: Why You Need This Dehumidifier", 5),
                 ("Neutral upload title", 40)),
     )
-    assert reason == main.DROP_OFF_TARGET
+    assert reason == pipeline.DROP_OFF_TARGET
 
 
 # --- the persona rule, and why it has to exist ---------------------------
@@ -114,12 +114,12 @@ def test_a_gaming_bio_convicts_a_channel_the_share_alone_would_miss():
     low end the title share alone cannot separate this from a real hi-fi
     channel — see the next test, which scores almost the same and is KEPT.
     """
-    reason, detail = main.off_target_reason(
+    reason, detail = pipeline.off_target_reason(
         ALL_CATEGORIES, "I post the most up to date money glitches on games such as Forza Horizon 5",
         _titles(("*LIVE* Clearing House on Rainbow Six Siege", 2),
                 ("Some driving video", 48)),
     )
-    assert reason == main.DROP_OFF_TARGET
+    assert reason == pipeline.DROP_OFF_TARGET
     assert "bio says" in detail
 
 
@@ -130,7 +130,7 @@ def test_a_real_hifi_channel_is_rescued_at_the_same_off_target_score():
     on-target share is 0.60. This single test is the reason on-target terms
     exist, and the reason they rescue rather than admit.
     """
-    reason, _ = main.off_target_reason(
+    reason, _ = pipeline.off_target_reason(
         HT, "High-quality Tech, Unboxing, Reviews, Comparisons.",
         _titles(("Budget Soundbar with Premium Atmos? Ultimea X40 Tested", 30),
                 ("This Tiny DAC Made My Phone Sound Better - Fosi Audio MD3", 17),
@@ -149,7 +149,7 @@ def test_a_prospect_with_no_recognisable_vocabulary_is_kept():
     the on-target list either, and that must not matter: the gate needs positive
     evidence of being something ELSE.
     """
-    reason, _ = main.off_target_reason(
+    reason, _ = pipeline.off_target_reason(
         HT, "House design and small home ideas.",
         _titles(("This Small House Will Make You Fall in Love Instantly!", 25),
                 ("Stop Overpaying for Space You Never Use", 25)),
@@ -159,8 +159,8 @@ def test_a_prospect_with_no_recognisable_vocabulary_is_kept():
 
 def test_a_channel_with_no_titles_is_kept():
     """Absent data never disqualifies — the pipeline's standing rule."""
-    assert main.off_target_reason(HT, "gamer playing games all day", [])[0] is None
-    assert main.off_target_reason(HT, "", None)[0] is None
+    assert pipeline.off_target_reason(HT, "gamer playing games all day", [])[0] is None
+    assert pipeline.off_target_reason(HT, "", None)[0] is None
 
 
 def test_a_niche_without_rescue_vocabulary_disables_the_gate():
@@ -170,7 +170,7 @@ def test_a_niche_without_rescue_vocabulary_disables_the_gate():
     to. Disabled is the safe reading of a missing key.
     """
     bare = {k: v for k, v in HT.items() if k != "on_target_terms"}
-    reason, _ = main.off_target_reason(
+    reason, _ = pipeline.off_target_reason(
         bare, "gamer", _titles(("FORTNITE BATTLE PASS", 50)))
     assert reason is None
 
@@ -191,12 +191,12 @@ def test_a_dedicated_hifi_reviewer_is_now_DROPPED_for_home_theater():
     expertise. A budget hi-fi reviewer is the wrong creator for that, however
     on-topic the vocabulary looks to an engineer.
     """
-    reason, detail = main.off_target_reason(
+    reason, detail = pipeline.off_target_reason(
         HT, "Hi-Fi on a budget",
         _titles(("Why Waste your Money on Expensive Speakers?", 25),
                 ("An Excellent, Reliable CD-Player for Audiophiles!", 25)),
     )
-    assert reason == main.DROP_OFF_TARGET
+    assert reason == pipeline.DROP_OFF_TARGET
     assert "av_specialist" in detail
 
 
@@ -210,7 +210,7 @@ def test_lifestyle_channels_are_untouched():
         ("Interior designer", "House Tour - Renovating in Point Grey Vancouver VLOG"),
         ("Mum of two", "cozy girl morning routine, decorating my apartment"),
     ):
-        assert main.off_target_reason(LS, bio, [title] * 50)[0] is None
+        assert pipeline.off_target_reason(LS, bio, [title] * 50)[0] is None
 
 
 # --- placement, which is a credit-safety property ------------------------
@@ -223,7 +223,7 @@ def test_the_relevance_gate_runs_before_the_paid_email_chain():
     ORDER here is the feature, not the gate alone.
     """
     import inspect
-    src = inspect.getsource(main.process_candidate)
+    src = inspect.getsource(pipeline.process_candidate)
     assert src.index("off_target_reason(") < src.index("resolve_email_with_source"), (
         "the relevance gate must run BEFORE the paid email chain"
     )
@@ -233,11 +233,11 @@ def test_the_relevance_gate_runs_before_the_longform_paging():
     """The other expensive step: confirming 30 non-Shorts uploads can page for
     2 quota units a page."""
     import inspect
-    src = inspect.getsource(main.process_candidate)
+    src = inspect.getsource(pipeline.process_candidate)
     assert src.index("off_target_reason(") < src.index("count_longform_in_older_videos")
 
 
 def test_an_off_target_drop_is_cached_as_a_durable_rejection():
     """Not transient, so the creator is excluded server-side next run and the
     0.01 discovery credit is never paid for them twice."""
-    assert main.DROP_OFF_TARGET not in main.TRANSIENT_DROP_REASONS
+    assert pipeline.DROP_OFF_TARGET not in pipeline.TRANSIENT_DROP_REASONS

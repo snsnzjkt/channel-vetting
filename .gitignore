@@ -1,42 +1,52 @@
+# --- Secrets ---
 .env
-search_cache.json
-quota_log.json
-credit_log.json
-rejected_handles.json*
-external_handles_cache.json*
-venv/
+
+# --- Machine-local runtime state ---
+# Everything the pipeline writes at runtime lives under data/ (see
+# src/channel_vetting/core/paths.py). None of it belongs in a PUBLIC repo:
+#
+#   - Ledgers (quota_log, credit_log, gemini_log) are per-machine counters.
+#     Committing them merges two machines' spend into one nonsense total, and
+#     the credit ledger is real money.
+#   - Caches (search_cache, external_handles_cache, transcript_cache,
+#     video_topics_cache, metadata_screen_cache) are regenerable.
+#   - gemini_cache, backtest_results and outreach_preview/ hold CREATOR PII —
+#     names, model-written reasoning about named people, and in a
+#     --send-configured tree real email addresses.
+#
+# Ignored WHOLESALE rather than file by file: a state file added later is then
+# ignored by default, instead of being one forgotten commit away from being
+# published. Only the .gitkeep is tracked, so a fresh clone has the directory.
+data/*
+!data/.gitkeep
+
+# --- Python ---
 .venv/
+venv/
 __pycache__/
 *.pyc
-.claude
-CLAUDE.md
-.superpowers
-\superpowers
-docs
+.pytest_cache/
+*.egg-info/
+build/
+dist/
 
-# This is a pure-Python project with no package.json. Keep npm artefacts out
-# in case a stray install ever drops them here.
-node_modules/
-package-lock.json
+# --- Local-only docs ---
+# Plans, runbooks, audits and TODOs are working notes for whoever is running
+# this, not part of the published project. README.md is the only tracked .md.
+docs/
+
+# --- Agent tooling ---
+# .agents/ holds VENDORED third-party skills. skills-lock.json is tracked and
+# records the source and content hash of each, so they are re-fetchable — the
+# same split as a lockfile without node_modules.
+.agents/
+.claude/
+CLAUDE.md
+.superpowers/
 .gstack/
 
-# Rendered dry-run email previews. Contain real creator names, and in a
-# --send-configured tree real addresses — creator PII that must not be
-# committed. Same reasoning as search_cache.json / quota_log.json.
-outreach_preview/
-
-# Gemini relevance-verification state. gemini_cache.json holds model-generated
-# text ABOUT NAMED CREATORS (the reason and per-criterion evidence for each
-# verdict) — the same class of content as outreach_preview/, and this repo is
-# public. gemini_log.json is a request counter, same shape as quota_log.json.
-gemini_log.json*
-gemini_cache.json*
-
-# Backtest run artefact. Holds creator names and reviewer verdicts —
-# same creator-PII reasoning as outreach_preview/. Regenerate with
-# `python backtest_relevance.py`.
-backtest_results.json*
-run_metrics.jsonl
-video_topics_cache.json
-transcript_cache.json
-metadata_screen_cache.json
+# --- Node ---
+# Pure-Python project with no package.json. Keep npm artefacts out in case a
+# stray install ever drops them here.
+node_modules/
+package-lock.json

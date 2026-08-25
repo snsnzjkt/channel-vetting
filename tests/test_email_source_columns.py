@@ -13,8 +13,8 @@ email-less rows in the base: influencers.club answers "not found" for 7 of them
 and "invalid or expired" for 1 — genuinely absent data, not a mapping bug, and
 exactly what these columns make legible.
 """
-import main
-from influencers import InfluencersClient, null_client
+from channel_vetting import pipeline
+from channel_vetting.enrichment.email_influencers import InfluencersClient, null_client
 
 
 class _Resp:
@@ -120,18 +120,18 @@ def test_state_never_describes_a_previous_channel(monkeypatch):
 def test_the_miss_note_prefers_the_vendors_reason(monkeypatch):
     client = InfluencersClient()
     client._last_email_note = "not_found"
-    assert main._email_miss_note(client) == "none found (not_found)"
+    assert pipeline._email_miss_note(client) == "none found (not_found)"
 
 
 def test_the_miss_note_still_says_something_with_no_vendor_reason():
     """An empty Email Source beside an empty Email is the ambiguity these
     columns exist to remove."""
-    assert main._email_miss_note(null_client()) == "none found (all 5 steps ran)"
+    assert pipeline._email_miss_note(null_client()) == "none found (all 5 steps ran)"
 
 
 def test_the_miss_note_tolerates_a_client_without_the_attribute():
     """browser_email's null scraper and any older stand-in must not crash it."""
-    assert main._email_miss_note(object()) == "none found (all 5 steps ran)"
+    assert pipeline._email_miss_note(object()) == "none found (all 5 steps ran)"
 
 
 # --- process_candidate wiring ---------------------------------------------
@@ -140,7 +140,7 @@ def test_the_miss_note_tolerates_a_client_without_the_attribute():
 # change to the enrichment contract breaks one set of stubs and not two.
 
 from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_stats
-from search_zones import ZONE_CORE
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 class _Enricher:
@@ -151,15 +151,15 @@ class _Enricher:
 
 
 def _record(monkeypatch, *, email, source, columns, enricher=None):
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance",
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance",
                         lambda cid, pl: _stub_performance())
-    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source",
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source",
                         lambda *a, **k: (email, source, None))
-    monkeypatch.setattr(main, "table_has_field", lambda table, field: field in columns)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
-    record, _ = main.process_candidate(
+    monkeypatch.setattr(pipeline, "table_has_field", lambda table, field: field in columns)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    record, _ = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None,
@@ -172,15 +172,15 @@ def _record(monkeypatch, *, email, source, columns, enricher=None):
 
 def test_the_email_source_is_written_when_the_column_exists(monkeypatch):
     record = _record(monkeypatch, email="a@b.com",
-                     source=main.EMAIL_SOURCE_REPEATED, columns={"Email Source"})
-    assert record["Email Source"] == main.EMAIL_SOURCE_REPEATED
+                     source=pipeline.EMAIL_SOURCE_REPEATED, columns={"Email Source"})
+    assert record["Email Source"] == pipeline.EMAIL_SOURCE_REPEATED
 
 
 def test_nothing_is_written_when_the_column_does_not_exist_yet(monkeypatch):
     """push_record rejects the WHOLE record for one unknown field, so an absent
     column must be a no-op rather than an outage — the Handle rule."""
     record = _record(monkeypatch, email="a@b.com",
-                     source=main.EMAIL_SOURCE_REPEATED, columns=set())
+                     source=pipeline.EMAIL_SOURCE_REPEATED, columns=set())
     assert "Email Source" not in record
     assert "Email Type" not in record
 
@@ -189,12 +189,12 @@ def test_the_email_type_is_written_only_for_the_influencers_step(monkeypatch):
     """The other four sources have no concept of a type, so it stays blank for
     them rather than being guessed at."""
     vendor = _record(monkeypatch, email="a@b.com",
-                     source=main.EMAIL_SOURCE_INFLUENCERS,
+                     source=pipeline.EMAIL_SOURCE_INFLUENCERS,
                      columns={"Email Type"}, enricher=_Enricher("other"))
     assert vendor["Email Type"] == "other"
 
     scraped = _record(monkeypatch, email="a@b.com",
-                      source=main.EMAIL_SOURCE_BROWSER,
+                      source=pipeline.EMAIL_SOURCE_BROWSER,
                       columns={"Email Type"}, enricher=_Enricher("other"))
     assert scraped["Email Type"] == ""
 

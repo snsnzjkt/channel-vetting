@@ -14,8 +14,8 @@ would then remove.
 """
 import re
 
-import config
-import niches
+from channel_vetting import config
+from channel_vetting.discovery import niches
 
 
 def _excluded_vocab(category):

@@ -3,7 +3,7 @@ import re
 
 
 def test_today_iso_format():
-    from prospect_day import today_iso
+    from channel_vetting.core.prospect_day import today_iso
 
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", today_iso())
 
@@ -13,7 +13,7 @@ def test_uses_configured_zone_not_host_local(monkeypatch):
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    import prospect_day
+    from channel_vetting.core import prospect_day
 
     # 2026-08-08 02:00 UTC is still 2026-08-07 (22:00) in Toronto, and is
     # already 2026-08-08 (10:00) on the UTC+8 dev machine. Only the

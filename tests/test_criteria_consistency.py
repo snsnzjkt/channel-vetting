@@ -17,8 +17,8 @@ standing in another.
 
 This test is the guard for the general case, not just that one term.
 """
-import config
-import niches
+from channel_vetting import config
+from channel_vetting.discovery import niches
 
 
 def _criteria_text(cfg, key):
@@ -48,7 +48,7 @@ def test_no_niche_praises_vocabulary_it_also_excludes():
             # A criterion flagged `names_exclusions` exists to NAME excluded
             # vocabulary so the model can rule it out. Mentioning "action figure"
             # there is the opposite of endorsing it, so it is skipped — and the
-            # intent is declared in niches.py rather than guessed from wording,
+            # intent is declared in discovery/niches.py rather than guessed from wording,
             # because guessing is how this class of bug started.
             positives = [c for c in (cfg.get(key) or [])
                          if not c.get("names_exclusions")]

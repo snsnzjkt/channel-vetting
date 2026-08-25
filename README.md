@@ -5,7 +5,7 @@ channels into Airtable for human review.
 
 ## How it works
 
-The pipeline runs once per niche (see `NICHES` in `main.py`), each niche
+The pipeline runs once per niche (see `NICHES` in `pipeline.py`), each niche
 writing to its own Airtable table, and is bounded by two daily budgets so a
 weak day can't flood a table with below-criteria channels:
 
@@ -17,7 +17,7 @@ weak day can't flood a table with below-criteria channels:
    skipped before any quota is spent.
 1. **Discovery** — finds candidate channels for the niche. With
    `INFLUENCERS_API_KEY` set, it uses **influencers.club creator search**
-   (`influencer_discovery.py`), filtering server-side on the niche's own
+   (`discovery/influencers_club.py`), filtering server-side on the niche's own
    criteria — content language, a subscriber floor, creator gender, a
    creator **location** restricted to the niche's own search zone, a negation
    list covering off-brand topics *and* gaming / generic-tech bios, and an
@@ -26,25 +26,25 @@ weak day can't flood a table with below-criteria channels:
    DO NOT CONTACT handles are excluded server-side (never dropped under the
    vendor's per-request cap), so no credit is spent surfacing a creator you
    are already suppressing. With no key set, discovery falls back to
-   **YouTube `search.list`** (`discovery.py`): keyword search (type=video),
+   **YouTube `search.list`** (`discovery/youtube_search.py`): keyword search (type=video),
    cached per keyword per day, over a deliberately short and self-renewing
    `DISCOVERY_DAYS_BACK` (7) day window rather than a wide one that returns
    the same already-tracked channels every day. Either way, discovery keeps
    going until the day's qualified budget is filled or candidates run out.
 2. **Pre-filter** — candidates already present in your Airtable base are
    dropped before any enrichment quota is spent on them.
-3. **DO NOT CONTACT screening** (`do_not_contact.py`) — every candidate is
+3. **DO NOT CONTACT screening** (`airtable/do_not_contact.py`) — every candidate is
    checked against a suppression list (by handle, email, and name) at three
    points in the pipeline. The list is fetched fresh at the start of every
    run (never cached) and the whole run **aborts** if it can't be fetched
    with confidence — proceeding with a partial or empty blocklist risks
    contacting someone who asked not to be.
-4. **Enrichment** (`enrichment.py`) — pulls subscriber/view counts and the
+4. **Enrichment** (`enrichment/channels.py`) — pulls subscriber/view counts and the
    last 10 videos' performance for each remaining candidate. It also reads
    the last 50 videos' descriptions looking for a contact email — a wider
    window that costs no extra quota, since the underlying calls are billed
    per-call rather than per-video.
-4b. **Relevance** (`main.off_target_reason`) — a candidate is discarded when
+4b. **Relevance** (`pipeline.off_target_reason`) — a candidate is discarded when
    its recent video titles are DOMINATED by an off-target vertical: gaming,
    phones/PCs, generic gadgets, or AI/crypto. It reads the last ~50 video
    TITLES, which enrichment already fetched, because a title is evidence of what
@@ -66,7 +66,7 @@ weak day can't flood a table with below-criteria channels:
    credit**. Measured against the 147 rows live on 2026-08-21 it rejects 29 of
    the 63 Home Theater rows (46%) and 0 of the 84 Lifestyle rows.
 
-5. **Hard requirements** (`main.pre_push_drop_reason`, `search_zones.py`) —
+5. **Hard requirements** (`pipeline.pre_push_drop_reason`, `discovery/search_zones.py`) —
    a candidate is **discarded**, with no row written, unless it clears all
    of: 10,000+ average views (both niches), **at least half of the judgeable
    long-form videos in that window over 10,000 views** (see
@@ -83,12 +83,12 @@ weak day can't flood a table with below-criteria channels:
    region subtag of its content language (`en-GB` → GB) for the rest. A
    channel that declares neither is *kept*, not dropped — absent data
    isn't evidence against it.
-6. **Qualification** (`scoring.py`) — the one soft criterion left: whether
+6. **Qualification** (`ranking/scoring.py`) — the one soft criterion left: whether
    the channel meets that niche's minimum age. A channel that doesn't is
    **flagged for review, not discarded** — a human makes the final call.
-7. **Scoring** (`scoring.py`) — computes a fake-follower risk score and a
+7. **Scoring** (`ranking/scoring.py`) — computes a fake-follower risk score and a
    weighted overall score.
-8. **Airtable push** (`airtable_client.py`) — creates or updates a row per
+8. **Airtable push** (`airtable/client.py`) — creates or updates a row per
    channel in that niche's table (never duplicates), until both the
    qualified and flagged daily budgets are full or candidates run out.
 
@@ -116,7 +116,7 @@ budget.
 5. Add access to the specific base you'll use for this project.
 6. Click **Create token** and copy the value — it's shown only once.
 7. In your base, create **one table per niche** (currently: Home Theater
-   and Lifestyle Sofa — see `NICHES` in `main.py`). Easiest way: build one
+   and Lifestyle Sofa — see `NICHES` in `pipeline.py`). Easiest way: build one
    table with the schema below, then right-click its tab → **Duplicate
    table → Duplicate table structure only** for each additional niche, so
    every table has an identical field set. Each table needs: Channel
@@ -160,7 +160,7 @@ budget.
    > This pipeline also requires a **DO NOT CONTACT** suppression table to
    > already exist in the same base — it's referenced by a hardcoded
    > table ID and field IDs (`DO_NOT_CONTACT_TABLE_ID`, `FIELD_NAME`,
-   > `FIELD_URL`, `FIELD_EMAIL`) at the top of `do_not_contact.py`, rather
+   > `FIELD_URL`, `FIELD_EMAIL`) at the top of `airtable/do_not_contact.py`, rather
    > than an env var, since it's shared infrastructure rather than a
    > per-niche table. Pointing this at a different base means updating
    > those constants to match. Every candidate is checked against it by
@@ -170,7 +170,7 @@ budget.
    > `Upload Frequency` is written as a formatted string (e.g. `"2.5
    > videos/month"`), not a raw number — if you make it a Number field
    > instead, update the `f"{upload_freq} videos/month"` line in
-   > `main.py` to send `upload_freq` directly.
+   > `pipeline.py` to send `upload_freq` directly.
 
    > `Email`: YouTube's API does not expose a channel's gated
    > "business inquiries" email (it's behind a CAPTCHA-protected reveal
@@ -242,11 +242,18 @@ python -m venv venv
 venv\Scripts\activate        # Windows
 # source venv/bin/activate   # macOS/Linux
 pip install -r requirements.txt
+pip install -e . --no-deps
 ```
+
+The second command puts the `channel_vetting` package (which lives under
+`src/`) on `sys.path`; without it `python -m channel_vetting.pipeline` cannot
+find it. `--no-deps` is deliberate: the project declares no dependencies of
+its own, so everything comes from `requirements.txt` and nothing is resolved
+outside that pinned set.
 
 ### 3b. Optional: Playwright + stealth for the browser email step
 
-The last step of the email fallback chain (`browser_email.py`) uses
+The last step of the email fallback chain (`enrichment/email_browser.py`) uses
 Playwright with stealth to follow a channel's public external link list to
 the creator's own site. It is off by default; enable it with
 `USE_PLAYWRIGHT_STEALTH=true`. If Playwright has not yet downloaded
@@ -256,7 +263,7 @@ To try that browser-backed path against already-tracked, email-less rows
 without re-running discovery:
 
 ```bash
-python backfill_missing_emails.py --use-playwright-stealth
+python scripts/backfill/backfill_missing_emails.py --use-playwright-stealth
 ```
 
 That adds a public-page browser check on top of the free text-based email
@@ -283,7 +290,7 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `CANDIDATE_OVERSHOOT` | 1.5 | Multiple of the remaining row shortfall that one discovery round banks in fresh candidates. Sizes a round only — `run_niche()` keeps discovering until the qualified cap is met or the keywords run out, so this does not limit the day's yield |
 | `EXPECTED_CANDIDATES_PER_KEYWORD` | 40 | Unique channels one keyword is expected to yield (measured ~42 at `max_results=50` over a 7-day window). Converts a row shortfall into a keyword count for the next discovery round |
 | `DISCOVERY_DAYS_BACK` | 7 | How many days back `search.list` looks for videos (short and self-renewing by design — see below; `--days-back` overrides per run) |
-| `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `quota_tracker.py`'s Pacific-Time YouTube quota clock |
+| `PROSPECT_DAY_TZ` | `America/Toronto` | Timezone defining a "prospect day" for the daily caps above — deliberately separate from `budget/quota_tracker.py`'s Pacific-Time YouTube quota clock |
 | `EMAIL_DEEP_SCAN_PAGES` | 4 | Extra pages of older uploads scanned for a contact email when the free steps find nothing (2 quota units per page, per channel; 0 disables) |
 | `OFF_TARGET_MIN_SHARE` | 0.10 (code) | Share of recent video titles that must read as gaming / phones-PCs / gadgets / AI-crypto before the relevance gate fires (it also has to exceed the on-target share) |
 | `REJECTED_HANDLES_FILE` | `rejected_handles.json` | Where the already-rejected-creator cache lives (gitignored; cached in CI) |
@@ -317,7 +324,7 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 
 ### 5. Edit your keywords / niches
 
-`main.py`'s `NICHES` dict holds one entry per niche: its search keywords
+`pipeline.py`'s `NICHES` dict holds one entry per niche: its search keywords
 (real terms pulled from the Types of Content Posting > Primary sections of
 the "Lifestyle Sofa" and "Home Theater" Influencer Profiling briefs,
 Cynthia Lim, 15 April 2024), which Airtable table it pushes to, and its
@@ -337,8 +344,8 @@ Note that `min_avg_views` is **10,000 for both niches** as of the 2026-08
 criteria change. Lifestyle Sofa's brief says 2,000; that was deliberately
 overridden to put the two niches on the same bar. The other two shared
 requirements — 30+ public videos and the allowed search zones — aren't
-per-niche knobs: they live in `MIN_VIDEO_COUNT` (`main.py`) and
-`search_zones.py`.
+per-niche knobs: they live in `MIN_VIDEO_COUNT` (`pipeline.py`) and
+`discovery/search_zones.py`.
 
 Add/replace keywords as new niche briefs come in — pull from a brief's
 actual content-type list, not its demographic/psychographic sections
@@ -398,7 +405,7 @@ your own niche criteria — never a creator's email address, never Airtable data
 discovery credits, no YouTube quota, no Airtable writes:
 
 ```bash
-python verify_video.py --niche "Home Theater" "https://www.youtube.com/watch?v=VIDEO_ID" --duration 1800
+python scripts/verify_video.py --niche "Home Theater" "https://www.youtube.com/watch?v=VIDEO_ID" --duration 1800
 ```
 
 It prints the exact request body, the model requested, the model Google says
@@ -438,7 +445,7 @@ confirmed)`, `scored` / `score 78 (on-niche, 0.90)`, `unavailable` /
 judged, with a `&t=` offset — click it to check the AI's work in one step.
 
 **Step 4 — write your criteria.** `text_criteria` and `video_criteria` live per
-niche in `niches.py`, beside `on_target_terms`. Two rules:
+niche in `discovery/niches.py`, beside `on_target_terms`. Two rules:
 
 - A **video** criterion must be answerable from ~25 seconds of footage alone.
   *"Is a person presenting to camera"* works; *"does the creator own their home"*
@@ -483,8 +490,12 @@ change. The pipeline returns to exactly its previous behaviour.
 ### 6. Run the test flow first
 
 ```bash
-python main.py --test
+python -m channel_vetting.pipeline --test
 ```
+
+(`channel-vetting --test` is an installed alias for the same thing. The
+`python -m` form is what CI uses, because it does not need pip's script
+directory on `PATH`.)
 
 This runs on the first niche only and, unless you pass `--daily-cap`,
 bounds the run to **2 qualified / 1 flagged** rows so it stays cheap. That
@@ -498,40 +509,102 @@ run — useful for testing the capping behavior against production Airtable.
 ### 7. Run the full pipeline
 
 ```bash
-python main.py
+python -m channel_vetting.pipeline
 ```
 
 > **First run against an empty (or recently emptied) table:** the default
 > discovery window (`DISCOVERY_DAYS_BACK`, 7 days) is deliberately short —
-> see "Discovery window" in `CLAUDE.md` — so a plain `python main.py` on a
-> table with no existing rows will skip anything published more than a
-> week ago and likely come back mostly empty. For that first sweep, run
-> `python main.py --days-back 90` instead to pull in the backlog; switch
+> see "Discovery window" in `CLAUDE.md` — so a plain
+> `python -m channel_vetting.pipeline` on a table with no existing rows will
+> skip anything published more than a week ago and likely come back mostly
+> empty. For that first sweep, run
+> `python -m channel_vetting.pipeline --days-back 90` instead to pull in the
+> backlog; switch
 > back to the plain 7-day default for every run after that.
 
-## Files
+## Project layout
 
-| File | Purpose |
+```
+src/channel_vetting/     the pipeline, installed as a package
+  config.py                loads .env; every constant in one place
+  pipeline.py              orchestrates a whole niche end to end
+  core/                    leaf utilities — no project imports of their own
+  budget/                  spend guards, one per metered upstream
+  discovery/               where candidates come from
+  enrichment/              stats, and the email chain
+  verification/            is this channel actually about the niche?
+  ranking/                 orders the review queue; never drops a row
+  airtable/                the system of record
+  outreach/                approved prospect -> one sent, logged email
+scripts/                 operational one-offs (audits, backfills, probes)
+tests/                   pytest suite
+data/                    machine-local ledgers and caches (gitignored)
+```
+
+The dependency arrow only ever points inward: `scripts/` imports the package,
+the package never imports `scripts/`.
+
+### The pipeline, module by module
+
+| Module | Purpose |
 |---|---|
-| `config.py` | Loads `.env`, defines constants (quota ceiling, daily caps, weights inputs, etc.) |
-| `http_client.py` | Shared retrying HTTP sessions (Airtable / YouTube / influencers.club); API keys travel as headers, never query params |
-| `influencer_discovery.py` | influencers.club creator-search discovery source (replaces `search.list` when a key is set) |
-| `discovery.py` | `search.list`-based channel discovery + per-day search cache (the discovery fallback) |
-| `enrichment.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
-| `scoring.py` | Fake-follower risk heuristic + weighted overall score + `qualify()` (channel age) |
-| `search_zones.py` | Allowed-country tables (US/CA/UK/EU/AU, minus Ireland) + `zone_verdict()` |
-| `do_not_contact.py` | DO NOT CONTACT suppression list — fetched fresh every run, fails closed |
-| `external_dedupe.py` | 24h-cached @handle index over the base's other YouTube tables, to skip channels already tracked elsewhere |
-| `influencers.py` | influencers.club enrich-by-handle lookup (step 4 of the email chain) |
-| `browser_email.py` | Playwright link-list email fallback (last step of the email chain) |
-| `prospect_day.py` | Single source of truth for "what day is it" for the daily caps (`PROSPECT_DAY_TZ`) |
-| `airtable_client.py` | Dedupe check, create/update records, `count_added_today()` (per-table, one table per niche) |
-| `quota_tracker.py` | Daily quota spend log (resets at midnight Pacific Time) |
-| `audit_blocklist.py` | One-off: check rows already in the niche tables against DO NOT CONTACT |
-| `backfill_missing_emails.py` | One-off: re-run the email chain over rows that have no email yet |
-| `cleanup_external_duplicates.py` | One-off: delete niche-table rows already tracked elsewhere in the base (guarded by `--confirm`) |
-| `main.py` | Orchestrates the full pipeline; `--test` and `--daily-cap` flags |
-| `tests/` | pytest suite (see "Running the tests" below) |
+| `config.py` | Loads `.env`, defines constants (quota ceiling, daily caps, scoring weights, etc.) |
+| `pipeline.py` | Orchestrates the full run; `--test`, `--daily-cap`, `--days-back` flags |
+| `core/http_client.py` | Shared retrying HTTP sessions (Airtable / YouTube / influencers.club); API keys travel as headers, never query params |
+| `core/paths.py` | The one place `data/` is named — every ledger and cache resolves through it |
+| `core/prospect_day.py` | Single source of truth for "what day is it" for the daily caps (`PROSPECT_DAY_TZ`) |
+| `core/iso_time.py` | The one tolerant ISO 8601 parse in the codebase |
+| `core/text_safety.py` | Spreadsheet-formula safety for values a human will see |
+| `core/run_metrics.py` | One JSON line per run, so "did that change help?" is answerable |
+| `budget/quota_tracker.py` | Daily YouTube quota spend log (resets at midnight Pacific Time) |
+| `budget/credit_tracker.py` | influencers.club credit spend — real money, so it fails **closed** |
+| `budget/gemini_tracker.py` | Gemini free-tier request counter |
+| `discovery/niches.py` | The niche registry: what gets searched, and which table it lands in |
+| `discovery/influencers_club.py` | influencers.club creator-search source (replaces `search.list` when a key is set) |
+| `discovery/youtube_search.py` | `search.list` discovery + per-day search cache (the fallback source) |
+| `discovery/search_zones.py` | Allowed-country tables (US/CA/UK/EU/AU, minus Ireland) + `zone_verdict()` |
+| `discovery/rejected_handles.py` | Creators already returned and rejected, so the vendor is not paid twice for them |
+| `enrichment/channels.py` | `channels.list` + `playlistItems.list` + `videos.list` stats |
+| `enrichment/email_influencers.py` | influencers.club enrich-by-handle lookup (step 4 of the email chain) |
+| `enrichment/email_browser.py` | Playwright link-list email fallback (step 5, the last) |
+| `enrichment/external_dedupe.py` | 24h-cached @handle index over the base's other YouTube tables |
+| `verification/video_topics.py` | What the videos are about, from topic data already paid for |
+| `verification/transcripts.py` | The spoken text of a video, fetched free and cached |
+| `verification/gemini.py` | Gemini relevance verification — the tier that actually decides |
+| `ranking/scoring.py` | Fake-follower risk + weighted overall score + `qualify()` (channel age) |
+| `ranking/keyword_history.py` | Orders the queue by how the keyword that found a channel has performed |
+| `airtable/client.py` | Dedupe check, create/update records, `count_added_today()` (one table per niche) |
+| `airtable/do_not_contact.py` | DO NOT CONTACT suppression list — fetched fresh every run, fails closed |
+| `airtable/outreach_store.py` | Airtable-backed storage for the send ledger's protocols |
+| `outreach/sender.py` | The one entry point that turns an Approved prospect into a sent email |
+| `outreach/ledger.py` | The send ledger: the only thing standing between an approval and a duplicate email |
+| `outreach/templates.py` | Email templates and the render boundary |
+| `outreach/mailer.py` | Gmail transport, and the last place a real address can be swapped for the demo mailbox |
+
+### Operational scripts
+
+Run from the repo root. None of them are part of a scheduled run.
+
+| Script | Purpose |
+|---|---|
+| `scripts/audit/audit_blocklist.py` | Check rows already in the niche tables against DO NOT CONTACT |
+| `scripts/audit/audit_no_social.py` | Check tracked rows for the no-social drop |
+| `scripts/audit/audit_prospects.py` | Re-check existing rows against the *current* criteria |
+| `scripts/audit/find_external_duplicates.py` | Rows already tracked in the base's other tables |
+| `scripts/backfill/backfill_handles.py` | Fill `Handle` on rows written before the column existed |
+| `scripts/backfill/backfill_missing_emails.py` | Re-run the email chain over rows with no email yet |
+| `scripts/backfill/cleanup_external_duplicates.py` | Delete rows tracked elsewhere in the base (guarded by `--confirm`) |
+| `scripts/analysis/` | Measurement probes and backtests — does a change actually help? |
+| `scripts/rank_pending.py` | Order the rows awaiting review, best-first |
+| `scripts/verify_video.py` | One-shot Gemini verification probe: no discovery, no credits, no Airtable |
+
+### `data/`
+
+Everything the pipeline writes at runtime — quota and credit ledgers, search
+and transcript caches, rendered email previews. All of it is gitignored: the
+ledgers are per-machine counters (the credit one is real money), the caches are
+regenerable, and the previews and the Gemini cache hold creator PII. Point
+`CHANNEL_VETTING_DATA_DIR` elsewhere to relocate the lot.
 
 ## Running on a schedule (GitHub Actions)
 
@@ -558,7 +631,7 @@ Setup:
    Playwright driver but not the browser binary. Caveat: turning it on makes
    the browser email step *run*, but GitHub-hosted runners sit on Azure
    datacenter IPs that YouTube challenges hard, and stealth patches browser
-   fingerprints, not IP reputation — so "running" is not "working". `main.py`
+   fingerprints, not IP reputation — so "running" is not "working". `pipeline.py`
    logs a warning when the step was requested but the browser could not
    start; watch the run log for it.
 4. To run immediately, use **Actions > Channel Vetting Pipeline > Run
@@ -573,7 +646,7 @@ Setup:
 python -m pytest
 ```
 
-Runs the full suite in `tests/` (652 tests; for the exact count run
+Runs the full suite in `tests/` (1,421 tests; for the exact count run
 `python -m pytest --collect-only -q | tail -1`) covering
 discovery windowing/early-stop, the influencers.club discovery source
 (pagination, credit budget, handle→channel-ID bridging, and its DO NOT
@@ -581,7 +654,7 @@ CONTACT / already-tracked exclusion), the pre-push gate (view floor,
 video-count floor, dead and Shorts-only channels), the search-zone tables
 and their three-state verdict, qualification, the DO NOT CONTACT
 fail-closed paths, `count_added_today()`/daily-cap behavior,
-`prospect_day.py`, the candidate pre-filter, every step of the email chain
+`core/prospect_day.py`, the candidate pre-filter, every step of the email chain
 (including the older-uploads scan's quota arithmetic and which step gets
 credited for a hit), and a regression check that the removed paid
 email-finder integrations (Hunter.io, Modash) stay removed. No network
@@ -589,7 +662,7 @@ calls or real credentials are needed — everything is mocked.
 
 ## Tuning
 
-- Adjust scoring weights and thresholds at the top of `scoring.py`.
+- Adjust scoring weights and thresholds at the top of `ranking/scoring.py`.
 - Adjust `QUOTA_CEILING` in `.env` if you want more/less headroom for
   enrichment calls after discovery.
 - Adjust `DAILY_QUALIFIED_CAP` / `DAILY_FLAGGED_CAP` in `.env` if 30/10 per
@@ -598,16 +671,16 @@ calls or real credentials are needed — everything is mocked.
   Lifestyle Sofa (no age requirement) never produces a flagged row, so its
   flagged budget goes unused.
 - Per-niche thresholds (`min_avg_views`, `min_channel_age_months`) live on
-  each `NICHES` entry in `main.py`, not in `.env`.
-- The shared hard requirements are elsewhere: at the top of `main.py`,
+  each `NICHES` entry in `pipeline.py`, not in `.env`.
+- The shared hard requirements are elsewhere: at the top of `pipeline.py`,
   `MIN_VIDEO_COUNT` (30), `MIN_VIEWS_PER_VIDEO` (10,000 per video across the
   last 10), `MIN_UPLOADS_PER_YEAR` (6), and `MAX_DAYS_SINCE_LAST_UPLOAD`
-  (365); and the allowed countries in `search_zones.py`
+  (365); and the allowed countries in `discovery/search_zones.py`
   (`ALLOWED_COUNTRY_CODES`, plus the name tables the About-panel lookup
   uses). Widening "Europe" to include Russia, Belarus or Turkey is a
   one-line edit there — they're excluded by default and flagged in a
   comment.
-- `DEFAULT_NICHE_MATCH` in `main.py` is a fixed placeholder fed into every
+- `DEFAULT_NICHE_MATCH` in `pipeline.py` is a fixed placeholder fed into every
   Overall Score, since automated topical/niche matching isn't implemented —
   reviewers can factor niche fit in manually via the Airtable
   "Notes"/"Status" fields.

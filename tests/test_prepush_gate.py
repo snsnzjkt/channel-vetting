@@ -19,7 +19,7 @@ every hard requirement:
 Shorts are detected by duration, since the API has no Shorts flag.
 """
 import pytest
-from search_zones import ZONE_CORE
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 # A catalogue and a view count that comfortably clear the new floors, so
@@ -31,7 +31,7 @@ HOME_THEATER_MIN_VIEWS = 10_000
 
 def drop_reason(**overrides):
     """pre_push_drop_reason with everything passing unless overridden."""
-    from main import pre_push_drop_reason
+    from channel_vetting.pipeline import pre_push_drop_reason
 
     kwargs = {
         "subscriber_count": 25_000,
@@ -40,7 +40,7 @@ def drop_reason(**overrides):
         "min_avg_views": HOME_THEATER_MIN_VIEWS,
         "video_count": PASSING_VIDEOS,
         # Explicit because the gate treats an unset language as a FAILURE —
-        # see main.is_english(). Passing it here keeps each test below
+        # see pipeline.is_english(). Passing it here keeps each test below
         # exercising the one gate it names.
         "content_language": "en",
     }
@@ -95,7 +95,7 @@ def test_drops_a_channel_with_too_few_videos():
 
 
 def test_exactly_at_the_video_floor_is_kept():
-    from main import MIN_VIDEO_COUNT
+    from channel_vetting.pipeline import MIN_VIDEO_COUNT
 
     assert MIN_VIDEO_COUNT == 30
     assert drop_reason(video_count=30) is None
@@ -176,7 +176,7 @@ def test_shorts_gate_applies_regardless_of_how_strong_the_channel_is():
 
 
 def test_parses_iso8601_durations():
-    from enrichment import parse_iso8601_duration
+    from channel_vetting.enrichment.channels import parse_iso8601_duration
 
     assert parse_iso8601_duration("PT45S") == 45
     assert parse_iso8601_duration("PT1M") == 60
@@ -190,7 +190,7 @@ def test_unparseable_duration_is_not_treated_as_a_short():
     A missing or malformed duration must not make a channel look like
     Shorts — that would discard it with no row to review.
     """
-    from enrichment import parse_iso8601_duration
+    from channel_vetting.enrichment.channels import parse_iso8601_duration
 
     assert parse_iso8601_duration("") is None
     assert parse_iso8601_duration(None) is None
@@ -198,7 +198,7 @@ def test_unparseable_duration_is_not_treated_as_a_short():
 
 
 def test_shorts_only_needs_every_sampled_video_under_the_cap():
-    from enrichment import is_shorts_only, SHORTS_MAX_SECONDS
+    from channel_vetting.enrichment.channels import is_shorts_only, SHORTS_MAX_SECONDS
 
     # 180s, matching YouTube's real Shorts cap since late 2024. A 61-180s
     # upload IS a Short and no longer counts as long-form — see
@@ -211,7 +211,7 @@ def test_shorts_only_needs_every_sampled_video_under_the_cap():
 
 def test_shorts_only_is_false_when_nothing_is_known():
     """No durations means no evidence, and no evidence never discards."""
-    from enrichment import is_shorts_only
+    from channel_vetting.enrichment.channels import is_shorts_only
 
     assert is_shorts_only([]) is False
     assert is_shorts_only(["", None]) is False
@@ -219,7 +219,7 @@ def test_shorts_only_is_false_when_nothing_is_known():
 
 def test_an_unreadable_duration_among_shorts_does_not_force_a_drop():
     """One unparseable entry is enough doubt to keep the channel."""
-    from enrichment import is_shorts_only
+    from channel_vetting.enrichment.channels import is_shorts_only
 
     assert is_shorts_only(["PT30S", "PT45S", ""]) is False
 
@@ -277,7 +277,7 @@ def test_a_language_merely_containing_en_is_not_english():
 
 
 def test_counts_only_confirmed_long_form_videos():
-    from enrichment import count_longform
+    from channel_vetting.enrichment.channels import count_longform
 
     assert count_longform(["PT30S", "PT181S", "PT12M"]) == 2
     assert count_longform(["PT30S", "PT59S"]) == 0
@@ -291,7 +291,7 @@ def test_a_sub_three_minute_upload_does_not_count_as_long_form():
     them as long-form, inflating its catalogue past the 30-video floor. Only 5
     of its newest 50 were genuinely over 3 minutes.
     """
-    from enrichment import count_longform
+    from channel_vetting.enrichment.channels import count_longform
 
     shorts_band = ["PT67S", "PT92S", "PT77S", "PT81S", "PT89S", "PT180S"]
     assert count_longform(shorts_band) == 0
@@ -304,7 +304,7 @@ def test_an_unreadable_duration_never_counts_as_long_form():
     feeds a MINIMUM, so counting an unknown would let a channel clear the bar
     on missing data.
     """
-    from enrichment import count_longform
+    from channel_vetting.enrichment.channels import count_longform
 
     assert count_longform(["", None, "P0D", "garbage"]) == 0
     assert count_longform(["PT12M", ""]) == 1
@@ -316,14 +316,14 @@ def test_drops_a_shorts_factory_that_posts_the_occasional_long_video():
     channels, and statistics.videoCount counts Shorts as videos — so a
     channel with 300 Shorts and 4 long-form uploads cleared both checks.
     """
-    from main import longform_drop_reason
+    from channel_vetting.pipeline import longform_drop_reason
 
     assert longform_drop_reason(4) == "too_few_longform_videos"
     assert longform_drop_reason(29) == "too_few_longform_videos"
 
 
 def test_exactly_thirty_long_form_videos_is_kept():
-    from main import longform_drop_reason
+    from channel_vetting.pipeline import longform_drop_reason
 
     assert longform_drop_reason(30) is None
     assert longform_drop_reason(400) is None
@@ -366,7 +366,7 @@ def test_gate_precedence_is_stable(overrides, expected):
 # The 0.50 figure is calibrated against the live tables rather than chosen: on
 # all 80 tracked rows, Shorts-inflated channels scored 0-3 of 10 while channels
 # a human reviewer had already Approved scored 5-6 of 10, so the bar must sit in
-# the gap AND admit 5. See MIN_VIEWS_PER_VIDEO_RATIO in main.py for the full
+# the gap AND admit 5. See MIN_VIEWS_PER_VIDEO_RATIO in pipeline.py for the full
 # reasoning, including why 0.60 looked right and was not.
 
 
@@ -385,7 +385,7 @@ def test_drops_a_channel_when_too_much_of_the_sample_is_weak():
 
 
 def test_the_thirty_percent_boundary_is_kept():
-    from main import MIN_VIEWS_PER_VIDEO, MIN_VIEWS_PER_VIDEO_RATIO
+    from channel_vetting.pipeline import MIN_VIEWS_PER_VIDEO, MIN_VIEWS_PER_VIDEO_RATIO
 
     assert MIN_VIEWS_PER_VIDEO == 10_000
     # LOWERED 0.50 -> 0.30 on 2026-08-21 at the operator's direction; the
@@ -469,7 +469,7 @@ def test_a_sample_too_small_to_judge_is_skipped_not_failed():
 
     Unknown is not a failure, the same rule an unreported video_count follows.
     """
-    from main import MIN_SETTLED_SAMPLE_FOR_RATIO
+    from channel_vetting.pipeline import MIN_SETTLED_SAMPLE_FOR_RATIO
 
     assert MIN_SETTLED_SAMPLE_FOR_RATIO == 5
     assert drop_reason(settled_views=_views(1, 2)) is None
@@ -512,7 +512,7 @@ def test_an_unknown_settled_window_does_not_disqualify():
 
 def test_a_bilingual_chinese_bio_is_rejected():
     """The @LINTAN777 bio, verbatim, is the regression case."""
-    from main import description_is_non_english
+    from channel_vetting.pipeline import description_is_non_english
 
     bio = (
         "谭 琳 • 与道同行 | Life is practice. Space is sanctuary. On this channel, "
@@ -523,7 +523,7 @@ def test_a_bilingual_chinese_bio_is_rejected():
 
 
 def test_a_cyrillic_bio_is_rejected():
-    from main import description_is_non_english
+    from channel_vetting.pipeline import description_is_non_english
 
     assert description_is_non_english(
         "Обзоры домашних кинотеатров, проекторов и акустики. Новые видео каждую неделю."
@@ -536,7 +536,7 @@ def test_an_english_bio_with_emoji_and_accents_is_kept():
     both routinely, and matching them would discard good prospects on
     decoration. Deliberately absent from NON_LATIN_SCRIPT_RANGES.
     """
-    from main import description_is_non_english
+    from channel_vetting.pipeline import description_is_non_english
 
     assert description_is_non_english(
         "Home cinema builds 🎬🔊 weekly reviews! Café, naïve, jalapeño — still English."
@@ -549,7 +549,10 @@ def test_a_short_bio_with_a_couple_of_decorative_characters_is_kept():
     ratio, under the absolute floor. Both thresholds must trip, or a short bio
     would be judged on punctuation.
     """
-    from main import description_is_non_english, MIN_NON_LATIN_DESCRIPTION_CHARS
+    from channel_vetting.pipeline import (
+        description_is_non_english,
+        MIN_NON_LATIN_DESCRIPTION_CHARS,
+    )
 
     assert MIN_NON_LATIN_DESCRIPTION_CHARS == 8
     assert description_is_non_english("new video 日曜日!") is False
@@ -557,7 +560,7 @@ def test_a_short_bio_with_a_couple_of_decorative_characters_is_kept():
 
 def test_an_empty_bio_does_not_disqualify():
     """Absent data is never evidence — the same rule the zone and age checks use."""
-    from main import description_is_non_english
+    from channel_vetting.pipeline import description_is_non_english
 
     assert description_is_non_english("") is False
     assert description_is_non_english(None) is False
@@ -569,10 +572,10 @@ def test_process_candidate_drops_a_non_english_bio_before_paying_for_performance
     channel costs no performance quota. Placed with the other free
     description-based checks for that reason.
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "can_afford_enrichment", lambda: True)
-    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: {
+    monkeypatch.setattr(pipeline, "can_afford_enrichment", lambda: True)
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda *a, **k: {
         "channel_id": "UC1", "channel_title": "LIN TAN", "handle": "@lintan777",
         "description": "谭琳与道同行 spatial harmony 生活即修行空间即道场在这里我分享风水智慧",
         "subscriber_count": 316_000, "video_count": 411,
@@ -580,7 +583,7 @@ def test_process_candidate_drops_a_non_english_bio_before_paying_for_performance
         "country": "US",
     })
     monkeypatch.setattr(
-        main, "get_recent_video_performance",
+        pipeline, "get_recent_video_performance",
         lambda *a, **k: pytest.fail("paid for performance on a non-English bio"),
     )
 
@@ -590,13 +593,13 @@ def test_process_candidate_drops_a_non_english_bio_before_paying_for_performance
         def match(self, handle="", email="", name=""):
             return ""
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "LIN TAN", "matched_keywords": []},
         {}, _NoBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
     assert record is None
-    assert reason == main.DROP_NON_ENGLISH_DESCRIPTION
+    assert reason == pipeline.DROP_NON_ENGLISH_DESCRIPTION
 
 
 # --- the upload-cadence floor (>= 6 uploads a year) -----------------------
@@ -611,7 +614,7 @@ def test_drops_a_channel_that_uploads_too_rarely():
 
 
 def test_exactly_six_uploads_a_year_is_kept():
-    from main import MIN_UPLOADS_PER_YEAR
+    from channel_vetting.pipeline import MIN_UPLOADS_PER_YEAR
 
     assert MIN_UPLOADS_PER_YEAR == 6
     assert drop_reason(uploads_per_year=6) is None
@@ -644,7 +647,7 @@ def test_drops_a_channel_whose_last_upload_is_over_a_year_old():
 
 
 def test_exactly_a_year_since_the_last_upload_is_kept():
-    from main import MAX_DAYS_SINCE_LAST_UPLOAD
+    from channel_vetting.pipeline import MAX_DAYS_SINCE_LAST_UPLOAD
 
     assert MAX_DAYS_SINCE_LAST_UPLOAD == 365
     assert drop_reason(days_since_last_upload=365) is None
@@ -700,7 +703,7 @@ def _passing_perf(**overrides):
 
 
 def _process_candidate(monkeypatch, perf):
-    import main
+    from channel_vetting import pipeline
 
     stats = {
         "channel_id": "UC1", "channel_title": "Clean Channel", "handle": "chan",
@@ -708,9 +711,9 @@ def _process_candidate(monkeypatch, perf):
         "subscriber_count": 25_000, "uploads_playlist_id": "PL1",
         "business_email": "", "video_count": 500, "country": "US",
     }
-    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: stats)
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda *a, **k: perf)
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda *a, **k: stats)
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda *a, **k: perf)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
 
     class _NullBlocklist:
         handles: set = set()
@@ -718,7 +721,7 @@ def _process_candidate(monkeypatch, perf):
         def match(self, handle="", email="", name=""):
             return ""
 
-    return main.process_candidate(
+    return pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Clean Channel", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,

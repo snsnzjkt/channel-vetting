@@ -7,8 +7,8 @@ relevance signal in this repo has to obey, because three of them have been
 caught pointing the wrong way: absent data never disqualifies, and nothing may
 admit a channel on positive evidence alone.
 """
-import niches
-import video_topics as vt
+from channel_vetting.discovery import niches
+from channel_vetting.verification import video_topics as vt
 
 FIREARMS = {"firearms": niches.EXCLUDED_TOPIC_TERMS["firearms"]}
 TOYS = {"toys_and_kids": niches.OFF_TARGET_TERMS["toys_and_kids"]}

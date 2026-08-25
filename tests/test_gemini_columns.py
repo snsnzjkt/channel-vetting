@@ -11,9 +11,9 @@ It also pins the two invariants that protect the ~15 existing tests which stub
 the verifier reads every new field with .get(), and with the feature off the
 record is byte-identical to before.
 """
-import main
-import gemini_verify as gv
-from search_zones import ZONE_CORE
+from channel_vetting import pipeline
+from channel_vetting.verification import gemini as gv
+from channel_vetting.discovery.search_zones import ZONE_CORE
 from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_stats
 
 
@@ -41,17 +41,17 @@ class _FakeVerifier:
 
 
 def _record(monkeypatch, *, columns, verifier=None, off_target=None):
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance",
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance",
                         lambda cid, pl: _stub_performance())
-    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source",
-                        lambda *a, **k: ("a@b.com", main.EMAIL_SOURCE_REPEATED, None))
-    monkeypatch.setattr(main, "table_has_field", lambda table, field: field in columns)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
-    monkeypatch.setattr(main, "off_target_reason",
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source",
+                        lambda *a, **k: ("a@b.com", pipeline.EMAIL_SOURCE_REPEATED, None))
+    monkeypatch.setattr(pipeline, "table_has_field", lambda table, field: field in columns)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "off_target_reason",
                         lambda *a, **k: (off_target, "detail" if off_target else ""))
-    return main.process_candidate(
+    return pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None,
@@ -132,7 +132,7 @@ def test_a_rescue_reverses_the_title_gate_drop(monkeypatch):
                      notes="n", video_url="https://y/v", rescued=True)
     fake = _FakeVerifier(j)
     record, reason = _record(monkeypatch, columns=ALL_COLUMNS, verifier=fake,
-                            off_target=main.DROP_OFF_TARGET)
+                            off_target=pipeline.DROP_OFF_TARGET)
     assert record is not None, "a confirmed rescue must produce a row"
     assert fake.seen == [True], "the verifier must be told the candidate was flagged"
 
@@ -144,12 +144,12 @@ def test_a_non_rescue_leaves_the_drop_exactly_as_it_was(monkeypatch):
     """
     baseline_record, baseline_reason = _record(
         monkeypatch, columns=ALL_COLUMNS, verifier=None,
-        off_target=main.DROP_OFF_TARGET)
+        off_target=pipeline.DROP_OFF_TARGET)
     record, reason = _record(
         monkeypatch, columns=ALL_COLUMNS, verifier=_FakeVerifier(SCORED),
-        off_target=main.DROP_OFF_TARGET)
+        off_target=pipeline.DROP_OFF_TARGET)
     assert baseline_record is None and record is None
-    assert reason == baseline_reason == main.DROP_OFF_TARGET
+    assert reason == baseline_reason == pipeline.DROP_OFF_TARGET
 
 
 def test_an_unavailable_verdict_still_leaves_the_drop_in_place(monkeypatch):
@@ -158,8 +158,8 @@ def test_an_unavailable_verdict_still_leaves_the_drop_in_place(monkeypatch):
         j = gv.Judgement(gv.STATE_UNAVAILABLE, detail)
         record, reason = _record(monkeypatch, columns=ALL_COLUMNS,
                                  verifier=_FakeVerifier(j),
-                                 off_target=main.DROP_OFF_TARGET)
-        assert record is None and reason == main.DROP_OFF_TARGET
+                                 off_target=pipeline.DROP_OFF_TARGET)
+        assert record is None and reason == pipeline.DROP_OFF_TARGET
 
 
 def test_an_unflagged_candidate_is_never_dropped_by_a_bad_score(monkeypatch):
@@ -181,7 +181,7 @@ def test_an_unflagged_candidate_is_never_dropped_by_a_bad_score(monkeypatch):
 
 import json
 
-import gemini_tracker
+from channel_vetting.budget import gemini_tracker
 import pytest
 
 
@@ -226,19 +226,19 @@ NICHE_CRITERIA = {
 def _record_real(monkeypatch, verifier, *, off_target, performance_extra=None):
     """Same harness as _record, but with the real verifier and real niche keys."""
     perf = _stub_performance(**(performance_extra or {}))
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: perf)
-    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source",
-                        lambda *a, **k: ("a@b.com", main.EMAIL_SOURCE_REPEATED, None))
-    monkeypatch.setattr(main, "table_has_field", lambda t, f: f in ALL_COLUMNS)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
-    monkeypatch.setattr(main, "off_target_reason",
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda cid, pl: perf)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source",
+                        lambda *a, **k: ("a@b.com", pipeline.EMAIL_SOURCE_REPEATED, None))
+    monkeypatch.setattr(pipeline, "table_has_field", lambda t, f: f in ALL_COLUMNS)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "off_target_reason",
                         lambda *a, **k: (off_target, "titles look off"))
     niche = {"min_avg_views": 10_000, "min_channel_age_months": None,
              "allowed_country_codes": ZONE_CORE, "table_name": "tbl"}
     niche.update(NICHE_CRITERIA)
-    return main.process_candidate(
+    return pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(), niche, None, _Enricher(), verifier=verifier,
     )
@@ -259,11 +259,11 @@ def test_real_verifier_rescues_a_flagged_candidate_in_VIDEO_mode(monkeypatch,
     rename in either direction fails this test rather than silently producing an
     unavailable verdict forever.
     """
-    monkeypatch.setattr(main, "GEMINI_STAGE2_MODE", "video")
+    monkeypatch.setattr(pipeline, "GEMINI_STAGE2_MODE", "video")
     monkeypatch.setattr(gv.HTTP, "post",
                         lambda *a, **k: _Resp(_gemini_body(matches=True, confidence=0.88)))
     record, _ = _record_real(
-        monkeypatch, real_verifier, off_target=main.DROP_OFF_TARGET,
+        monkeypatch, real_verifier, off_target=pipeline.DROP_OFF_TARGET,
         performance_extra={
             "video_titles": ["a"], "video_descriptions": ["d"],
             "settled_longform": [{"video_id": "vX", "views": 5_000, "duration_s": 900}],
@@ -288,7 +288,7 @@ def test_real_verifier_rescues_a_flagged_candidate_in_TRANSCRIPT_mode(monkeypatc
     `Relevance Notes`, because informing the human who approves the row is the
     whole point of this stage.
     """
-    monkeypatch.setattr(main, "GEMINI_STAGE2_MODE", "transcript")
+    monkeypatch.setattr(pipeline, "GEMINI_STAGE2_MODE", "transcript")
     monkeypatch.setattr(gv.transcripts, "fetch",
                         lambda vid, **kw: "We toured the basement media room and "
                                           "talked through the seating layout.")
@@ -301,7 +301,7 @@ def test_real_verifier_rescues_a_flagged_candidate_in_TRANSCRIPT_mode(monkeypatc
     })
     monkeypatch.setattr(gv.HTTP, "post", lambda *a, **k: _Resp(body))
     record, _ = _record_real(
-        monkeypatch, real_verifier, off_target=main.DROP_OFF_TARGET,
+        monkeypatch, real_verifier, off_target=pipeline.DROP_OFF_TARGET,
         performance_extra={
             "video_titles": ["a"], "video_descriptions": ["d"],
             "settled_longform": [{"video_id": "vX", "views": 5_000, "duration_s": 900}],

@@ -14,8 +14,8 @@ These tests pin the refill loop: while budget remains AND keywords remain,
 discover another batch. No network: discovery, Airtable and enrichment are
 all monkeypatched.
 """
-import main
-from search_zones import ZONE_CORE
+from channel_vetting import pipeline
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 class _NullBlocklist:
@@ -68,17 +68,17 @@ def _run(monkeypatch, keywords, per_keyword=20, survives_one_in=5,
     searched = []
     pushed = []
 
-    monkeypatch.setattr(main, "run_discovery", _fake_discovery(searched, per_keyword))
-    monkeypatch.setattr(main, "process_candidate", _survives_one_in(survives_one_in))
-    monkeypatch.setattr(main, "push_record", lambda t, r: pushed.append(r) or True)
+    monkeypatch.setattr(pipeline, "run_discovery", _fake_discovery(searched, per_keyword))
+    monkeypatch.setattr(pipeline, "process_candidate", _survives_one_in(survives_one_in))
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: pushed.append(r) or True)
     # count_added_today(table) -> total; count_added_today(table, QUALIFIED) -> qualified
     monkeypatch.setattr(
-        main, "count_added_today",
+        pipeline, "count_added_today",
         lambda table, qualification=None: qualified_today if qualification
         else qualified_today + flagged_today,
     )
 
-    discovered, processed, pushed_ids, cap_ok = main.run_niche(
+    discovered, processed, pushed_ids, cap_ok = pipeline.run_niche(
         niche_name="Home Theater",
         table_name="tbl",
         keywords=keywords,
@@ -107,7 +107,7 @@ def test_keeps_searching_until_the_qualified_budget_is_full(monkeypatch):
     # come back for more. Sized off the cap: ~1/8 of the budget per keyword, so
     # roughly 8 keywords are needed whatever the cap is set to. A fixed
     # per_keyword would silently stop testing refill the moment the cap moved.
-    cap = main.DAILY_QUALIFIED_CAP
+    cap = pipeline.DAILY_QUALIFIED_CAP
     survives = 5
     per_keyword = max(survives, (cap // 8) * survives)
     searched, pushed, processed, _ = _run(
@@ -125,7 +125,7 @@ def test_keeps_searching_until_the_qualified_budget_is_full(monkeypatch):
 
 def test_stops_as_soon_as_the_budget_is_full(monkeypatch):
     """A generous survival rate must NOT spend quota on every keyword."""
-    cap = main.DAILY_QUALIFIED_CAP
+    cap = pipeline.DAILY_QUALIFIED_CAP
     searched, pushed, _, _ = _run(
         monkeypatch, [f"kw{i}" for i in range(10)],
         per_keyword=cap * 2, survives_one_in=1,
@@ -142,7 +142,7 @@ def test_an_unfillable_flagged_budget_does_not_burn_every_keyword(monkeypatch):
     budget is a ceiling, not a target — the loop must not keep searching for
     rows that cannot exist.
     """
-    cap = main.DAILY_QUALIFIED_CAP
+    cap = pipeline.DAILY_QUALIFIED_CAP
     searched, pushed, _, _ = _run(
         monkeypatch, [f"kw{i}" for i in range(10)],
         per_keyword=cap * 2, survives_one_in=1,
@@ -159,7 +159,7 @@ def test_flagged_still_gets_a_pass_when_qualified_is_already_full(monkeypatch):
     searched, _, _, _ = _run(
         monkeypatch, [f"kw{i}" for i in range(10)],
         per_keyword=20, survives_one_in=1,
-        qualified_today=main.DAILY_QUALIFIED_CAP,
+        qualified_today=pipeline.DAILY_QUALIFIED_CAP,
     )
 
     assert 1 <= len(searched) <= 2, f"searched {searched}"
@@ -181,17 +181,17 @@ def test_already_pushed_candidates_are_not_re_enriched(monkeypatch):
     searched = []
     examined = []
 
-    monkeypatch.setattr(main, "run_discovery", _fake_discovery(searched, per_keyword=20))
-    monkeypatch.setattr(main, "push_record", lambda t, r: True)
-    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    monkeypatch.setattr(pipeline, "run_discovery", _fake_discovery(searched, per_keyword=20))
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: True)
+    monkeypatch.setattr(pipeline, "count_added_today", lambda table, qualification=None: 0)
 
     def process_candidate(candidate, *a, **k):
         examined.append(candidate["channel_id"])
         return None, "below_view_minimum"
 
-    monkeypatch.setattr(main, "process_candidate", process_candidate)
+    monkeypatch.setattr(pipeline, "process_candidate", process_candidate)
 
-    main.run_niche(
+    pipeline.run_niche(
         niche_name="Home Theater", table_name="tbl",
         keywords=[f"kw{i}" for i in range(4)], max_results_per_keyword=50, days_back=7,
         globally_tracked_ids=set(), external_handles={},
@@ -205,7 +205,7 @@ def test_already_pushed_candidates_are_not_re_enriched(monkeypatch):
 
 def test_partial_day_headroom_is_respected(monkeypatch):
     """A second run the same day tops up to the cap rather than doubling it."""
-    cap = main.DAILY_QUALIFIED_CAP
+    cap = pipeline.DAILY_QUALIFIED_CAP
     already = cap - 5          # leave exactly 5 rows of headroom
     _, pushed, _, _ = _run(
         monkeypatch, [f"kw{i}" for i in range(10)],

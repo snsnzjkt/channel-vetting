@@ -11,7 +11,7 @@ def test_paid_modules_are_removed(module_name):
 
 
 def test_config_has_no_paid_keys():
-    import config
+    from channel_vetting import config
 
     for attr in ("HUNTER_API_KEY", "MODASH_API_KEY", "MODASH_API_BASE_URL"):
         assert not hasattr(config, attr), f"{attr} should be removed from config"
@@ -20,15 +20,15 @@ def test_config_has_no_paid_keys():
 def test_resolve_email_has_no_hunter_param():
     import inspect
 
-    import main
+    from channel_vetting import pipeline
 
-    assert "use_hunter" not in inspect.signature(main.resolve_email).parameters
+    assert "use_hunter" not in inspect.signature(pipeline.resolve_email).parameters
 
 
 def test_email_blocklist_still_excludes_freemail():
     """Removing Hunter deletes DOMAIN_SEARCH_BLOCKLIST, never EMAIL_DOMAIN_BLOCKLIST."""
-    import enrichment
+    from channel_vetting.enrichment import channels
 
-    assert "gmail.com" in enrichment.FREEMAIL_DOMAINS
-    assert "gmail.com" not in enrichment.EMAIL_DOMAIN_BLOCKLIST
-    assert not enrichment.is_blocklisted_email_domain("gmail.com")
+    assert "gmail.com" in channels.FREEMAIL_DOMAINS
+    assert "gmail.com" not in channels.EMAIL_DOMAIN_BLOCKLIST
+    assert not channels.is_blocklisted_email_domain("gmail.com")

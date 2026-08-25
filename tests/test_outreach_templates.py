@@ -9,7 +9,7 @@ import hashlib
 
 import pytest
 
-import outreach_templates as T
+from channel_vetting.outreach import templates as T
 
 
 def _render(niche="Home Theater", **kw):
@@ -35,7 +35,7 @@ def test_both_niches_render_both_parts(niche):
 
 def test_templates_cover_every_niche_in_the_registry():
     """A niche with no template must be caught here, not at send time."""
-    from niches import NICHES
+    from channel_vetting.discovery.niches import NICHES
 
     assert set(NICHES) <= set(T.TEMPLATES), (
         f"niches without a template: {set(NICHES) - set(T.TEMPLATES)}"

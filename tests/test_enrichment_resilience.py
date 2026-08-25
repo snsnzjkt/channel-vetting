@@ -19,7 +19,7 @@ Three things pinned here, all of which used to be wrong:
    also sends it present-but-null, `.get()` hands back None, and `int(None)`
    raises TypeError with nothing to catch it.
 
-Plus the standing rule from `http_client.py`: the API key travels as the
+Plus the standing rule from `core/http_client.py`: the API key travels as the
 `X-goog-api-key` header and must never reappear in a `params` dict, because
 `requests` prints the full URL in its exception messages and CI keeps those
 logs for 90 days.
@@ -121,7 +121,7 @@ class _Router:
 
 def _patch(monkeypatch, router, spend=None):
     """Patch the shared session, the pacing sleep, and the quota log."""
-    import enrichment
+    from channel_vetting.enrichment import channels as enrichment
 
     # enrichment.HTTP (http_client.YOUTUBE), NOT enrichment.requests — the
     # module keeps `requests` imported only for RequestException.
@@ -226,7 +226,7 @@ def test_a_200_with_no_items_is_still_charged(monkeypatch):
 # --- the API key is a header, never a query parameter --------------------
 
 def test_no_call_site_sends_the_api_key_as_a_param(monkeypatch):
-    """See http_client.py: a `key=` param leaks into CI logs via exceptions."""
+    """See core/http_client.py: a `key=` param leaks into CI logs via exceptions."""
     router = _Router(
         channels=_Resp(200, _channel_payload()),
         playlist=_Resp(200, _playlist_payload()),
@@ -254,7 +254,7 @@ def test_enrichment_does_not_import_the_api_key():
     BELOW_VIEW_MINIMUM): the import coming back is the first step toward the
     param coming back.
     """
-    import enrichment
+    from channel_vetting.enrichment import channels as enrichment
 
     assert not hasattr(enrichment, "YOUTUBE_API_KEY")
 
@@ -270,13 +270,13 @@ def test_enrichment_does_not_import_the_api_key():
     ("12.5", 0),         # int() rejects it; a default beats an exception
 ])
 def test_as_int_never_raises(value, expected):
-    from enrichment import _as_int
+    from channel_vetting.enrichment.channels import _as_int
 
     assert _as_int(value) == expected
 
 
 def test_as_int_honours_a_custom_default():
-    from enrichment import _as_int
+    from channel_vetting.enrichment.channels import _as_int
 
     assert _as_int(None, -1) == -1
 
@@ -646,7 +646,7 @@ def test_json_guard_logs_which_call_failed(monkeypatch, caplog):
 
 def test_json_guard_returns_payload_on_a_healthy_response():
     """Positive control: the guard is transparent when the body is fine."""
-    import enrichment
+    from channel_vetting.enrichment import channels as enrichment
 
     resp = _Resp(200, {"items": [{"id": "x"}]})
     assert enrichment._json_or_none(resp, "channels.list(UC1)") == {"items": [{"id": "x"}]}

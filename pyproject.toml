@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=77.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "channel-vetting"
+version = "0.1.0"
+description = "Discover, qualify, and cold-email YouTube creators for brand outreach."
+requires-python = ">=3.12"
+
+# DELIBERATELY EMPTY — this is not an oversight. Dependencies are declared in
+# requirements.in and hash-pinned into requirements.txt, which is what actually
+# gets installed (`pip install --require-hashes -r requirements.txt`; see the
+# header of requirements.in for how to regenerate the lock). Restating them
+# here would create a second list to keep in sync, and the one that drifts is
+# always the one nothing installs from.
+#
+# This is an application, not a library: nothing depends on it as a package, so
+# it is only ever installed alongside that lock. CI installs the lock first and
+# then does `pip install -e . --no-deps` purely to put `channel_vetting` on
+# sys.path — the `--no-deps` is what keeps this emptiness harmless.
+dependencies = []
+
+# Ergonomic aliases. CI deliberately calls `python -m channel_vetting.pipeline`
+# instead, which does not depend on pip's script directory being on PATH.
+[project.scripts]
+channel-vetting = "channel_vetting.pipeline:main"
+channel-vetting-outreach = "channel_vetting.outreach.sender:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Was pytest.ini. testpaths keeps a bare `pytest` from collecting scripts/.
+[tool.pytest.ini_options]
+# The repo root, so the tests can import the `scripts` package. The library
+# itself is found via `pip install -e .`, not from here.
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v"

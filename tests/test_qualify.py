@@ -4,11 +4,11 @@ and nothing else.
 
 The view floor, the video-count floor and the search zone all became HARD
 requirements in the same change — a channel that misses one is discarded
-at main.pre_push_drop_reason() and no row is written, so qualify() has
+at pipeline.pre_push_drop_reason() and no row is written, so qualify() has
 nothing to say about it. See tests/test_prepush_gate.py for those.
 
 That leaves two outcomes where there were three. "Below View Minimum" is
-gone from scoring.py entirely (its Airtable option stays, holding the rows
+gone from ranking/scoring.py entirely (its Airtable option stays, holding the rows
 written under the old rules), and a young-but-real channel is still worth a
 human's attention, which is what NEW_CHANNEL is for.
 """
@@ -18,34 +18,34 @@ HOME_THEATER_AGE = 12
 
 
 def test_a_channel_past_the_age_minimum_qualifies():
-    from scoring import QUALIFIED, qualify
+    from channel_vetting.ranking.scoring import QUALIFIED, qualify
 
     assert qualify(24, HOME_THEATER_AGE) == QUALIFIED
 
 
 def test_exactly_at_age_minimum_qualifies():
     """Boundary: exactly at the minimum age (not a day younger) qualifies."""
-    from scoring import QUALIFIED, qualify
+    from channel_vetting.ranking.scoring import QUALIFIED, qualify
 
     assert qualify(12, HOME_THEATER_AGE) == QUALIFIED
 
 
 def test_young_channel_is_flagged():
-    from scoring import NEW_CHANNEL, qualify
+    from channel_vetting.ranking.scoring import NEW_CHANNEL, qualify
 
     assert qualify(6, HOME_THEATER_AGE) == NEW_CHANNEL
 
 
 def test_unknown_age_does_not_disqualify():
     """Absent data is not evidence against a channel."""
-    from scoring import QUALIFIED, qualify
+    from channel_vetting.ranking.scoring import QUALIFIED, qualify
 
     assert qualify(None, HOME_THEATER_AGE) == QUALIFIED
 
 
 def test_no_age_requirement_ignores_a_young_channel():
     """Lifestyle Sofa's brief sets no age bar, so min is None."""
-    from scoring import QUALIFIED, qualify
+    from channel_vetting.ranking.scoring import QUALIFIED, qualify
 
     assert qualify(1, None) == QUALIFIED
 
@@ -60,7 +60,7 @@ def test_qualify_no_longer_takes_view_arguments():
     """
     import inspect
 
-    from scoring import qualify
+    from channel_vetting.ranking.scoring import qualify
 
     assert list(inspect.signature(qualify).parameters) == [
         "channel_age_months",
@@ -81,7 +81,7 @@ def test_both_niches_share_the_same_view_floor(niche, expected_views, expected_a
     raised from the 2,000 in its brief; Home Theater is unchanged. The age
     requirement stayed per-niche and is NOT unified.
     """
-    from main import NICHES
+    from channel_vetting.pipeline import NICHES
 
     assert NICHES[niche]["min_avg_views"] == expected_views
     assert NICHES[niche]["min_channel_age_months"] == expected_age
@@ -95,7 +95,7 @@ def test_qualification_literals_match_the_airtable_options():
     mints a NEW Airtable "Qualification" option, and rows stop matching the
     reviewer's saved views. This pins the literal strings.
     """
-    from scoring import QUALIFIED, NEW_CHANNEL
+    from channel_vetting.ranking.scoring import QUALIFIED, NEW_CHANNEL
 
     assert (QUALIFIED, NEW_CHANNEL) == ("Qualified", "New Channel")
 
@@ -107,8 +107,8 @@ def test_scoring_exposes_exactly_two_qualification_values():
     would mutate the live table's schema behind the reviewer's back, so
     adding one has to be a deliberate act that fails this test first.
     """
-    import scoring
-    from scoring import QUALIFIED, NEW_CHANNEL
+    from channel_vetting.ranking import scoring
+    from channel_vetting.ranking.scoring import QUALIFIED, NEW_CHANNEL
 
     assert {QUALIFIED, NEW_CHANNEL} == {
         v for k, v in vars(scoring).items()
@@ -122,6 +122,6 @@ def test_below_view_minimum_is_gone_from_scoring():
     is now discarded rather than written as a flag. A re-added constant
     here would mean the flag path came back without the gate being removed.
     """
-    import scoring
+    from channel_vetting.ranking import scoring
 
     assert not hasattr(scoring, "BELOW_VIEW_MINIMUM")

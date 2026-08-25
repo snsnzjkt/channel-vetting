@@ -11,9 +11,9 @@ import json
 import pytest
 import requests
 
-import influencers
-import main
-from influencers import InfluencersClient, null_client
+from channel_vetting.enrichment import email_influencers
+from channel_vetting import pipeline
+from channel_vetting.enrichment.email_influencers import InfluencersClient, null_client
 
 
 class FakeResponse:
@@ -50,7 +50,7 @@ def _mock_post(monkeypatch, response, calls=None):
             raise response
         return response
 
-    monkeypatch.setattr(influencers.HTTP, "post", fake_post)
+    monkeypatch.setattr(email_influencers.HTTP, "post", fake_post)
 
 
 def test_returns_validated_email(monkeypatch, client):
@@ -195,7 +195,7 @@ def test_a_rate_limit_is_waited_out_and_retried(monkeypatch, client, slept):
         FakeResponse(status_code=429, payload={"error": "slow", "retry_after": 12}),
         FakeResponse(payload={"result": {"email": "hi@creator.com"}}),
     ]
-    monkeypatch.setattr(influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
+    monkeypatch.setattr(email_influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
 
     assert client.find_email("UC123") == "hi@creator.com"
     assert slept == [12.0], "the vendor's cooldown must actually be waited out"
@@ -246,7 +246,7 @@ def test_a_nan_retry_after_does_not_kill_the_run(monkeypatch, client, slept):
                      headers={"Retry-After": "NaN"}),
         FakeResponse(payload={"result": {"email": "hi@creator.com"}}),
     ]
-    monkeypatch.setattr(influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
+    monkeypatch.setattr(email_influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
 
     assert client.find_email("UC123") == "hi@creator.com"
     assert slept == [InfluencersClient.DEFAULT_RATE_LIMIT_WAIT_SECONDS]
@@ -257,7 +257,7 @@ def test_influencers_session_ignores_retry_after_headers():
     session retries 5xx — so a 503 with `Retry-After: 86400` would park the
     run inside the adapter, where neither the budget nor the breaker can see
     it. AIRTABLE must keep honouring it; its 429 cooldown is load-bearing."""
-    import http_client
+    from channel_vetting.core import http_client
 
     assert http_client.INFLUENCERS.adapters["https://"].max_retries.respect_retry_after_header is False
     assert http_client.AIRTABLE.adapters["https://"].max_retries.respect_retry_after_header is True
@@ -329,7 +329,7 @@ def test_a_success_resets_the_failure_streak(monkeypatch, client):
         FakeResponse(status_code=503, payload={"error": "boom"}),
         FakeResponse(status_code=503, payload={"error": "boom"}),
     ]
-    monkeypatch.setattr(influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
+    monkeypatch.setattr(email_influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
 
     for i in range(5):
         client.find_email(f"UC{i}")
@@ -359,7 +359,7 @@ def test_any_vendor_answer_clears_the_failure_streak(monkeypatch, slept, interru
     boom = FakeResponse(status_code=503, payload={"error": "boom"})
     responses = [boom, boom, interruption, boom, boom]
     client = InfluencersClient(sleep=slept.append)
-    monkeypatch.setattr(influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
+    monkeypatch.setattr(email_influencers.HTTP, "post", lambda url, **kw: responses.pop(0))
 
     for i in range(4):
         client.find_email(f"UC{i}")
@@ -470,7 +470,7 @@ def test_from_config_is_inert_without_a_key(monkeypatch):
     """The production factory, on the configuration CI ships by default."""
     calls = []
     _mock_post(monkeypatch, FakeResponse(payload={"result": {"email": "a@b.com"}}), calls)
-    monkeypatch.setattr(influencers, "INFLUENCERS_API_KEY", "")
+    monkeypatch.setattr(email_influencers, "INFLUENCERS_API_KEY", "")
 
     client = InfluencersClient.from_config()
     assert not client.enabled
@@ -479,7 +479,7 @@ def test_from_config_is_inert_without_a_key(monkeypatch):
 
 
 def test_from_config_is_live_with_a_key(monkeypatch):
-    monkeypatch.setattr(influencers, "INFLUENCERS_API_KEY", "a-key")
+    monkeypatch.setattr(email_influencers, "INFLUENCERS_API_KEY", "a-key")
     assert InfluencersClient.from_config().enabled
 
 
@@ -537,19 +537,19 @@ def _performance(repeated_email=""):
 @pytest.fixture
 def no_deep_scan(monkeypatch):
     """Step 3 costs quota; stub it out so these tests isolate steps 4 and 5."""
-    monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "")
+    monkeypatch.setattr(pipeline, "scan_older_videos_for_email", lambda *a, **k: "")
 
 
 def test_step_4_runs_before_the_browser(no_deep_scan):
     enricher = StubEmailSource("api@creator.com")
     scraper = StubEmailSource("browser@creator.com")
 
-    email, source, _ = main.resolve_email_with_source(
+    email, source, _ = pipeline.resolve_email_with_source(
         _stats(), _performance(), scraper, enricher
     )
 
     assert email == "api@creator.com"
-    assert source == main.EMAIL_SOURCE_INFLUENCERS
+    assert source == pipeline.EMAIL_SOURCE_INFLUENCERS
     # The browser IS consulted — but only for the link list (need_email=False),
     # never for an address. Step 4's answer stands, and the source label proves
     # the browser didn't supply it. See resolve_email_with_source for why the
@@ -561,12 +561,12 @@ def test_browser_still_runs_when_step_4_misses(no_deep_scan):
     enricher = StubEmailSource("")
     scraper = StubEmailSource("browser@creator.com")
 
-    email, source, _ = main.resolve_email_with_source(
+    email, source, _ = pipeline.resolve_email_with_source(
         _stats(), _performance(), scraper, enricher
     )
 
     assert email == "browser@creator.com"
-    assert source == main.EMAIL_SOURCE_BROWSER
+    assert source == pipeline.EMAIL_SOURCE_BROWSER
     assert enricher.calls == ["UC123"]
 
 
@@ -575,24 +575,24 @@ def test_free_steps_still_win_over_step_4(no_deep_scan):
     an address is already known."""
     enricher = StubEmailSource("api@creator.com")
 
-    email, source, _ = main.resolve_email_with_source(
+    email, source, _ = pipeline.resolve_email_with_source(
         _stats(business_email="about@creator.com"), _performance(), None, enricher
     )
 
     assert email == "about@creator.com"
-    assert source == main.EMAIL_SOURCE_ABOUT
+    assert source == pipeline.EMAIL_SOURCE_ABOUT
     assert not enricher.calls
 
 
 def test_repeated_email_still_wins_over_step_4(no_deep_scan):
     enricher = StubEmailSource("api@creator.com")
 
-    email, source, _ = main.resolve_email_with_source(
+    email, source, _ = pipeline.resolve_email_with_source(
         _stats(), _performance(repeated_email="repeat@creator.com"), None, enricher
     )
 
     assert email == "repeat@creator.com"
-    assert source == main.EMAIL_SOURCE_REPEATED
+    assert source == pipeline.EMAIL_SOURCE_REPEATED
     assert not enricher.calls
 
 
@@ -600,17 +600,17 @@ def test_chain_without_an_enricher_is_unchanged(no_deep_scan):
     """Existing callers that pass no enricher keep the old behaviour."""
     scraper = StubEmailSource("browser@creator.com")
 
-    email, source, _ = main.resolve_email_with_source(_stats(), _performance(), scraper)
+    email, source, _ = pipeline.resolve_email_with_source(_stats(), _performance(), scraper)
 
     assert email == "browser@creator.com"
-    assert source == main.EMAIL_SOURCE_BROWSER
+    assert source == pipeline.EMAIL_SOURCE_BROWSER
 
 
 def test_post_is_retryable_on_the_influencers_session():
     """INFLUENCERS_RETRY_STATUSES is dead configuration unless POST is in
     the allowed set — the endpoint is only ever reached by POST. Pinned
     because the omission is silent: 5xx retries simply never happen."""
-    import http_client
+    from channel_vetting.core import http_client
 
     retry = http_client.INFLUENCERS.adapters["https://"].max_retries
     assert retry.is_retry("POST", 503) is True
@@ -700,7 +700,7 @@ def test_alternating_lost_responses_and_misses_still_hit_the_cap(monkeypatch):
             raise item
         return item
 
-    monkeypatch.setattr(influencers.HTTP, "post", fake_post)
+    monkeypatch.setattr(email_influencers.HTTP, "post", fake_post)
 
     for i in range(8):
         client.find_email(f"UC{i}")
@@ -716,7 +716,7 @@ def test_influencers_session_does_not_retry_a_lost_response():
     spends a second credit for one answer, and the budget only sees the
     final response, so the overspend would be invisible. Connect and status
     retries stay on: neither can have been billed."""
-    import http_client
+    from channel_vetting.core import http_client
 
     retry = http_client.INFLUENCERS.adapters["https://"].max_retries
     assert retry.read == 0, "a lost response must not be re-POSTed"
@@ -727,7 +727,7 @@ def test_influencers_session_does_not_retry_a_lost_response():
 def test_airtable_session_still_refuses_to_retry_post():
     """The influencers session widening its allowed methods must not have
     widened Airtable's — a retried POST there creates a duplicate row."""
-    import http_client
+    from channel_vetting.core import http_client
 
     retry = http_client.AIRTABLE.adapters["https://"].max_retries
     assert retry.is_retry("POST", 503) is False

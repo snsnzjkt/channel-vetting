@@ -13,10 +13,15 @@ off the production ledger.
 import pytest
 import requests
 
-import credit_tracker
-import influencer_discovery
-import influencers
-from credit_tracker import KIND_DISCOVERY, KIND_EMAIL, credits_today, record_spend
+from channel_vetting.budget import credit_tracker
+from channel_vetting.discovery import influencers_club
+from channel_vetting.enrichment import email_influencers
+from channel_vetting.budget.credit_tracker import (
+    KIND_DISCOVERY,
+    KIND_EMAIL,
+    credits_today,
+    record_spend,
+)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -56,7 +61,7 @@ def _discovery_resp(accounts, total=10_000, credits_cost=0.5, credits_left=None)
 
 def _discovery_client(**kw):
     kw.setdefault("max_credits", 100.0)   # per-run ceiling out of the way
-    return influencer_discovery.InfluencerDiscovery(sleep=lambda *_: None, **kw)
+    return influencers_club.InfluencerDiscovery(sleep=lambda *_: None, **kw)
 
 
 @pytest.fixture
@@ -68,9 +73,9 @@ def tight_day(monkeypatch):
 # --- discovery -------------------------------------------------------------
 
 def test_discovery_records_the_vendors_own_cost(monkeypatch):
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     monkeypatch.setattr(
-        influencer_discovery.HTTP, "post",
+        influencers_club.HTTP, "post",
         lambda *a, **k: _discovery_resp([_account("@a"), _account("@b")],
                                         total=2, credits_cost=0.02),
     )
@@ -90,9 +95,9 @@ def test_the_fixture_payload_actually_parses(monkeypatch):
     without a ceiling ever firing. Assert candidates come back BEFORE trusting
     any test that counts pages.
     """
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     monkeypatch.setattr(
-        influencer_discovery.HTTP, "post",
+        influencers_club.HTTP, "post",
         lambda *a, **k: _discovery_resp([_account("@one"), _account("@two")], total=2),
     )
 
@@ -104,7 +109,7 @@ def test_the_fixture_payload_actually_parses(monkeypatch):
 def test_the_daily_ceiling_stops_discovery_across_runs(monkeypatch, tight_day):
     """The point of the ledger: a SECOND run in the same day inherits the first
     run's spend instead of getting a fresh allowance."""
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     calls = {"n": 0}
 
     def fake_post(*a, **k):
@@ -116,7 +121,7 @@ def test_the_daily_ceiling_stops_discovery_across_runs(monkeypatch, tight_day):
             total=10_000, credits_cost=0.5,
         )
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     # Run 1: the 1.0 daily ceiling allows exactly two 0.5 pages.
     got1 = _discovery_client().discover(filters={}, target=1000)
@@ -136,7 +141,7 @@ def test_the_daily_ceiling_stops_discovery_across_runs(monkeypatch, tight_day):
 def test_the_vendors_own_balance_outranks_our_ceilings(monkeypatch):
     """`credits_left` arrives free on every discovery response and used to reach
     only a log line. It is the entitlement; our monthly ceiling is a guess."""
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     calls = {"n": 0}
 
     def fake_post(*a, **k):
@@ -146,7 +151,7 @@ def test_the_vendors_own_balance_outranks_our_ceilings(monkeypatch):
             total=10_000, credits_cost=0.02, credits_left=0.01,
         )
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     _discovery_client().discover(filters={}, target=1000)
 
@@ -170,9 +175,9 @@ def test_the_vendor_balance_also_gates_the_email_step(monkeypatch):
         posted["n"] += 1
         return _Resp({"result": {"email": "a@b.com"}, "credits_cost": 0.2})
 
-    monkeypatch.setattr(influencers.HTTP, "post", fake_post)
+    monkeypatch.setattr(email_influencers.HTTP, "post", fake_post)
 
-    assert influencers.InfluencersClient(sleep=lambda *_: None).find_email("UC1") == ""
+    assert email_influencers.InfluencersClient(sleep=lambda *_: None).find_email("UC1") == ""
     assert posted["n"] == 0
 
 
@@ -189,7 +194,7 @@ def test_discovery_stops_when_the_ledger_cannot_be_read(monkeypatch, tmp_path):
         posted["n"] += 1
         return _discovery_resp([_account("@a")])
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     client = _discovery_client()
     assert client.discover(filters={}, target=50) == []
@@ -200,7 +205,7 @@ def test_discovery_stops_when_the_ledger_cannot_be_read(monkeypatch, tmp_path):
 def test_a_page_is_projected_before_it_is_bought(monkeypatch, tight_day):
     """0.9 of a 1.0 ceiling must refuse a 0.5 page. The old `spent >= max` test
     authorised it and overshot by a page, per niche."""
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 50)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 50)
     record_spend(0.9, kind=KIND_DISCOVERY)
 
     posted = {"n": 0}
@@ -209,7 +214,7 @@ def test_a_page_is_projected_before_it_is_bought(monkeypatch, tight_day):
         posted["n"] += 1
         return _discovery_resp([_account(f"@a{posted['n']}")])
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     _discovery_client().discover(filters={}, target=1000)
     assert posted["n"] == 0
@@ -220,9 +225,9 @@ def test_a_page_is_projected_before_it_is_bought(monkeypatch, tight_day):
 
 def _email_client(monkeypatch, payload, status_code=200):
     monkeypatch.setattr(
-        influencers.HTTP, "post", lambda *a, **k: _Resp(payload, status_code)
+        email_influencers.HTTP, "post", lambda *a, **k: _Resp(payload, status_code)
     )
-    return influencers.InfluencersClient(sleep=lambda *_: None)
+    return email_influencers.InfluencersClient(sleep=lambda *_: None)
 
 
 def test_an_email_hit_is_recorded_from_the_vendors_figure(monkeypatch):
@@ -257,9 +262,9 @@ def test_the_daily_ceiling_refuses_a_lookup_it_could_not_pay_for(monkeypatch, ti
         posted["n"] += 1
         return _Resp({"result": {"email": "a@b.com"}, "credits_cost": 0.2})
 
-    monkeypatch.setattr(influencers.HTTP, "post", fake_post)
+    monkeypatch.setattr(email_influencers.HTTP, "post", fake_post)
 
-    client = influencers.InfluencersClient(sleep=lambda *_: None)
+    client = email_influencers.InfluencersClient(sleep=lambda *_: None)
     assert client.find_email("UC1") == ""
     assert posted["n"] == 0, "sent a lookup it could not afford"
     assert client.enabled is False
@@ -287,9 +292,9 @@ def test_email_lookups_stop_when_the_ledger_cannot_be_read(monkeypatch, tmp_path
         posted["n"] += 1
         return _Resp({"result": {"email": "a@b.com"}, "credits_cost": 0.2})
 
-    monkeypatch.setattr(influencers.HTTP, "post", fake_post)
+    monkeypatch.setattr(email_influencers.HTTP, "post", fake_post)
 
-    client = influencers.InfluencersClient(sleep=lambda *_: None)
+    client = email_influencers.InfluencersClient(sleep=lambda *_: None)
     assert client.find_email("UC1") == ""
     assert posted["n"] == 0
     assert client.enabled is False
@@ -311,8 +316,8 @@ def test_a_rejected_address_is_still_charged(monkeypatch):
 
 def test_a_disabled_client_spends_nothing(monkeypatch):
     """No API key means no paid calls, and therefore no ledger writes."""
-    assert influencer_discovery.InfluencerDiscovery(enabled=False).discover(
+    assert influencers_club.InfluencerDiscovery(enabled=False).discover(
         filters={}, target=50
     ) == []
-    assert influencers.InfluencersClient(enabled=False).find_email("UC1") == ""
+    assert email_influencers.InfluencersClient(enabled=False).find_email("UC1") == ""
     assert credits_today() == 0.0

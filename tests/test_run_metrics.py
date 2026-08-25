@@ -10,8 +10,8 @@ from collections import Counter
 
 import pytest
 
-import run_metrics
-from search_zones import ZONE_CORE
+from channel_vetting.core import run_metrics
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 def _record(**over):
@@ -116,15 +116,15 @@ def test_metrics_are_written_even_when_a_niche_raises(monkeypatch):
     back out — a regression nothing else in the suite would notice, because the
     pipeline would still work perfectly and just silently stop recording.
     """
-    import main
+    from channel_vetting import pipeline
 
     written = []
-    monkeypatch.setattr(main.run_metrics, "write",
+    monkeypatch.setattr(pipeline.run_metrics, "write",
                         lambda rec, p=None: written.append(rec) or True)
-    monkeypatch.setattr(main, "fetch_blocklist", lambda: _NullBlocklist())
-    monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
-    monkeypatch.setattr(main, "run_niche",
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: _NullBlocklist())
+    monkeypatch.setattr(pipeline, "get_existing_channel_ids", lambda t: set())
+    monkeypatch.setattr(pipeline, "fetch_external_handles", lambda **kw: {})
+    monkeypatch.setattr(pipeline, "run_niche",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("niche exploded")))
 
     niches = {
@@ -136,7 +136,7 @@ def test_metrics_are_written_even_when_a_niche_raises(monkeypatch):
     }
 
     with pytest.raises(RuntimeError):
-        main.run(niches, max_results_per_keyword=5, days_back=7)
+        pipeline.run(niches, max_results_per_keyword=5, days_back=7)
 
     assert written, "a crashed run must still leave a metrics record"
     assert written[0]["status"] == "aborted", (
@@ -146,15 +146,15 @@ def test_metrics_are_written_even_when_a_niche_raises(monkeypatch):
 
 
 def test_metrics_record_a_completed_run_as_completed(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
     written = []
-    monkeypatch.setattr(main.run_metrics, "write",
+    monkeypatch.setattr(pipeline.run_metrics, "write",
                         lambda rec, p=None: written.append(rec) or True)
-    monkeypatch.setattr(main, "fetch_blocklist", lambda: _NullBlocklist())
-    monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
-    monkeypatch.setattr(main, "run_niche", lambda *a, **k: (7, 3, {"UC1"}, True))
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: _NullBlocklist())
+    monkeypatch.setattr(pipeline, "get_existing_channel_ids", lambda t: set())
+    monkeypatch.setattr(pipeline, "fetch_external_handles", lambda **kw: {})
+    monkeypatch.setattr(pipeline, "run_niche", lambda *a, **k: (7, 3, {"UC1"}, True))
 
     niches = {
         "Test Niche": {
@@ -163,7 +163,7 @@ def test_metrics_record_a_completed_run_as_completed(monkeypatch):
             "allowed_country_codes": ZONE_CORE,
         }
     }
-    main.run(niches, max_results_per_keyword=5, days_back=7)
+    pipeline.run(niches, max_results_per_keyword=5, days_back=7)
 
     assert written[0]["status"] == "completed"
     assert written[0]["niches"]["Test Niche"] == {
@@ -201,7 +201,9 @@ def test_production_metrics_log_has_no_fixture_records():
     """Guards the cleanup: 'Test Niche' is not a real niche."""
     import pathlib
 
-    path = pathlib.Path("run_metrics.jsonl")
+    from channel_vetting.core.paths import data_path
+
+    path = pathlib.Path(data_path("run_metrics.jsonl"))
     if not path.exists():
         return
     for line in path.read_text().splitlines():

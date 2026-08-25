@@ -1,5 +1,5 @@
 """
-cleanup_external_duplicates.py is the only script in this repo that
+scripts/backfill/cleanup_external_duplicates.py is the only script in this repo that
 PERMANENTLY deletes Airtable rows, and there is no undo on our end. These
 tests pin its three guards (see that module's docstring):
 
@@ -7,7 +7,7 @@ tests pin its three guards (see that module's docstring):
 2. a read failure aborts instead of deleting from a table it could only
    partially read;
 3. a mass-delete circuit breaker that needs --yes-delete-many, in the same
-   shape as audit_blocklist.py's --yes-create-status-option.
+   shape as scripts/audit/audit_blocklist.py's --yes-create-status-option.
 
 Every test wires delete_record to pytest.fail unless deleting is the
 behaviour under test, so a regression shows up as a failing test rather
@@ -41,7 +41,7 @@ def _prospects_page(n):
 def _setup(monkeypatch, argv, *, rows=4, matching=("chan0",), response=None):
     """Wire up a run with `rows` prospects, of which `matching` handles are
     present in the external index. Returns the list deletes land in."""
-    import cleanup_external_duplicates as cleanup
+    from scripts.backfill import cleanup_external_duplicates as cleanup
 
     monkeypatch.setattr(cleanup.time, "sleep", lambda s: None)
     monkeypatch.setattr(
@@ -60,7 +60,7 @@ def _setup(monkeypatch, argv, *, rows=4, matching=("chan0",), response=None):
     # Both niche tables are configured from .env, which may be empty in a
     # test environment — pin them so the loop actually runs.
     monkeypatch.setattr(cleanup, "TABLES", {"Home Theater": "Channel Prospects"})
-    monkeypatch.setattr(sys, "argv", ["cleanup_external_duplicates.py", *argv])
+    monkeypatch.setattr(sys, "argv", ["scripts/backfill/cleanup_external_duplicates.py", *argv])
 
     deleted: list[tuple[str, str]] = []
     monkeypatch.setattr(

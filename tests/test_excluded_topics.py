@@ -10,9 +10,9 @@ contain a landmine word (a shotgun MICROPHONE, a nail/glue gun, a
 """
 import pytest
 
-import main
-import niches
-from search_zones import ZONE_CORE
+from channel_vetting import pipeline
+from channel_vetting.discovery import niches
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 class _NullBlocklist:
@@ -39,18 +39,18 @@ class _NullBlocklist:
     ("Everything about the second amendment", "firearms"),
 ])
 def test_excluded_categories_are_flagged(text, expected):
-    assert main.excluded_topic_reason(text) == expected
+    assert pipeline.excluded_topic_reason(text) == expected
 
 
 def test_matching_is_case_insensitive():
-    assert main.excluded_topic_reason("asmr") == "asmr"
-    assert main.excluded_topic_reason("ASMR") == "asmr"
-    assert main.excluded_topic_reason("Asmr Relaxation") == "asmr"
+    assert pipeline.excluded_topic_reason("asmr") == "asmr"
+    assert pipeline.excluded_topic_reason("ASMR") == "asmr"
+    assert pipeline.excluded_topic_reason("Asmr Relaxation") == "asmr"
 
 
 def test_checks_all_the_texts_passed():
     # title clean, description dirty -> still caught (process_candidate passes both)
-    assert main.excluded_topic_reason("My Channel", "we cover firearms and pistols") == "firearms"
+    assert pipeline.excluded_topic_reason("My Channel", "we cover firearms and pistols") == "firearms"
 
 
 # --- classifier: the niche-specific false positives are NOT flagged --------
@@ -75,7 +75,7 @@ def test_checks_all_the_texts_passed():
     "Building a sim racing cockpit in my man cave",                # a rig build IS on-niche
 ])
 def test_legitimate_channels_are_not_flagged(text):
-    assert main.excluded_topic_reason(text) is None
+    assert pipeline.excluded_topic_reason(text) is None
 
 
 # --- wrong vertical (2026-08-15) -------------------------------------------
@@ -87,7 +87,7 @@ def test_legitimate_channels_are_not_flagged(text):
 
 def test_a_racing_game_channel_is_flagged():
     """UCZY-IgNxiP2KUM1Ac8knQfg, verbatim from its About text."""
-    assert main.excluded_topic_reason(
+    assert pipeline.excluded_topic_reason(
         "Dwight Kovich",
         "Hey, I'm Dwight - a full-time content creator bringing high-octane "
         "racing action to life every single day! I specialize in BeamNG.drive "
@@ -97,7 +97,7 @@ def test_a_racing_game_channel_is_flagged():
 
 def test_a_forestry_channel_is_flagged():
     """UCGpOEUlhFipK0hTeu2AHCMQ, verbatim from its About text."""
-    assert main.excluded_topic_reason(
+    assert pipeline.excluded_topic_reason(
         "Timber Time",
         "If you love the raw power of logging trucks, daring tree-cutting "
         "skills, and epic battles against mud and rugged terrains, you're in "
@@ -108,7 +108,7 @@ def test_a_forestry_channel_is_flagged():
 
 def test_the_game_title_matches_despite_the_trailing_dot():
     """'BeamNG.drive' — the word boundary falls at the dot, so the term hits."""
-    assert main.excluded_topic_reason("I play BeamNG.drive") == "sim_racing"
+    assert pipeline.excluded_topic_reason("I play BeamNG.drive") == "sim_racing"
 
 
 def test_the_new_terms_reach_the_server_side_negation_filter():
@@ -123,8 +123,8 @@ def test_the_new_terms_reach_the_server_side_negation_filter():
 
 
 def test_empty_and_none_texts_are_safe():
-    assert main.excluded_topic_reason() is None
-    assert main.excluded_topic_reason("", None, "") is None
+    assert pipeline.excluded_topic_reason() is None
+    assert pipeline.excluded_topic_reason("", None, "") is None
 
 
 # --- wiring: process_candidate drops before spending quota -----------------
@@ -133,7 +133,7 @@ def test_process_candidate_drops_excluded_topic_before_performance(monkeypatch):
     calls = {"perf": 0}
 
     monkeypatch.setattr(
-        main, "get_channel_stats",
+        pipeline, "get_channel_stats",
         lambda channel_id=None, *, handle=None: {
             "channel_id": "UC1", "channel_title": "Daily Politics",
             "handle": "h1", "description": "political commentary and election analysis",
@@ -144,15 +144,15 @@ def test_process_candidate_drops_excluded_topic_before_performance(monkeypatch):
         calls["perf"] += 1
         return {"avg_views": 50000}
 
-    monkeypatch.setattr(main, "get_recent_video_performance", fake_perf)
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", fake_perf)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Daily Politics"}, {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE}, None,
     )
     assert record is None
-    assert reason == main.DROP_EXCLUDED_TOPIC
+    assert reason == pipeline.DROP_EXCLUDED_TOPIC
     assert calls["perf"] == 0, "excluded channel must be dropped before the performance-fetch quota is spent"
 
 
@@ -174,7 +174,7 @@ def test_both_niches_carry_the_discovery_negation_filter():
     expected = sorted(
         set(niches.EXCLUDED_TOPIC_KEYWORDS) | set(niches.GAMING_AND_TECH_BIO_NEGATIONS)
     )
-    for niche_name, cfg in main.NICHES.items():
+    for niche_name, cfg in pipeline.NICHES.items():
         filters = cfg["discovery_filters"]
         wired = filters.get("keywords_not_in_description")
         assert wired == expected, niche_name
@@ -190,7 +190,7 @@ def test_the_vendor_negations_never_include_an_on_niche_word():
     unrecoverable — the creator is never shown to us at all. So no word that a
     legitimate prospect would put in their own bio may appear.
     """
-    wired = set(main.NICHES["Home Theater"]["discovery_filters"]["keywords_not_in_description"])
+    wired = set(pipeline.NICHES["Home Theater"]["discovery_filters"]["keywords_not_in_description"])
     for on_niche in ("speaker", "projector", "soundbar", "atmos", "surround",
                      "hi-fi", "home theater", "man cave", "nvidia", "home audio",
                      "decor", "interior", "furniture", "diy"):
@@ -205,7 +205,7 @@ def test_discovery_negation_reuses_the_gate_terms_verbatim():
         {t for terms in niches.EXCLUDED_TOPIC_TERMS.values() for t in terms}
     )
     for term in niches.EXCLUDED_TOPIC_KEYWORDS:
-        assert main.excluded_topic_reason(term) is not None, term
+        assert pipeline.excluded_topic_reason(term) is not None, term
 
 
 def test_discovery_negation_omits_the_same_landmines_the_gate_omits():

@@ -16,7 +16,7 @@ def _iso(dt):
 
 
 def test_days_since_a_recent_upload_is_small():
-    from enrichment import days_since_last_upload
+    from channel_vetting.enrichment.channels import days_since_last_upload
 
     recent = _iso(datetime.now(timezone.utc) - timedelta(days=10))
     days = days_since_last_upload([recent])
@@ -24,7 +24,7 @@ def test_days_since_a_recent_upload_is_small():
 
 
 def test_a_stale_channel_is_over_a_year():
-    from enrichment import days_since_last_upload
+    from channel_vetting.enrichment.channels import days_since_last_upload
 
     old = _iso(datetime.now(timezone.utc) - timedelta(days=500))
     days = days_since_last_upload([old])
@@ -34,7 +34,7 @@ def test_a_stale_channel_is_over_a_year():
 def test_the_newest_sampled_upload_is_the_one_that_counts():
     """A long gap followed by a fresh upload is an ACTIVE channel — the
     result must track the newest date, and must not depend on list order."""
-    from enrichment import days_since_last_upload
+    from channel_vetting.enrichment.channels import days_since_last_upload
 
     old = _iso(datetime.now(timezone.utc) - timedelta(days=800))
     fresh = _iso(datetime.now(timezone.utc) - timedelta(days=5))
@@ -46,7 +46,7 @@ def test_the_newest_sampled_upload_is_the_one_that_counts():
 
 @pytest.mark.parametrize("dates", [[], ["", None], ["not-a-date"], [None], ["garbage", ""]])
 def test_unknown_or_unparseable_returns_none(dates):
-    from enrichment import days_since_last_upload
+    from channel_vetting.enrichment.channels import days_since_last_upload
 
     assert days_since_last_upload(dates) is None
 
@@ -54,7 +54,7 @@ def test_unknown_or_unparseable_returns_none(dates):
 def test_a_bare_date_timestamp_is_handled_not_crashed():
     """A date-only string (no time/offset) parses tz-NAIVE; the helper must
     still diff it against an aware 'now' without raising a TypeError."""
-    from enrichment import days_since_last_upload
+    from channel_vetting.enrichment.channels import days_since_last_upload
 
     days = days_since_last_upload(["2020-01-01"])
     assert days is not None and days > 365

@@ -83,7 +83,7 @@ on:
 # group is the only mechanism here that genuinely prevents two CI runs
 # overlapping, so do not remove it on the grounds that the ledger "handles it".
 #
-# What it does NOT cover: a hand-run `python outreach.py` on a laptop. That is
+# What it does NOT cover: a hand-run `python outreach/sender.py` on a laptop. That is
 # the gap the Outreach Lock row exists to make visible.
 #
 # cancel-in-progress is FALSE for a stronger reason than in channel-vetting:
@@ -164,6 +164,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --require-hashes -r requirements.txt
+          # Puts `channel_vetting` (src/ layout) on sys.path. --no-deps so
+          # nothing is resolved outside the hash-pinned lock above; the
+          # project itself declares no dependencies for this reason.
+          pip install -e . --no-deps
 
       # Argument injection guard, duplicated from channel-vetting.yml on
       # purpose: routing an input through env: stops SHELL injection, but an
@@ -190,7 +194,7 @@ jobs:
       # options, that the lock row is present, and that the mail credentials
       # authenticate. Cheaper to fail here than to strand claims mid-run.
       - name: Preflight
-        run: python outreach.py --check-setup
+        run: python -m channel_vetting.outreach.sender --check-setup
 
       - name: Run outreach
         env:
@@ -216,7 +220,7 @@ jobs:
           if [ "$MODE" = "send" ]; then ARGS="$ARGS --send"; else ARGS="$ARGS --dry-run"; fi
           if [ -n "$LIMIT" ]; then ARGS="$ARGS --limit $LIMIT"; fi
           if [ -n "$NICHE" ]; then ARGS="$ARGS --niche $NICHE"; fi
-          python outreach.py $ARGS
+          python -m channel_vetting.outreach.sender $ARGS
 
       # The rendered .eml files are the only way to see what a dry run WOULD
       # have sent. Uploaded so a human can read them before anyone authorises

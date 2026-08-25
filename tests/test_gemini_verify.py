@@ -18,9 +18,9 @@ import sys
 
 import pytest
 
-import config
-import gemini_tracker
-import gemini_verify as gv
+from channel_vetting import config
+from channel_vetting.budget import gemini_tracker
+from channel_vetting.verification import gemini as gv
 
 
 # --- fixtures -------------------------------------------------------------
@@ -386,7 +386,7 @@ def test_criteria_hash_is_stable_across_processes():
     a different key every run: 100% cache miss, forever, silently, burning the
     day cap with no symptom other than a request count nobody watches.
     """
-    code = ("import gemini_verify as g;"
+    code = ("from channel_vetting.verification import gemini as g;"
             "print(g.criteria_hash([{'name':'a','test':'b'}]))")
     seen = set()
     for seed in ("0", "1", "12345"):
@@ -831,7 +831,7 @@ def test_both_niches_mark_the_brand_criterion_required():
     test to a scored criterion, where the 0.5 ratio would re-admit the
     manufacturers it exists to catch.
     """
-    import niches
+    from channel_vetting.discovery import niches
     for name, cfg in niches.NICHES.items():
         req = [c for c in cfg["video_criteria"] if c.get("required")]
         assert req, f"{name}: expected at least one required criterion"
@@ -847,7 +847,7 @@ def test_both_niches_veto_the_excluded_subject():
     could satisfy it and nothing else and still confirm, so "no guns in this
     video" would become evidence the channel is on-niche.
     """
-    import niches
+    from channel_vetting.discovery import niches
     for name, cfg in niches.NICHES.items():
         matches = [c for c in cfg["video_criteria"]
                    if "excluded subject" in c["name"]]

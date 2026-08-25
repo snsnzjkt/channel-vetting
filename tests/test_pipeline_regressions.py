@@ -1,5 +1,5 @@
 """
-Integration-level regression coverage for main.py's run() / run_niche() /
+Integration-level regression coverage for pipeline.py's run() / run_niche() /
 process_candidate() wiring.
 
 tests/test_run_niche_caps.py (prescribed verbatim by the Task 8 brief)
@@ -19,9 +19,9 @@ from collections import Counter
 
 import pytest
 
-from airtable_client import AirtableReadError
-from do_not_contact import BlocklistUnavailable
-from search_zones import ZONE_CORE
+from channel_vetting.airtable.client import AirtableReadError
+from channel_vetting.airtable.do_not_contact import BlocklistUnavailable
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 class _NullBlocklist:
@@ -66,7 +66,7 @@ def _stub_performance(**overrides):
         "avg_views": 5_000,
         "avg_engagement_rate": 1.0,
         "upload_dates": [],
-        # "en", not "": an unset language is a hard DROP (main.is_english),
+        # "en", not "": an unset language is a hard DROP (pipeline.is_english),
         # so a stub without one never reaches the behaviour under test.
         "content_language": "en",
         "repeated_email": "",
@@ -86,14 +86,14 @@ def test_run_aborts_when_blocklist_unavailable(monkeypatch):
     """run() must raise SystemExit and must not have started any niche
     work — not even the base-wide dedupe fetch — when the blocklist
     can't be established."""
-    import main
+    from channel_vetting import pipeline
 
     def fake_fetch_blocklist():
         raise BlocklistUnavailable("DO NOT CONTACT fetch failed")
 
     calls = []
-    monkeypatch.setattr(main, "fetch_blocklist", fake_fetch_blocklist)
-    monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: calls.append(t) or set())
+    monkeypatch.setattr(pipeline, "fetch_blocklist", fake_fetch_blocklist)
+    monkeypatch.setattr(pipeline, "get_existing_channel_ids", lambda t: calls.append(t) or set())
 
     niches = {
         "Test Niche": {
@@ -105,7 +105,7 @@ def test_run_aborts_when_blocklist_unavailable(monkeypatch):
     }
 
     with pytest.raises(SystemExit):
-        main.run(niches, max_results_per_keyword=5, days_back=90)
+        pipeline.run(niches, max_results_per_keyword=5, days_back=90)
 
     assert calls == []
 
@@ -123,16 +123,16 @@ def test_run_aborts_when_get_existing_channel_ids_fails(monkeypatch):
     exactly this reason; run() must catch it and abort before doing
     anything else (fetch_external_handles, any niche work).
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "fetch_blocklist", lambda: _NullBlocklist())
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: _NullBlocklist())
 
     def fake_get_ids(table_name):
         raise AirtableReadError("429 on page 7 of 14")
 
-    monkeypatch.setattr(main, "get_existing_channel_ids", fake_get_ids)
+    monkeypatch.setattr(pipeline, "get_existing_channel_ids", fake_get_ids)
     monkeypatch.setattr(
-        main, "fetch_external_handles",
+        pipeline, "fetch_external_handles",
         lambda **kw: pytest.fail("must abort before fetching external handles"),
     )
 
@@ -146,22 +146,22 @@ def test_run_aborts_when_get_existing_channel_ids_fails(monkeypatch):
     }
 
     with pytest.raises(SystemExit):
-        main.run(niches, max_results_per_keyword=5, days_back=90)
+        pipeline.run(niches, max_results_per_keyword=5, days_back=90)
 
 
 # --- M10: an unreadable daily count must skip the niche, not grant a full budget --
 
 def test_run_niche_skips_on_airtable_read_error(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
     def fake_count(table, qualification=None):
         raise AirtableReadError("read failed")
 
     discovery_calls = []
-    monkeypatch.setattr(main, "count_added_today", fake_count)
-    monkeypatch.setattr(main, "run_discovery", lambda *a, **k: discovery_calls.append(1) or [])
+    monkeypatch.setattr(pipeline, "count_added_today", fake_count)
+    monkeypatch.setattr(pipeline, "run_discovery", lambda *a, **k: discovery_calls.append(1) or [])
 
-    result = main.run_niche(
+    result = pipeline.run_niche(
         "Test", "tbl", ["kw"], 5, 90,
         globally_tracked_ids=set(),
         external_handles={},
@@ -177,18 +177,18 @@ def test_run_niche_skips_on_airtable_read_error(monkeypatch):
 # --- M11: zero headroom must spend zero quota -----------------------------
 
 def test_run_niche_skips_run_discovery_when_already_at_cap(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
     def fake_count(table, qualification=None):
-        if qualification == main.QUALIFIED:
-            return main.DAILY_QUALIFIED_CAP
-        return main.DAILY_QUALIFIED_CAP + main.DAILY_FLAGGED_CAP
+        if qualification == pipeline.QUALIFIED:
+            return pipeline.DAILY_QUALIFIED_CAP
+        return pipeline.DAILY_QUALIFIED_CAP + pipeline.DAILY_FLAGGED_CAP
 
     discovery_calls = []
-    monkeypatch.setattr(main, "count_added_today", fake_count)
-    monkeypatch.setattr(main, "run_discovery", lambda *a, **k: discovery_calls.append(1) or [])
+    monkeypatch.setattr(pipeline, "count_added_today", fake_count)
+    monkeypatch.setattr(pipeline, "run_discovery", lambda *a, **k: discovery_calls.append(1) or [])
 
-    result = main.run_niche(
+    result = pipeline.run_niche(
         "Test", "tbl", ["kw"], 5, 90,
         globally_tracked_ids=set(),
         external_handles={},
@@ -204,16 +204,16 @@ def test_run_niche_skips_run_discovery_when_already_at_cap(monkeypatch):
 # --- IMPORTANT 2: a misconfigured niche must skip, not crash the run -----
 
 def test_run_niche_skips_when_config_missing_thresholds(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
     discovery_calls = []
-    monkeypatch.setattr(main, "run_discovery", lambda *a, **k: discovery_calls.append(1) or [])
+    monkeypatch.setattr(pipeline, "run_discovery", lambda *a, **k: discovery_calls.append(1) or [])
     monkeypatch.setattr(
-        main, "count_added_today",
+        pipeline, "count_added_today",
         lambda *a, **k: pytest.fail("should not read Airtable counts for a misconfigured niche"),
     )
 
-    result = main.run_niche(
+    result = pipeline.run_niche(
         "Bad Niche", "tbl", ["kw"], 5, 90,
         globally_tracked_ids=set(),
         external_handles={},
@@ -229,26 +229,26 @@ def test_run_niche_skips_when_config_missing_thresholds(monkeypatch):
 # --- M9: blocklist checkpoint 3 (resolved email) must still run ----------
 
 def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda cid, pl: _stub_performance())
     # process_candidate resolves the email via resolve_email_with_source now;
     # the None flag keeps the no-social drop from pre-empting the blocklist
     # checkpoint this test is exercising.
     monkeypatch.setattr(
-        main, "resolve_email_with_source",
+        pipeline, "resolve_email_with_source",
         lambda *a, **k: ("creator@blocked.example", "test-source", None),
     )
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
-    monkeypatch.setattr(main, "push_record", lambda t, r: pytest.fail("blocked candidate must never be pushed"))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: pytest.fail("blocked candidate must never be pushed"))
 
     niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
 
-    result = main.push_until_full(
+    result = pipeline.push_until_full(
         [candidate],
-        lambda c: main.process_candidate(c, {}, _EmailOnlyBlocklist(), niche_config, None),
+        lambda c: pipeline.process_candidate(c, {}, _EmailOnlyBlocklist(), niche_config, None),
         "tbl",
         qualified_headroom=5,
         flagged_headroom=5,
@@ -262,7 +262,7 @@ def test_process_candidate_blocked_by_email_checkpoint(monkeypatch):
 # --- M13: the email chain must be called WITH the scraper -----------------
 
 def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
     sentinel_scraper = object()
     received = {}
@@ -271,17 +271,17 @@ def test_process_candidate_passes_scraper_to_resolve_email(monkeypatch):
         received["scraper"] = scraper
         return "", "", None
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda cid, pl: _stub_performance())
     # process_candidate calls resolve_email_with_source (it needs the
     # link-list-presence flag for the no-social drop), not resolve_email.
-    monkeypatch.setattr(main, "resolve_email_with_source", fake_resolve_email)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source", fake_resolve_email)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
     niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
 
-    main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, sentinel_scraper)
+    pipeline.process_candidate(candidate, {}, _NullBlocklist(), niche_config, sentinel_scraper)
 
     # If the scraper argument were dropped, the chain's default (scraper=None)
     # would silently swallow this — the browser step goes dead with no signal,
@@ -297,22 +297,22 @@ def test_process_candidate_drops_a_channel_with_no_external_links(monkeypatch):
     no social profile) AND that yielded no contact email has no outreach
     surface beyond YouTube — process_candidate must drop it, not push it.
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda cid, pl: _stub_performance())
     # has_external_links=False is the positive "no presence" signal.
     monkeypatch.setattr(
-        main, "resolve_email_with_source", lambda *a, **k: ("", "", False),
+        pipeline, "resolve_email_with_source", lambda *a, **k: ("", "", False),
     )
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
 
-    record, reason = main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
+    record, reason = pipeline.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
     assert record is None
-    assert reason == main.DROP_NO_SOCIAL
+    assert reason == pipeline.DROP_NO_SOCIAL
 
 
 def test_process_candidate_keeps_a_channel_when_link_presence_is_unknown(monkeypatch):
@@ -321,38 +321,38 @@ def test_process_candidate_keeps_a_channel_when_link_presence_is_unknown(monkeyp
     at an earlier step) must NOT drop: absent data never disqualifies, the
     same rule the zone check follows.
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: _stub_performance())
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda cid, pl: _stub_performance())
     monkeypatch.setattr(
-        main, "resolve_email_with_source", lambda *a, **k: ("", "", None),
+        pipeline, "resolve_email_with_source", lambda *a, **k: ("", "", None),
     )
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     niche_config = {"min_avg_views": 0, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
 
-    record, reason = main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
+    record, reason = pipeline.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
     assert record is not None, "unknown link presence must be kept, not dropped"
 
 
 # --- Bonus: the two niche thresholds must not be crossed at the call site --
 
 def _run_process_candidate(monkeypatch, niche_config, *, avg_views, age, **stat_overrides):
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(**stat_overrides))
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats(**stat_overrides))
     monkeypatch.setattr(
-        main, "get_recent_video_performance",
+        pipeline, "get_recent_video_performance",
         lambda cid, pl: _stub_performance(avg_views=avg_views),
     )
-    monkeypatch.setattr(main, "channel_age_months", lambda published_at: age)
-    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda published_at: age)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source", lambda *a, **k: ("", "", None))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
-    return main.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
+    return pipeline.process_candidate(candidate, {}, _NullBlocklist(), niche_config, None)
 
 
 def test_process_candidate_does_not_feed_the_view_floor_to_qualify(monkeypatch):
@@ -364,7 +364,7 @@ def test_process_candidate_does_not_feed_the_view_floor_to_qualify(monkeypatch):
     against a threshold of 10000 and every channel alive would come back
     NEW_CHANNEL.
     """
-    from scoring import QUALIFIED
+    from channel_vetting.ranking.scoring import QUALIFIED
 
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 6, "allowed_country_codes": ZONE_CORE}
     _record, qualification = _run_process_candidate(
@@ -376,7 +376,7 @@ def test_process_candidate_does_not_feed_the_view_floor_to_qualify(monkeypatch):
 
 def test_process_candidate_still_flags_a_young_channel(monkeypatch):
     """The age gate is the one criterion that still produces a row."""
-    from scoring import NEW_CHANNEL
+    from channel_vetting.ranking.scoring import NEW_CHANNEL
 
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE}
     record, qualification = _run_process_candidate(
@@ -395,7 +395,7 @@ def test_process_candidate_drops_a_channel_below_the_view_floor(monkeypatch):
     produce NO record at all — that change is the whole point of retiring
     the value, so a returned record here means the flag path came back.
     """
-    import main
+    from channel_vetting import pipeline
 
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
@@ -403,11 +403,11 @@ def test_process_candidate_drops_a_channel_below_the_view_floor(monkeypatch):
     )
 
     assert record is None
-    assert reason == main.DROP_BELOW_VIEW_MINIMUM
+    assert reason == pipeline.DROP_BELOW_VIEW_MINIMUM
 
 
 def test_process_candidate_drops_a_channel_with_too_few_videos(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
@@ -415,11 +415,11 @@ def test_process_candidate_drops_a_channel_with_too_few_videos(monkeypatch):
     )
 
     assert record is None
-    assert reason == main.DROP_TOO_FEW_VIDEOS
+    assert reason == pipeline.DROP_TOO_FEW_VIDEOS
 
 
 def test_process_candidate_drops_a_channel_outside_the_search_zones(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
@@ -427,7 +427,7 @@ def test_process_candidate_drops_a_channel_outside_the_search_zones(monkeypatch)
     )
 
     assert record is None
-    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+    assert reason == pipeline.DROP_OUTSIDE_SEARCH_ZONE
 
 
 def test_process_candidate_drops_a_channel_with_no_declared_country(monkeypatch):
@@ -447,7 +447,7 @@ def test_process_candidate_drops_a_channel_with_no_declared_country(monkeypatch)
     its own "absent data never disqualifies" rule — do not "restore
     consistency" here without reading search_zones' docstring first.
     """
-    import main
+    from channel_vetting import pipeline
 
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
@@ -455,7 +455,7 @@ def test_process_candidate_drops_a_channel_with_no_declared_country(monkeypatch)
     )
 
     assert record is None
-    assert reason == main.DROP_NO_DECLARED_COUNTRY
+    assert reason == pipeline.DROP_NO_DECLARED_COUNTRY
 
 
 def test_the_language_region_subtag_is_no_longer_a_location(monkeypatch):
@@ -475,26 +475,26 @@ def test_the_language_region_subtag_is_no_longer_a_location(monkeypatch):
     `Lý Thiên An` and `Her 86m2` are both Vietnamese creators tagging `en-US`,
     and both were placed in zone by this step.
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(country="Unknown"))
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats(country="Unknown"))
     monkeypatch.setattr(
-        main, "get_recent_video_performance",
+        pipeline, "get_recent_video_performance",
         lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-IN"),
     )
-    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source", lambda *a, **k: ("", "", None))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         candidate, {}, _NullBlocklist(), niche_config, None,
     )
 
     assert record is None
-    assert reason == main.DROP_NO_DECLARED_COUNTRY
+    assert reason == pipeline.DROP_NO_DECLARED_COUNTRY
 
 
 def test_an_in_zone_language_tag_does_not_rescue_a_blank_country(monkeypatch):
@@ -507,26 +507,26 @@ def test_an_in_zone_language_tag_does_not_rescue_a_blank_country(monkeypatch):
     unless they have a specific location listed on YouTube" — and an `en-US`
     tag is not a location listed on YouTube.
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(country=""))
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats(country=""))
     monkeypatch.setattr(
-        main, "get_recent_video_performance",
+        pipeline, "get_recent_video_performance",
         lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-US"),
     )
-    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source", lambda *a, **k: ("", "", None))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         candidate, {}, _NullBlocklist(), niche_config, None,
     )
 
     assert record is None
-    assert reason == main.DROP_NO_DECLARED_COUNTRY
+    assert reason == pipeline.DROP_NO_DECLARED_COUNTRY
 
 
 def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
@@ -536,26 +536,26 @@ def test_the_declared_country_wins_over_the_language_tag(monkeypatch):
     country contradict their language tag this way, which is why the tag
     is a fallback and never an override.
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(country="IN"))
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats(country="IN"))
     monkeypatch.setattr(
-        main, "get_recent_video_performance",
+        pipeline, "get_recent_video_performance",
         lambda cid, pl: _stub_performance(avg_views=50_000, content_language="en-US"),
     )
-    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source", lambda *a, **k: ("", "", None))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []}
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         candidate, {}, _NullBlocklist(), niche_config, None,
     )
 
     assert record is None
-    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+    assert reason == pipeline.DROP_OUTSIDE_SEARCH_ZONE
 
 
 def test_a_bare_language_no_longer_leaves_the_channel_admitted(monkeypatch):
@@ -571,7 +571,7 @@ def test_a_bare_language_no_longer_leaves_the_channel_admitted(monkeypatch):
     (5.6%). Measured reason: the reviewer found the rows that could not be
     placed were overwhelmingly outside the zone.
     """
-    import main
+    from channel_vetting import pipeline
 
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
     record, reason = _run_process_candidate(
@@ -579,7 +579,7 @@ def test_a_bare_language_no_longer_leaves_the_channel_admitted(monkeypatch):
     )
 
     assert record is None
-    assert reason == main.DROP_NO_DECLARED_COUNTRY
+    assert reason == pipeline.DROP_NO_DECLARED_COUNTRY
 
 
 def test_the_zone_gate_does_not_take_a_scraper():
@@ -597,9 +597,9 @@ def test_the_zone_gate_does_not_take_a_scraper():
     """
     import inspect
 
-    import main
+    from channel_vetting import pipeline
 
-    assert list(inspect.signature(main.location_drop_reason).parameters) == [
+    assert list(inspect.signature(pipeline.location_drop_reason).parameters) == [
         "channel_title", "description", "declared_country", "allowed_codes",
     ]
 
@@ -607,11 +607,11 @@ def test_the_zone_gate_does_not_take_a_scraper():
 # --- M2: a failed push must not land in pushed_ids ------------------------
 
 def test_failed_push_not_in_pushed_ids(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "push_record", lambda t, r: False)
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: False)
 
-    result = main.push_until_full(
+    result = pipeline.push_until_full(
         candidates=[{"channel_id": "UC1"}],
         build_record=lambda c: ({"Channel ID": c["channel_id"], "Qualification": "Qualified"}, "Qualified"),
         table_name="tbl",
@@ -626,11 +626,11 @@ def test_failed_push_not_in_pushed_ids(monkeypatch):
 # --- M3: a (None, reason) result must count as skipped, never as flagged --
 
 def test_none_record_counts_as_skipped_not_flagged(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "push_record", lambda t, r: pytest.fail("a None record must never be pushed"))
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: pytest.fail("a None record must never be pushed"))
 
-    result = main.push_until_full(
+    result = pipeline.push_until_full(
         candidates=[{"channel_id": "UC1"}],
         build_record=lambda c: (None, "unreachable"),
         table_name="tbl",
@@ -654,46 +654,46 @@ def test_daily_cap_flag_caps_both_budgets(monkeypatch):
     left DAILY_FLAGGED_CAP at its full 10/day size, so `--daily-cap 2`
     could still write up to 10 flagged records per niche.
     """
-    import main
+    from channel_vetting import pipeline
 
-    original_qualified = main.DAILY_QUALIFIED_CAP
-    original_flagged = main.DAILY_FLAGGED_CAP
+    original_qualified = pipeline.DAILY_QUALIFIED_CAP
+    original_flagged = pipeline.DAILY_FLAGGED_CAP
     captured = {}
 
     # **kwargs rather than a fixed signature: this stub stands in for run(),
     # and pinning its parameter list here means every new run() argument breaks
     # this test for a reason unrelated to what it checks (which is the caps).
     def fake_run(niches, max_results_per_keyword, days_back, **kwargs):
-        captured["qualified_cap"] = main.DAILY_QUALIFIED_CAP
-        captured["flagged_cap"] = main.DAILY_FLAGGED_CAP
+        captured["qualified_cap"] = pipeline.DAILY_QUALIFIED_CAP
+        captured["flagged_cap"] = pipeline.DAILY_FLAGGED_CAP
         captured["discovery_credits"] = kwargs.get("max_discovery_credits")
 
-    monkeypatch.setattr(main, "run", fake_run)
-    monkeypatch.setattr(sys, "argv", ["main.py", "--test", "--daily-cap", "2"])
+    monkeypatch.setattr(pipeline, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["pipeline.py", "--test", "--daily-cap", "2"])
 
     try:
-        main.main()
+        pipeline.main()
         # The discovery ceiling is asserted alongside the caps because the row
         # caps do NOT bound discovery spend — a --test run has to be handed its
         # own credit ceiling explicitly or it buys a 50-creator page per round.
         assert captured == {
             "qualified_cap": 2,
             "flagged_cap": 2,
-            "discovery_credits": main.INFLUENCERS_TEST_DISCOVERY_CREDITS,
+            "discovery_credits": pipeline.INFLUENCERS_TEST_DISCOVERY_CREDITS,
         }
     finally:
         # main() mutates these module globals directly (not via
         # monkeypatch), so they must be restored by hand.
-        main.DAILY_QUALIFIED_CAP = original_qualified
-        main.DAILY_FLAGGED_CAP = original_flagged
+        pipeline.DAILY_QUALIFIED_CAP = original_qualified
+        pipeline.DAILY_FLAGGED_CAP = original_flagged
 
 
 # --- IMPORTANT 3: every niche skipped for a non-cap reason must exit non-zero --
 
-def _run_common_stubs(monkeypatch, main):
-    monkeypatch.setattr(main, "fetch_blocklist", lambda: _NullBlocklist())
-    monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
+def _run_common_stubs(monkeypatch, pipeline):
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: _NullBlocklist())
+    monkeypatch.setattr(pipeline, "get_existing_channel_ids", lambda t: set())
+    monkeypatch.setattr(pipeline, "fetch_external_handles", lambda **kw: {})
 
 
 def test_run_raises_when_every_niche_skips_for_non_cap_reason(monkeypatch):
@@ -705,14 +705,14 @@ def test_run_raises_when_every_niche_skips_for_non_cap_reason(monkeypatch):
     GitHub Actions job report green forever while doing nothing. run()
     must now raise SystemExit(1) when NO niche completed its cap check.
     """
-    import main
+    from channel_vetting import pipeline
 
-    _run_common_stubs(monkeypatch, main)
+    _run_common_stubs(monkeypatch, pipeline)
     monkeypatch.setattr(
-        main, "count_added_today",
+        pipeline, "count_added_today",
         lambda *a, **k: (_ for _ in ()).throw(AirtableReadError("token expired")),
     )
-    monkeypatch.setattr(main, "run_discovery", lambda *a, **k: pytest.fail("must not discover"))
+    monkeypatch.setattr(pipeline, "run_discovery", lambda *a, **k: pytest.fail("must not discover"))
 
     niches = {
         "Test Niche": {
@@ -724,18 +724,18 @@ def test_run_raises_when_every_niche_skips_for_non_cap_reason(monkeypatch):
     }
 
     with pytest.raises(SystemExit):
-        main.run(niches, max_results_per_keyword=5, days_back=90)
+        pipeline.run(niches, max_results_per_keyword=5, days_back=90)
 
 
 def test_run_raises_when_every_niche_is_missing_required_config(monkeypatch):
     """Same failure mode as above, but every NICHES entry is missing a
     required key (M3) rather than failing an Airtable read — must also
     exit non-zero rather than silently doing nothing."""
-    import main
+    from channel_vetting import pipeline
 
-    _run_common_stubs(monkeypatch, main)
+    _run_common_stubs(monkeypatch, pipeline)
     monkeypatch.setattr(
-        main, "count_added_today",
+        pipeline, "count_added_today",
         lambda *a, **k: pytest.fail("should never reach a cap check for a misconfigured niche"),
     )
 
@@ -750,24 +750,24 @@ def test_run_raises_when_every_niche_is_missing_required_config(monkeypatch):
     }
 
     with pytest.raises(SystemExit):
-        main.run(niches, max_results_per_keyword=5, days_back=90)
+        pipeline.run(niches, max_results_per_keyword=5, days_back=90)
 
 
 def test_run_does_not_raise_when_a_niche_is_legitimately_at_cap(monkeypatch):
     """The counterpart to the tests above: a niche that's genuinely full
     for the day completed its cap check successfully, so this is a real
     no-op, not a failure — run() must NOT raise."""
-    import main
+    from channel_vetting import pipeline
 
-    _run_common_stubs(monkeypatch, main)
+    _run_common_stubs(monkeypatch, pipeline)
 
     def fake_count(table, qualification=None):
-        if qualification == main.QUALIFIED:
-            return main.DAILY_QUALIFIED_CAP
-        return main.DAILY_QUALIFIED_CAP + main.DAILY_FLAGGED_CAP
+        if qualification == pipeline.QUALIFIED:
+            return pipeline.DAILY_QUALIFIED_CAP
+        return pipeline.DAILY_QUALIFIED_CAP + pipeline.DAILY_FLAGGED_CAP
 
-    monkeypatch.setattr(main, "count_added_today", fake_count)
-    monkeypatch.setattr(main, "run_discovery", lambda *a, **k: pytest.fail("already at cap — must not discover"))
+    monkeypatch.setattr(pipeline, "count_added_today", fake_count)
+    monkeypatch.setattr(pipeline, "run_discovery", lambda *a, **k: pytest.fail("already at cap — must not discover"))
 
     niches = {
         "Test Niche": {
@@ -778,7 +778,7 @@ def test_run_does_not_raise_when_a_niche_is_legitimately_at_cap(monkeypatch):
         }
     }
 
-    main.run(niches, max_results_per_keyword=5, days_back=90)  # must not raise
+    pipeline.run(niches, max_results_per_keyword=5, days_back=90)  # must not raise
 
 
 # --- M3 (minor): a NICHES entry missing table_name/keywords must not KeyError --
@@ -791,10 +791,10 @@ def test_run_skips_niche_missing_table_name_or_keywords_key(monkeypatch):
     A niche missing either key must be skipped instead, same as the
     existing min_avg_views/min_channel_age_months guard inside run_niche().
     """
-    import main
+    from channel_vetting import pipeline
 
-    _run_common_stubs(monkeypatch, main)
-    monkeypatch.setattr(main, "run_niche", lambda *a, **k: pytest.fail("must not call run_niche for a bad config"))
+    _run_common_stubs(monkeypatch, pipeline)
+    monkeypatch.setattr(pipeline, "run_niche", lambda *a, **k: pytest.fail("must not call run_niche for a bad config"))
 
     niches = {
         "No Table": {
@@ -815,4 +815,4 @@ def test_run_skips_niche_missing_table_name_or_keywords_key(monkeypatch):
         # Both niches are misconfigured, so no niche completes its cap
         # check and IMPORTANT 3's guard fires — proving the KeyError never
         # had a chance to happen first.
-        main.run(niches, max_results_per_keyword=5, days_back=90)
+        pipeline.run(niches, max_results_per_keyword=5, days_back=90)

@@ -1,5 +1,5 @@
 """
-Tests for `outreach_ledger.py` — the duplicate-cold-email guard.
+Tests for `outreach/ledger.py` — the duplicate-cold-email guard.
 
 The first test in this file is the one that matters most. The reviewed plan's
 first draft claimed that a claim-then-send protocol keyed on an "Idempotency
@@ -14,7 +14,7 @@ land between that read and your own write.
 """
 import pytest
 
-import outreach_ledger as L
+from channel_vetting.outreach import ledger as L
 
 
 class FakeLedgerStore:

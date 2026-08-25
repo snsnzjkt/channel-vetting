@@ -11,14 +11,14 @@ import base64
 import pytest
 import requests
 
-import mailer as M
-import outreach
+from channel_vetting.outreach import mailer as M
+from channel_vetting.outreach import sender as outreach
 # The REAL classes, not lookalike stubs: a bare Blocklist() never matches
 # (all three indexes default to empty sets) and LeaseResult already has
 # exactly the fields a stub would declare. Using them means these tests pin
 # the real shapes instead of quietly diverging from them.
-from do_not_contact import Blocklist
-from outreach_ledger import LeaseResult
+from channel_vetting.airtable.do_not_contact import Blocklist
+from channel_vetting.outreach.ledger import LeaseResult
 
 
 # --- Argument parsing --------------------------------------------------------
@@ -263,7 +263,7 @@ def test_header_safe_strips_only_the_dangerous_characters():
 
 def test_gmail_session_never_retries_a_post():
     """A retried send is a duplicate EMAIL — the one thing that cannot be undone."""
-    from http_client import GMAIL
+    from channel_vetting.core.http_client import GMAIL
 
     adapter = GMAIL.get_adapter("https://gmail.googleapis.com/")
     assert "POST" not in adapter.max_retries.allowed_methods
@@ -271,7 +271,7 @@ def test_gmail_session_never_retries_a_post():
 
 def test_gmail_session_does_not_retry_reads():
     """A read retry means the request was sent and the answer lost."""
-    from http_client import GMAIL
+    from channel_vetting.core.http_client import GMAIL
 
     adapter = GMAIL.get_adapter("https://gmail.googleapis.com/")
     assert adapter.max_retries.read == 0
@@ -279,7 +279,7 @@ def test_gmail_session_does_not_retry_reads():
 
 def test_gmail_session_ignores_retry_after():
     """urllib3 sleeps the header verbatim, with no ceiling, inside the adapter."""
-    from http_client import GMAIL
+    from channel_vetting.core.http_client import GMAIL
 
     adapter = GMAIL.get_adapter("https://gmail.googleapis.com/")
     assert adapter.max_retries.respect_retry_after_header is False
@@ -318,7 +318,7 @@ def test_limit_zero_means_zero_not_the_default(monkeypatch):
 
 
 def test_limit_unset_falls_back_to_the_configured_default(monkeypatch):
-    from config import OUTREACH_DAILY_CAP, OUTREACH_MAX_PER_RUN
+    from channel_vetting.config import OUTREACH_DAILY_CAP, OUTREACH_MAX_PER_RUN
 
     # _stub_run_deps reports a daily remaining of 10, and the run takes the min.
     assert _budget_for(monkeypatch, []) == min(10, OUTREACH_MAX_PER_RUN, OUTREACH_DAILY_CAP)
@@ -492,7 +492,7 @@ def _run_send_phase(monkeypatch, row, blocklist, write_preview=None,
     so a clean checkout failed here while a configured machine passed.
     """
     summary = outreach.Summary()
-    from outreach_ledger import RunBudget
+    from channel_vetting.outreach.ledger import RunBudget
 
     monkeypatch.setattr(outreach, "NICHES", {"Home Theater": {"table_name": "tblX"}})
     monkeypatch.setattr(outreach, "get_queued_prospects", lambda *a, **k: [row])
@@ -528,7 +528,7 @@ def test_a_csv_safe_prefixed_name_still_matches_the_blocklist(monkeypatch):
     REGRESSION: `Channel Name` was read raw while `Email` went through
     csv_unsafe(). A creator named "-Bob AV" is STORED as "'-Bob AV", so a DNC
     entry for "-Bob AV" never matched — and name is the ONLY key for 10.5% of
-    the live blocklist. do_not_contact.py states the costs are asymmetric: a
+    the live blocklist. airtable/do_not_contact.py states the costs are asymmetric: a
     false positive is one lost lead, a false negative is the harm the list
     exists to prevent.
     """
@@ -558,7 +558,7 @@ def test_an_empty_queue_exits_zero_not_two(monkeypatch):
     """
     This workflow is manual-only with no cron, so a dry run when nobody has
     stamped `Send Requested At` is a NORMAL answer. Returning non-zero painted
-    it red and trained people to ignore the X. main.py's non-zero-on-nothing is
+    it red and trained people to ignore the X. pipeline.py's non-zero-on-nothing is
     justified by being SCHEDULED, where silence means broken.
     """
     monkeypatch.setattr(outreach, "AirtableLeaseStore", lambda: "LEASE_STORE")
@@ -635,8 +635,8 @@ def test_status_literals_come_from_config_not_string_duplicates():
     """
     import inspect
 
-    import config
-    import outreach_airtable as OA
+    from channel_vetting import config
+    from channel_vetting.airtable import outreach_store as OA
 
     # The formula must carry the CONFIGURED value, so renaming the option in
     # config changes the query rather than leaving a stale literal behind.

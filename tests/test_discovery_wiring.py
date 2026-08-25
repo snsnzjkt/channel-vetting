@@ -5,10 +5,10 @@ search.list):
   - enrichment.get_channel_stats(handle=...) resolves a creator's real UC…
     id from the channels.list?forHandle response, so a discovery candidate
     (which arrives as an @handle) can enter the existing enrich pipeline;
-  - main.process_candidate accepts a handle-only candidate and dedupes by the
+  - pipeline.process_candidate accepts a handle-only candidate and dedupes by the
     RESOLVED channel id (known_channel_ids), the only place a re-discovered
     niche-table channel is caught since discovery can't be pre-filtered by id;
-  - main.run_niche drives discovery.discover() in place of the keyword loop
+  - pipeline.run_niche drives discovery.discover() in place of the keyword loop
     when a discovery client is enabled and the niche carries filters,
     accumulating exclude_handles across rounds and stopping when dry, and
     falls back to search.list when discovery is unavailable.
@@ -17,16 +17,16 @@ No network: enrichment HTTP, Airtable, and process_candidate are all mocked.
 """
 import pytest
 
-import enrichment
-import main
-import niches
-import search_zones
+from channel_vetting.enrichment import channels
+from channel_vetting import pipeline
+from channel_vetting.discovery import niches
+from channel_vetting.discovery import search_zones
 
 # Imported by NAME rather than reached through the module: three tests below
 # bind a LOCAL dict called `niches`, which would shadow the module and turn an
 # attribute lookup into an AttributeError on a dict.
-from search_zones import ZONE_CORE
-from niches import (
+from channel_vetting.discovery.search_zones import ZONE_CORE
+from channel_vetting.discovery.niches import (
     GAMING_AND_TECH_BIO_NEGATIONS,
     DISCOVERY_SUBSCRIBER_FLOOR_RATIO,
     EXCLUDED_TOPIC_KEYWORDS,
@@ -81,16 +81,16 @@ def _patch_enrichment(monkeypatch, resp):
         seen.append(params or {})
         return resp
 
-    monkeypatch.setattr(enrichment.HTTP, "get", fake_get)
-    monkeypatch.setattr(enrichment.time, "sleep", lambda *a, **k: None)
-    monkeypatch.setattr(enrichment, "record_spend", lambda *a, **k: None)
+    monkeypatch.setattr(channels.HTTP, "get", fake_get)
+    monkeypatch.setattr(channels.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(channels, "record_spend", lambda *a, **k: None)
     return seen
 
 
 def test_get_channel_stats_by_handle_resolves_the_real_id(monkeypatch):
     seen = _patch_enrichment(monkeypatch, _Resp(200, _channel_payload("UCresolved")))
 
-    stats = enrichment.get_channel_stats(handle="somecreator")
+    stats = channels.get_channel_stats(handle="somecreator")
 
     assert stats["channel_id"] == "UCresolved"       # read from the response
     assert seen[0].get("forHandle") == "@somecreator"  # queried by handle
@@ -100,7 +100,7 @@ def test_get_channel_stats_by_handle_resolves_the_real_id(monkeypatch):
 def test_get_channel_stats_by_id_still_reads_the_response_id(monkeypatch):
     seen = _patch_enrichment(monkeypatch, _Resp(200, _channel_payload("UC1")))
 
-    stats = enrichment.get_channel_stats("UC1")
+    stats = channels.get_channel_stats("UC1")
 
     assert stats["channel_id"] == "UC1"
     assert seen[0].get("id") == "UC1"
@@ -109,9 +109,9 @@ def test_get_channel_stats_by_id_still_reads_the_response_id(monkeypatch):
 
 def test_get_channel_stats_requires_exactly_one_key():
     with pytest.raises(ValueError):
-        enrichment.get_channel_stats()                 # neither
+        channels.get_channel_stats()                 # neither
     with pytest.raises(ValueError):
-        enrichment.get_channel_stats("UC1", handle="x")  # both
+        channels.get_channel_stats("UC1", handle="x")  # both
 
 
 # --- process_candidate: handle-first + resolved-id dedupe -------------------
@@ -129,10 +129,10 @@ def test_process_candidate_resolves_a_handle_only_candidate(monkeypatch):
         called["handle"] = handle
         return None  # short-circuit right after routing
 
-    monkeypatch.setattr(main, "get_channel_stats", fake_stats)
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "get_channel_stats", fake_stats)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"handle": "creatorx", "channel_title": "X"}, {}, _NullBlocklist(),
         _niche(), None,
     )
@@ -142,14 +142,14 @@ def test_process_candidate_resolves_a_handle_only_candidate(monkeypatch):
 
 def test_process_candidate_skips_a_channel_already_in_the_niche_table(monkeypatch):
     monkeypatch.setattr(
-        main, "get_channel_stats",
+        pipeline, "get_channel_stats",
         lambda channel_id=None, *, handle=None: {
             "channel_id": "UC1", "channel_title": "X", "handle": "h1",
         },
     )
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "X"}, {}, _NullBlocklist(),
         _niche(), None, known_channel_ids={"UC1"},
     )
@@ -164,19 +164,19 @@ def test_process_candidate_skips_a_renamed_channel_tracked_externally_by_name(mo
     the external index, but the channel NAME does — so it must be skipped, not
     re-added to Prospects."""
     monkeypatch.setattr(
-        main, "get_channel_stats",
+        pipeline, "get_channel_stats",
         lambda channel_id=None, *, handle=None: {
             "channel_id": "UCFnhdh4", "channel_title": "New Record Day",
             "handle": "newrecordday", "description": "",
         },
     )
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
 
-    external = main.ExternalIndex(
+    external = pipeline.ExternalIndex(
         handles={"newrecordday2013": "Follow-up Outreach"},   # stale handle
         names={"new record day": "Follow-up Outreach"},
     )
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UCFnhdh4", "channel_title": "New Record Day"}, external,
         _NullBlocklist(), _niche(), None,
     )
@@ -189,23 +189,23 @@ def test_process_candidate_drops_a_fake_usa_channel_by_its_description(monkeypat
     performance-fetch quota is spent."""
     calls = {"perf": 0}
     monkeypatch.setattr(
-        main, "get_channel_stats",
+        pipeline, "get_channel_stats",
         lambda channel_id=None, *, handle=None: {
             "channel_id": "UC1", "channel_title": "Budget Home Theater",
             "handle": "budgetht", "country": "US",
             "description": "Home theater on a budget. Based in the Philippines.",
         },
     )
-    monkeypatch.setattr(main, "get_recent_video_performance",
+    monkeypatch.setattr(pipeline, "get_recent_video_performance",
                         lambda *a, **k: calls.__setitem__("perf", calls["perf"] + 1))
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
 
-    record, reason = main.process_candidate(
-        {"channel_id": "UC1", "channel_title": "Budget Home Theater"}, main.ExternalIndex(),
+    record, reason = pipeline.process_candidate(
+        {"channel_id": "UC1", "channel_title": "Budget Home Theater"}, pipeline.ExternalIndex(),
         _NullBlocklist(), _niche(), None,
     )
     assert record is None
-    assert reason == main.DROP_OUTSIDE_SEARCH_ZONE
+    assert reason == pipeline.DROP_OUTSIDE_SEARCH_ZONE
     assert calls["perf"] == 0, "a fake-USA channel must be dropped before the performance fetch"
 
 
@@ -238,15 +238,15 @@ def _survives_one_in(n):
 def _run_niche_discovery(monkeypatch, discovery, survives_one_in=1, blocklist=None,
                          external_handles=None):
     pushed = []
-    monkeypatch.setattr(main, "process_candidate", _survives_one_in(survives_one_in))
-    monkeypatch.setattr(main, "push_record", lambda t, r: pushed.append(r) or True)
-    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    monkeypatch.setattr(pipeline, "process_candidate", _survives_one_in(survives_one_in))
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: pushed.append(r) or True)
+    monkeypatch.setattr(pipeline, "count_added_today", lambda table, qualification=None: 0)
     # run_niche now reads this niche's stored handles so discovery can exclude
     # them server-side. Stubbed empty: these tests are about the loop, not the
     # exclusion source, and conftest hard-fails a real Airtable request.
-    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
 
-    result = main.run_niche(
+    result = pipeline.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), external_handles or {},
         blocklist or _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
@@ -260,7 +260,7 @@ def test_run_niche_fills_the_budget_from_discovery(monkeypatch):
     # Supply MORE than the cap, so the assertion below is about the cap binding
     # rather than about the fixture running out. A fixed 50 handles silently
     # became supply-bound when the cap was raised to 60.
-    cap = main.DAILY_QUALIFIED_CAP
+    cap = pipeline.DAILY_QUALIFIED_CAP
     disc = _FakeDiscovery([[f"h{i}" for i in range(cap + 20)]])
     pushed, (discovered, processed, pushed_ids, cap_ok) = _run_niche_discovery(monkeypatch, disc)
 
@@ -302,17 +302,17 @@ def _recording_process_candidate(examined, survives_one_in=999):
 
 def _run_with_caps(monkeypatch, discovery, examined, qualified_cap, flagged_cap,
                    survives_one_in=999):
-    monkeypatch.setattr(main, "DAILY_QUALIFIED_CAP", qualified_cap)
-    monkeypatch.setattr(main, "DAILY_FLAGGED_CAP", flagged_cap)
+    monkeypatch.setattr(pipeline, "DAILY_QUALIFIED_CAP", qualified_cap)
+    monkeypatch.setattr(pipeline, "DAILY_FLAGGED_CAP", flagged_cap)
     monkeypatch.setattr(
-        main, "process_candidate", _recording_process_candidate(examined, survives_one_in))
-    monkeypatch.setattr(main, "push_record", lambda t, r: True)
-    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+        pipeline, "process_candidate", _recording_process_candidate(examined, survives_one_in))
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: True)
+    monkeypatch.setattr(pipeline, "count_added_today", lambda table, qualification=None: 0)
     # run_niche now reads this niche's stored handles so discovery can exclude
     # them server-side. Stubbed empty: these tests are about the loop, not the
     # exclusion source, and conftest hard-fails a real Airtable request.
-    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
-    return main.run_niche(
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    return pipeline.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
          "discovery_filters": {"profile_language": ["en"]}},
@@ -386,7 +386,7 @@ def test_the_discovery_subscriber_floor_tracks_each_niche_view_floor():
     until the unification). An absolute floor would silently stop matching the
     arithmetic that justified it the next time a view floor moves.
     """
-    for niche_name, config in main.NICHES.items():
+    for niche_name, config in pipeline.NICHES.items():
         filters = config.get("discovery_filters")
         if filters is None:
             continue
@@ -420,7 +420,7 @@ def test_a_niche_missing_min_avg_views_does_not_break_import():
     # wrong default sent to the vendor.
     assert "number_of_subscribers" not in filters
     # The misconfiguration is still caught — later, and survivably.
-    assert "min_avg_views" in main.REQUIRED_NICHE_KEYS
+    assert "min_avg_views" in pipeline.REQUIRED_NICHE_KEYS
 
 
 def test_a_search_only_niche_is_left_untouched():
@@ -458,8 +458,8 @@ def test_each_niche_targets_the_creator_gender_its_brief_asks_for():
     no other test coverage: a wrong value here silently sources the wrong
     audience for a whole run, and nothing downstream would flag it.
     """
-    assert main.NICHES["Home Theater"]["discovery_filters"]["gender"] == "male"
-    assert main.NICHES["Lifestyle Sofa"]["discovery_filters"]["gender"] == "female"
+    assert pipeline.NICHES["Home Theater"]["discovery_filters"]["gender"] == "male"
+    assert pipeline.NICHES["Lifestyle Sofa"]["discovery_filters"]["gender"] == "female"
 
 
 def test_the_niche_filters_reach_the_vendor_payload(monkeypatch):
@@ -479,12 +479,12 @@ def test_the_niche_filters_reach_the_vendor_payload(monkeypatch):
             seen["filters"] = filters
             return []
 
-    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    monkeypatch.setattr(pipeline, "count_added_today", lambda table, qualification=None: 0)
     # run_niche now reads this niche's stored handles so discovery can exclude
     # them server-side. Stubbed empty: these tests are about the loop, not the
     # exclusion source, and conftest hard-fails a real Airtable request.
-    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
-    monkeypatch.setattr(main, "process_candidate", lambda *a, **k: (None, "skip"))
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    monkeypatch.setattr(pipeline, "process_candidate", lambda *a, **k: (None, "skip"))
 
     # Home Theater is on discovery_source="search_list" as of 2026-08-22 (its
     # paid pool measured 279 net), so it no longer reaches the vendor at all.
@@ -492,8 +492,8 @@ def test_the_niche_filters_reach_the_vendor_payload(monkeypatch):
     # so force the paid path explicitly. Without the override the run falls
     # through to the keyword loop and conftest hard-fails on a real search.list
     # request — which is how this was caught.
-    niche_config = dict(main.NICHES["Home Theater"], discovery_source="influencers")
-    main.run_niche(
+    niche_config = dict(pipeline.NICHES["Home Theater"], discovery_source="influencers")
+    pipeline.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
         niche_config, None, None, _CapturingDiscovery(),
     )
@@ -530,26 +530,26 @@ def test_the_quota_ceiling_stops_enrichment(monkeypatch):
     daily row cap, which counts rows WRITTEN rather than candidates EXAMINED.
     process_candidate now refuses to start a candidate it cannot afford.
     """
-    import quota_tracker
+    from channel_vetting.budget import quota_tracker
 
-    monkeypatch.setattr(main, "can_afford_enrichment", lambda: False)
+    monkeypatch.setattr(pipeline, "can_afford_enrichment", lambda: False)
     # Would spend quota if reached; must not be.
     monkeypatch.setattr(
-        main, "get_channel_stats",
+        pipeline, "get_channel_stats",
         lambda *a, **k: pytest.fail("enrichment ran past an exhausted quota ceiling"))
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Anything", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )
 
     assert record is None
-    assert reason == main.DROP_QUOTA_EXHAUSTED
+    assert reason == pipeline.DROP_QUOTA_EXHAUSTED
     # Distinct from the criteria-based drop reasons: this says "come back
     # tomorrow", not "this channel failed".
     assert reason not in {
-        main.DROP_BELOW_VIEW_MINIMUM, main.DROP_DEAD_CHANNEL, main.DROP_NOT_ENGLISH,
+        pipeline.DROP_BELOW_VIEW_MINIMUM, pipeline.DROP_DEAD_CHANNEL, pipeline.DROP_NOT_ENGLISH,
     }
     assert quota_tracker.can_afford_enrichment  # the real gate still exists
 
@@ -572,9 +572,9 @@ def test_the_blocklist_is_checked_before_the_quota_gate(monkeypatch):
     hit its ceiling would report DO NOT CONTACT channels as merely deferred and
     a later run would re-consider them.
     """
-    monkeypatch.setattr(main, "can_afford_enrichment", lambda: False)
+    monkeypatch.setattr(pipeline, "can_afford_enrichment", lambda: False)
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Blocked Co", "matched_keywords": []},
         {}, _NameBlocklist("Blocked Co"),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
@@ -604,20 +604,20 @@ def test_run_niche_falls_back_to_search_when_discovery_is_disabled(monkeypatch):
         return [{"channel_id": f"UC-{k}", "channel_title": k, "matched_keywords": [k]}
                 for k in keywords]
 
-    monkeypatch.setattr(main, "run_discovery", fake_run_discovery)
+    monkeypatch.setattr(pipeline, "run_discovery", fake_run_discovery)
     monkeypatch.setattr(
-        main, "process_candidate",
+        pipeline, "process_candidate",
         lambda c, *a, **k: ({"Channel ID": c["channel_id"], "Qualification": "Qualified"}, "Qualified"),
     )
-    monkeypatch.setattr(main, "push_record", lambda t, r: True)
-    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: True)
+    monkeypatch.setattr(pipeline, "count_added_today", lambda table, qualification=None: 0)
     # run_niche now reads this niche's stored handles so discovery can exclude
     # them server-side. Stubbed empty: these tests are about the loop, not the
     # exclusion source, and conftest hard-fails a real Airtable request.
-    monkeypatch.setattr(main, "get_tracked_handles", lambda table: set())
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
 
     disabled = _FakeDiscovery([], enabled=False)
-    main.run_niche(
+    pipeline.run_niche(
         "Home Theater", "tbl", ["kw0", "kw1"], 50, 7, set(), {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
          "discovery_filters": {"profile_language": ["en"]}},
@@ -644,11 +644,11 @@ def test_do_not_contact_handles_are_sent_to_discovery(monkeypatch):
 
 
 def test_exclude_prioritises_do_not_contact_over_external_under_the_cap(monkeypatch):
-    monkeypatch.setattr(main, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 3)
+    monkeypatch.setattr(pipeline, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 3)
     bl = _Blocklist({"dnc1", "dnc2", "dnc3"})
     external = {f"ext{i}": "T" for i in range(100)}
 
-    got = main._discovery_exclude_handles(bl, external, seen_handles=set())
+    got = pipeline._discovery_exclude_handles(bl, external, seen_handles=set())
 
     # The cap is exactly filled by DO NOT CONTACT, so no external handle
     # displaces one — the suppression list is never dropped to make room.
@@ -656,11 +656,11 @@ def test_exclude_prioritises_do_not_contact_over_external_under_the_cap(monkeypa
 
 
 def test_exclude_keeps_do_not_contact_and_seen_then_fills_with_external(monkeypatch):
-    monkeypatch.setattr(main, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 5)
+    monkeypatch.setattr(pipeline, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 5)
     bl = _Blocklist({"dnc1", "dnc2"})
     external = {f"ext{i}": "T" for i in range(100)}
 
-    got = main._discovery_exclude_handles(bl, external, seen_handles={"seen1"})
+    got = pipeline._discovery_exclude_handles(bl, external, seen_handles={"seen1"})
 
     assert {"dnc1", "dnc2", "seen1"} <= got   # must-keeps always present
     assert len(got) == 5                       # filled to the cap
@@ -677,12 +677,12 @@ def test_exclude_keeps_do_not_contact_and_seen_then_fills_with_external(monkeypa
 def test_tracked_handles_are_excluded_server_side(monkeypatch):
     """A handle stored on a row must reach the vendor's exclusion set."""
     disc = _FakeDiscovery([["fresh0", "fresh1"]])
-    monkeypatch.setattr(main, "get_tracked_handles", lambda table: {"alreadytracked", "another"})
-    monkeypatch.setattr(main, "process_candidate", lambda *a, **k: (None, "skip"))
-    monkeypatch.setattr(main, "push_record", lambda t, r: True)
-    monkeypatch.setattr(main, "count_added_today", lambda table, qualification=None: 0)
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: {"alreadytracked", "another"})
+    monkeypatch.setattr(pipeline, "process_candidate", lambda *a, **k: (None, "skip"))
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: True)
+    monkeypatch.setattr(pipeline, "count_added_today", lambda table, qualification=None: 0)
 
-    main.run_niche(
+    pipeline.run_niche(
         "Home Theater", "tbl", ["kw"], 50, 7, set(), {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": 12, "allowed_country_codes": ZONE_CORE,
          "discovery_filters": {"profile_language": ["en"]}},
@@ -699,9 +699,9 @@ def test_tracked_handles_rank_with_the_blocklist_not_the_leftover_room():
     the 10k cap they must survive alongside the blocklist rather than competing
     for whatever room is left.
     """
-    monkeypatch_free = main._discovery_exclude_handles(
+    monkeypatch_free = pipeline._discovery_exclude_handles(
         _Blocklist({"blocked"}),
-        {f"ext{i}" for i in range(main.INFLUENCERS_MAX_EXCLUDE_HANDLES)},
+        {f"ext{i}" for i in range(pipeline.INFLUENCERS_MAX_EXCLUDE_HANDLES)},
         seen_handles={"seen"},
         tracked_handles={"tracked"},
     )
@@ -720,14 +720,14 @@ def test_this_niches_external_handles_claim_the_slots_first(monkeypatch):
     A handle only costs anything if THIS niche's query can return it, so the
     niche's own outreach tables must outrank the other niche's under the cap.
     """
-    monkeypatch.setattr(main, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 2)
+    monkeypatch.setattr(pipeline, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 2)
     external = {
         "zzz_ours": "Home Theatre – YouTube Outreach",
         "aaa_theirs": "Lifestyle – Sofa Influencers",
         "bbb_theirs": "Lifestyle – Sofa Influencers",
     }
 
-    got = main._discovery_exclude_handles(
+    got = pipeline._discovery_exclude_handles(
         _Blocklist(set()), external, seen_handles=set(),
         external_source_hint="Home Theatre",
     )
@@ -739,7 +739,7 @@ def test_this_niches_external_handles_claim_the_slots_first(monkeypatch):
 
 def test_the_hint_is_matched_case_insensitively_as_a_substring():
     external = {"ours": "Home Theatre – YouTube Follow-up Outreach"}
-    assert main._external_priority(external, "home theatre") == ["ours"]
+    assert pipeline._external_priority(external, "home theatre") == ["ours"]
 
 
 def test_an_unmatched_or_absent_hint_degrades_to_alphabetical():
@@ -749,8 +749,8 @@ def test_an_unmatched_or_absent_hint_degrades_to_alphabetical():
     than depending on dict iteration order.
     """
     external = {"c": "T", "a": "T", "b": "T"}
-    assert main._external_priority(external, "") == ["a", "b", "c"]
-    assert main._external_priority(external, "nosuchtable") == ["a", "b", "c"]
+    assert pipeline._external_priority(external, "") == ["a", "b", "c"]
+    assert pipeline._external_priority(external, "nosuchtable") == ["a", "b", "c"]
 
 
 def test_priority_tolerates_a_plain_set_of_handles():
@@ -758,7 +758,7 @@ def test_priority_tolerates_a_plain_set_of_handles():
     Callers holding a bare set (tests, and anything not carrying an
     ExternalIndex) have no source to rank by and must not crash on the lookup.
     """
-    assert main._external_priority({"b", "a"}, "Home Theatre") == ["a", "b"]
+    assert pipeline._external_priority({"b", "a"}, "Home Theatre") == ["a", "b"]
 
 
 def test_the_handle_is_written_only_when_the_column_exists(monkeypatch):
@@ -779,37 +779,37 @@ def test_the_handle_is_written_only_when_the_column_exists(monkeypatch):
         "upload_dates": ["2026-08-01T00:00:00Z"], "longform_count": 40,
         "duration_sample_size": 50, "next_page_token": "",
     }
-    monkeypatch.setattr(main, "can_afford_enrichment", lambda: True)
-    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: stats)
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda *a, **k: perf)
-    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("e@x.com", "s", None))
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "can_afford_enrichment", lambda: True)
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda *a, **k: stats)
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda *a, **k: perf)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source", lambda *a, **k: ("e@x.com", "s", None))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
     niche = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE, "table_name": "tbl"}
     candidate = {"channel_id": "UC1", "channel_title": "A Channel", "matched_keywords": []}
 
     # Column absent -> the field must not be sent at all.
-    monkeypatch.setattr(main, "table_has_field", lambda t, f: False)
-    record, _ = main.process_candidate(candidate, {}, _NullBlocklist(), niche, None)
+    monkeypatch.setattr(pipeline, "table_has_field", lambda t, f: False)
+    record, _ = pipeline.process_candidate(candidate, {}, _NullBlocklist(), niche, None)
     assert record is not None
     assert "Handle" not in record
 
     # Column present -> stored bare and lowercased-as-given, no '@'.
-    monkeypatch.setattr(main, "table_has_field", lambda t, f: True)
-    record, _ = main.process_candidate(candidate, {}, _NullBlocklist(), niche, None)
+    monkeypatch.setattr(pipeline, "table_has_field", lambda t, f: True)
+    record, _ = pipeline.process_candidate(candidate, {}, _NullBlocklist(), niche, None)
     assert record["Handle"] == "SomeCreator"
 
 
 def test_no_handle_field_probe_without_a_table_name(monkeypatch):
     """Unit-test niche configs carry no table_name; that must not probe or crash."""
-    monkeypatch.setattr(main, "can_afford_enrichment", lambda: True)
+    monkeypatch.setattr(pipeline, "can_afford_enrichment", lambda: True)
     monkeypatch.setattr(
-        main, "table_has_field",
+        pipeline, "table_has_field",
         lambda t, f: pytest.fail("probed for a field with no table name"),
     )
-    monkeypatch.setattr(main, "get_channel_stats", lambda *a, **k: None)
-    monkeypatch.setattr(main.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *a, **k: None)
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "X"}, {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
     )

@@ -15,8 +15,8 @@ age, already fetched) and the email chain (paid).
 """
 import inspect
 
-import main
-from scoring import QUALIFIED
+from channel_vetting import pipeline
+from channel_vetting.ranking.scoring import QUALIFIED
 
 
 def _spy_builder(paid, *, qualification=QUALIFIED, honour_probe=True):
@@ -24,7 +24,7 @@ def _spy_builder(paid, *, qualification=QUALIFIED, honour_probe=True):
     order: qualify first, then spend."""
     def build(candidate, has_room):
         if honour_probe and not has_room(qualification):
-            return None, main.DROP_NO_HEADROOM
+            return None, pipeline.DROP_NO_HEADROOM
         paid.append(candidate["id"])
         return {"Channel ID": candidate["id"]}, qualification
     return build
@@ -32,8 +32,8 @@ def _spy_builder(paid, *, qualification=QUALIFIED, honour_probe=True):
 
 def _run(monkeypatch, builder, **kwargs):
     pushed = []
-    monkeypatch.setattr(main, "push_record", lambda t, rec: (pushed.append(rec["Channel ID"]) or True))
-    counts = main.push_until_full(
+    monkeypatch.setattr(pipeline, "push_record", lambda t, rec: (pushed.append(rec["Channel ID"]) or True))
+    counts = pipeline.push_until_full(
         [{"id": f"UC{i}"} for i in range(8)], builder, "tbl", **kwargs
     )
     return pushed, counts
@@ -109,7 +109,7 @@ def test_process_candidate_checks_headroom_before_the_email_chain():
     resolve_email_with_source the credit would already be spent, so pin the
     positions in the source rather than trusting the comment.
     """
-    src = inspect.getsource(main.process_candidate)
+    src = inspect.getsource(pipeline.process_candidate)
     assert src.index("has_room(qualification)") < src.index("resolve_email_with_source"), (
         "the headroom probe must run BEFORE the paid email chain"
     )
@@ -117,4 +117,4 @@ def test_process_candidate_checks_headroom_before_the_email_chain():
 
 def test_process_candidate_without_a_probe_keeps_the_old_behaviour():
     """has_room is optional and defaults to off."""
-    assert inspect.signature(main.process_candidate).parameters["has_room"].default is None
+    assert inspect.signature(pipeline.process_candidate).parameters["has_room"].default is None

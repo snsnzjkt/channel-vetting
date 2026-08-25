@@ -13,9 +13,9 @@ spend. Without this test the ordering is one innocuous-looking edit away from
 regressing, and the regression is invisible — the row count is identical and the
 only symptom is a request counter nobody watches.
 """
-import main
-import gemini_verify as gv
-from search_zones import ZONE_CORE
+from channel_vetting import pipeline
+from channel_vetting.verification import gemini as gv
+from channel_vetting.discovery.search_zones import ZONE_CORE
 from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_stats
 
 
@@ -46,18 +46,18 @@ NICHE = {"min_avg_views": 10_000, "min_channel_age_months": None,
 
 def _run(monkeypatch, verifier, _stats=None, **performance_overrides):
     stats = _stats if _stats is not None else _stub_stats()
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: stats)
-    monkeypatch.setattr(main, "get_recent_video_performance",
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: stats)
+    monkeypatch.setattr(pipeline, "get_recent_video_performance",
                         lambda cid, pl: _stub_performance(**performance_overrides))
-    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source",
-                        lambda *a, **k: ("a@b.com", main.EMAIL_SOURCE_REPEATED, None))
-    monkeypatch.setattr(main, "table_has_field", lambda table, field: True)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source",
+                        lambda *a, **k: ("a@b.com", pipeline.EMAIL_SOURCE_REPEATED, None))
+    monkeypatch.setattr(pipeline, "table_has_field", lambda table, field: True)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
     # The keyword gate is not what this test is about — hold it neutral so the
     # only thing deciding the outcome is the free numeric gate.
-    monkeypatch.setattr(main, "off_target_reason", lambda *a, **k: (None, ""))
-    return main.process_candidate(
+    monkeypatch.setattr(pipeline, "off_target_reason", lambda *a, **k: (None, ""))
+    return pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(), NICHE, None, _Enricher(), verifier=verifier,
     )
@@ -88,7 +88,7 @@ def test_too_few_videos_costs_no_gemini_request(monkeypatch):
     v = _CountingVerifier()
     record, reason = _run(monkeypatch, v, _stats=_stub_stats(video_count=1))
     assert record is None
-    assert reason == main.DROP_TOO_FEW_VIDEOS
+    assert reason == pipeline.DROP_TOO_FEW_VIDEOS
     assert v.calls == [], "a free video-count drop must not spend a Gemini request"
 
 
@@ -110,7 +110,7 @@ def test_the_longform_floor_is_DELIBERATELY_still_below_the_gemini_block(monkeyp
     v = _CountingVerifier()
     record, reason = _run(monkeypatch, v, longform_count=0, duration_sample_size=50)
     assert record is None
-    assert reason == main.DROP_TOO_FEW_LONGFORM
+    assert reason == pipeline.DROP_TOO_FEW_LONGFORM
     assert v.calls == [False], (
         "the long-form floor is intentionally below the Gemini block because it "
         "can cost quota to establish — see longform_drop_reason's docstring"
@@ -155,7 +155,7 @@ def test_every_free_gate_runs_before_every_paid_call_in_source_order():
     """
     import inspect
 
-    src = inspect.getsource(main.process_candidate)
+    src = inspect.getsource(pipeline.process_candidate)
 
     free_gates = {
         "off_target_reason(": "keyword relevance, reads titles already fetched",
@@ -195,7 +195,7 @@ def test_the_topic_confirmation_call_is_the_first_paid_call_after_the_free_gates
     """
     import inspect
 
-    src = inspect.getsource(main.process_candidate)
+    src = inspect.getsource(pipeline.process_candidate)
     assert src.index("verifier.confirm_topic(") < src.index("verifier.judge("), (
         "topic confirmation can drop a candidate, so it must run before the "
         "relevance tier — otherwise both requests are spent on a row that is "

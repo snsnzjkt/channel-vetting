@@ -71,6 +71,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --require-hashes -r requirements.txt
+          # Puts `channel_vetting` (src/ layout) on sys.path. --no-deps so
+          # nothing is resolved outside the hash-pinned lock above; the
+          # project itself declares no dependencies for this reason.
+          pip install -e . --no-deps
 
       # NO SECRETS ARE PASSED TO THIS JOB, and that is a safety control rather
       # than an oversight.

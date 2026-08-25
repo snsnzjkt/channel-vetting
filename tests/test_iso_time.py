@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from iso_time import parse_iso_utc
+from channel_vetting.core.iso_time import parse_iso_utc
 
 
 # The shapes the two real producers actually emit.
@@ -65,15 +65,18 @@ def test_an_offset_timestamp_is_normalised_for_comparison():
 # --- the rule has exactly one implementation --------------------------------
 
 def test_both_former_copies_now_delegate_here():
-    import enrichment
-    import outreach_ledger
+    from channel_vetting.enrichment import channels
+    from channel_vetting.outreach import ledger
 
     for value in ("2026-08-14T12:00:00.000Z", "2026-08-14T12:00:00+00:00"):
-        assert enrichment._parse_iso_timestamp(value) == parse_iso_utc(value)
-        assert outreach_ledger._parse_utc(value) == parse_iso_utc(value)
+        assert channels._parse_iso_timestamp(value) == parse_iso_utc(value)
+        assert ledger._parse_utc(value) == parse_iso_utc(value)
 
 
-@pytest.mark.parametrize("module_name", ["enrichment", "outreach_ledger"])
+@pytest.mark.parametrize("module_name", [
+    "channel_vetting.enrichment.channels",
+    "channel_vetting.outreach.ledger",
+])
 def test_neither_module_still_uses_a_strict_strptime_on_a_timestamp(module_name):
     """A regression guard on the mechanism. Re-adding a strict strptime would
     pass every behavioural test that happens to use the bare-Z form."""
@@ -92,7 +95,8 @@ def test_iso_time_imports_nothing_from_this_project():
     import ast
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parent.parent / "iso_time.py"
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "src" / "channel_vetting" / "core" / "iso_time.py")
     tree = ast.parse(src.read_text(encoding="utf-8"))
     imported = set()
     for node in ast.walk(tree):
@@ -100,7 +104,7 @@ def test_iso_time_imports_nothing_from_this_project():
             imported.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
-    assert imported == {"datetime"}, f"iso_time.py grew a dependency: {imported}"
+    assert imported == {"datetime"}, f"core/iso_time.py grew a dependency: {imported}"
 
 
 # --- the two mechanisms the ledger bug disabled -----------------------------
@@ -108,14 +112,14 @@ def test_iso_time_imports_nothing_from_this_project():
 def test_a_stale_lease_now_ages_out_in_airtables_own_format():
     """_lease_is_stale returned False for ANY age in the millisecond form, so a
     stranded lease locked outreach out until someone cleared the row by hand."""
-    from outreach_ledger import _lease_is_stale
+    from channel_vetting.outreach.ledger import _lease_is_stale
 
     old = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     assert _lease_is_stale(old, 60) is True
 
 
 def test_a_fresh_lease_is_still_treated_as_live():
-    from outreach_ledger import _lease_is_stale
+    from channel_vetting.outreach.ledger import _lease_is_stale
 
     fresh = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     assert _lease_is_stale(fresh, 60) is False
@@ -124,6 +128,6 @@ def test_a_fresh_lease_is_still_treated_as_live():
 def test_an_unreadable_lease_timestamp_still_fails_closed():
     """The None policy is unchanged: refusing to start is recoverable,
     double-sending is not."""
-    from outreach_ledger import _lease_is_stale
+    from channel_vetting.outreach.ledger import _lease_is_stale
 
     assert _lease_is_stale("who-knows", 60) is False

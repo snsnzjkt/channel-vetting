@@ -17,9 +17,9 @@ import json
 
 import pytest
 
-import main
-import rejected_handles
-from scoring import QUALIFIED
+from channel_vetting import pipeline
+from channel_vetting.discovery import rejected_handles
+from channel_vetting.ranking.scoring import QUALIFIED
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +97,7 @@ def test_recording_nothing_is_a_no_op(_isolated_cache):
 
 
 def _collect(reason, handle="creator"):
-    counts = main.push_until_full(
+    counts = pipeline.push_until_full(
         [{"handle": handle, "channel_id": "UC1"}],
         lambda c: (None, reason),
         "tbl", qualified_headroom=5, flagged_headroom=5,
@@ -106,13 +106,13 @@ def _collect(reason, handle="creator"):
 
 
 def test_a_gate_rejection_is_recorded():
-    assert _collect(main.DROP_BELOW_VIEW_MINIMUM) == {"creator"}
-    assert _collect(main.DROP_SHORTS_ONLY) == {"creator"}
+    assert _collect(pipeline.DROP_BELOW_VIEW_MINIMUM) == {"creator"}
+    assert _collect(pipeline.DROP_SHORTS_ONLY) == {"creator"}
     assert _collect("blocked") == {"creator"}
     assert _collect("duplicate") == {"creator"}
 
 
-@pytest.mark.parametrize("reason", sorted(main.TRANSIENT_DROP_REASONS))
+@pytest.mark.parametrize("reason", sorted(pipeline.TRANSIENT_DROP_REASONS))
 def test_a_run_circumstance_is_never_recorded(reason):
     """
     These say nothing about the CHANNEL. Recording one would blind the pipeline
@@ -125,8 +125,8 @@ def test_a_run_circumstance_is_never_recorded(reason):
 def test_a_pushed_candidate_is_not_recorded(monkeypatch):
     """It became a row; tracked_handles covers it, and re-rejecting it here
     would be wrong the day a reviewer deletes the row."""
-    monkeypatch.setattr(main, "push_record", lambda t, r: True)
-    counts = main.push_until_full(
+    monkeypatch.setattr(pipeline, "push_record", lambda t, r: True)
+    counts = pipeline.push_until_full(
         [{"handle": "creator", "channel_id": "UC1"}],
         lambda c: ({"Channel ID": "UC1"}, QUALIFIED),
         "tbl", qualified_headroom=5, flagged_headroom=5,
@@ -137,8 +137,8 @@ def test_a_pushed_candidate_is_not_recorded(monkeypatch):
 def test_a_candidate_with_no_handle_is_skipped():
     """The search.list fallback yields channel_ids, not handles, and
     exclude_handles cannot use those — nothing to record and nothing to save."""
-    counts = main.push_until_full(
-        [{"channel_id": "UC1"}], lambda c: (None, main.DROP_SHORTS_ONLY),
+    counts = pipeline.push_until_full(
+        [{"channel_id": "UC1"}], lambda c: (None, pipeline.DROP_SHORTS_ONLY),
         "tbl", qualified_headroom=5, flagged_headroom=5,
     )
     assert counts["rejected_handles"] == set()
@@ -158,8 +158,8 @@ def test_rejected_handles_outrank_external_ones(monkeypatch):
     proven one must survive when the two compete for the last slots.
     """
     external = type("E", (), {"handles": [f"ext{i}" for i in range(50)]})()
-    monkeypatch.setattr(main, "_external_priority", lambda e, hint: list(e.handles))
-    result = main._discovery_exclude_handles(
+    monkeypatch.setattr(pipeline, "_external_priority", lambda e, hint: list(e.handles))
+    result = pipeline._discovery_exclude_handles(
         _Blocklist(), external, seen_handles={"seen1"},
         tracked_handles={"tracked1"}, rejected_handles={"rejected1"},
     )
@@ -170,7 +170,7 @@ def test_rejected_handles_outrank_external_ones(monkeypatch):
 def test_omitting_rejected_handles_keeps_the_old_behaviour(monkeypatch):
     """The parameter is optional, so an existing caller is unchanged."""
     external = type("E", (), {"handles": []})()
-    monkeypatch.setattr(main, "_external_priority", lambda e, hint: [])
-    assert main._discovery_exclude_handles(
+    monkeypatch.setattr(pipeline, "_external_priority", lambda e, hint: [])
+    assert pipeline._discovery_exclude_handles(
         _Blocklist(), external, seen_handles=set()
     ) == {"blocked1"}

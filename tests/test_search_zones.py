@@ -16,14 +16,14 @@ import pytest
 
 @pytest.mark.parametrize("code", ["US", "CA", "GB", "AU", "DE", "FR", "NL", "SE", "PL", "NO", "CH"])
 def test_allowed_country_codes_are_inside(code):
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict(code) is True
 
 
 @pytest.mark.parametrize("code", ["IN", "PK", "PH", "BR", "NG", "JP", "NZ", "MX", "ID"])
 def test_countries_outside_the_zones_are_rejected(code):
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict(code) is False
 
@@ -33,7 +33,7 @@ def test_ireland_is_excluded():
     "UK (except Ireland)" was explicit. IE is an EU member, so the Europe
     zone would otherwise readmit it through the back door.
     """
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict("IE") is False
     assert zone_verdict("Ireland") is False
@@ -41,14 +41,14 @@ def test_ireland_is_excluded():
 
 def test_northern_ireland_stays_inside_via_gb():
     """GB covers England, Scotland, Wales and Northern Ireland."""
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict("GB") is True
     assert zone_verdict("Northern Ireland") is True
 
 
 def test_a_lowercase_api_code_still_resolves():
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict("us") is True
     assert zone_verdict(" gb ") is True
@@ -72,20 +72,20 @@ def test_a_lowercase_api_code_still_resolves():
     ],
 )
 def test_about_panel_names_resolve_to_codes(name, expected):
-    from search_zones import country_code
+    from channel_vetting.discovery.search_zones import country_code
 
     assert country_code(name) == expected
 
 
 def test_names_are_matched_case_and_space_insensitively():
-    from search_zones import country_code
+    from channel_vetting.discovery.search_zones import country_code
 
     assert country_code("  united   states  ") == "US"
     assert country_code("UNITED KINGDOM") == "GB"
 
 
 def test_a_country_name_gets_the_same_verdict_as_its_code():
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict("United States") is True
     assert zone_verdict("India") is False
@@ -101,7 +101,7 @@ def test_an_undeclared_country_has_no_verdict(raw):
     channel sets none. None (not False) is what keeps that channel in the
     pipeline for a human to look at.
     """
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict(raw) is None
 
@@ -113,7 +113,7 @@ def test_an_unrecognised_country_name_has_no_verdict():
     unknown channel age. Reading it as "outside" would silently discard
     real prospects every time YouTube relabels or relocalises the panel.
     """
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict("Kingdom of Somewhere") is None
     assert zone_verdict("Åland-ish") is None
@@ -123,9 +123,9 @@ def test_none_is_falsy_so_callers_must_compare_identity():
     """
     `if not zone_verdict(c): drop` would discard every unknown-country
     channel — the exact failure this three-state return exists to prevent.
-    main.process_candidate compares `is False`; this pins why.
+    pipeline.process_candidate compares `is False`; this pins why.
     """
-    from search_zones import zone_verdict
+    from channel_vetting.discovery.search_zones import zone_verdict
 
     assert zone_verdict("Unknown") is not False
     assert bool(zone_verdict("Unknown")) is False
@@ -140,7 +140,10 @@ def test_every_allowed_name_maps_into_the_allowed_code_set():
     ALLOWED_COUNTRY_CODES) would make that country resolve and then be
     rejected — an About-panel-only channel silently discarded.
     """
-    from search_zones import ALLOWED_COUNTRY_CODES, ALLOWED_COUNTRY_NAMES
+    from channel_vetting.discovery.search_zones import (
+        ALLOWED_COUNTRY_CODES,
+        ALLOWED_COUNTRY_NAMES,
+    )
 
     unmapped = {
         name: code for name, code in ALLOWED_COUNTRY_NAMES.items()
@@ -151,7 +154,10 @@ def test_every_allowed_name_maps_into_the_allowed_code_set():
 
 def test_no_known_outside_name_maps_into_the_allowed_set():
     """The reverse mistake: a country listed as outside that resolves inside."""
-    from search_zones import ALLOWED_COUNTRY_CODES, KNOWN_OUTSIDE_COUNTRY_NAMES
+    from channel_vetting.discovery.search_zones import (
+        ALLOWED_COUNTRY_CODES,
+        KNOWN_OUTSIDE_COUNTRY_NAMES,
+    )
 
     leaked = {
         name: code for name, code in KNOWN_OUTSIDE_COUNTRY_NAMES.items()
@@ -161,7 +167,10 @@ def test_no_known_outside_name_maps_into_the_allowed_set():
 
 
 def test_the_two_name_tables_do_not_overlap():
-    from search_zones import ALLOWED_COUNTRY_NAMES, KNOWN_OUTSIDE_COUNTRY_NAMES
+    from channel_vetting.discovery.search_zones import (
+        ALLOWED_COUNTRY_NAMES,
+        KNOWN_OUTSIDE_COUNTRY_NAMES,
+    )
 
     assert set(ALLOWED_COUNTRY_NAMES) & set(KNOWN_OUTSIDE_COUNTRY_NAMES) == set()
 
@@ -171,7 +180,7 @@ def test_names_in_both_tables_are_stored_normalised():
     Lookup normalises the input, not the table, so an unnormalised key
     (leading space, capital letter) would be unreachable.
     """
-    from search_zones import (
+    from channel_vetting.discovery.search_zones import (
         ALLOWED_COUNTRY_NAMES, KNOWN_OUTSIDE_COUNTRY_NAMES, _normalize_name,
     )
 
@@ -203,7 +212,7 @@ def test_names_in_both_tables_are_stored_normalised():
     ],
 )
 def test_region_subtags_are_extracted(tag, expected):
-    from search_zones import region_from_language_tag
+    from channel_vetting.discovery.search_zones import region_from_language_tag
 
     assert region_from_language_tag(tag) == expected
 
@@ -214,14 +223,14 @@ def test_a_bare_language_yields_no_region(tag):
     A bare language is not a location. `ta` spans India, Sri Lanka and
     Singapore; `en`, `es` and `fr` straddle the zone boundary.
     """
-    from search_zones import region_from_language_tag
+    from channel_vetting.discovery.search_zones import region_from_language_tag
 
     assert region_from_language_tag(tag) == ""
 
 
 def test_numeric_un_m49_regions_are_ignored():
     """"en-419" is Latin America — several countries, not an alpha-2 code."""
-    from search_zones import region_from_language_tag
+    from channel_vetting.discovery.search_zones import region_from_language_tag
 
     assert region_from_language_tag("en-419") == ""
 
@@ -240,9 +249,12 @@ def test_the_language_region_subtag_is_no_longer_composed_into_a_verdict():
     here, renamed, so that the numbers stay recorded AND so a reader cannot
     mistake it for live behaviour. `region_from_language_tag` survives only
     because the full tag is written verbatim to the "Content Language" column;
-    nothing reads it as a location. See main.location_drop_reason.
+    nothing reads it as a location. See pipeline.location_drop_reason.
     """
-    from search_zones import region_from_language_tag, zone_verdict
+    from channel_vetting.discovery.search_zones import (
+        region_from_language_tag,
+        zone_verdict,
+    )
 
     expected = {
         "en": None, "hi": None, "ta": None,          # no region subtag
@@ -256,9 +268,9 @@ def test_the_language_region_subtag_is_no_longer_composed_into_a_verdict():
         got = zone_verdict(region_from_language_tag(tag))
         assert got is want, f"{tag}: expected {want}, got {got}"
 
-    import main
+    from channel_vetting import pipeline
 
-    assert not hasattr(main, "resolve_country"), (
+    assert not hasattr(pipeline, "resolve_country"), (
         "resolve_country was the only caller that turned a language tag into a "
         "location. If it is back, the 2026-08-20 fix has been reverted."
     )
@@ -269,7 +281,7 @@ def test_country_code_passes_through_an_unrecognised_two_letter_code():
     Resolving a country and judging its zone are separate questions — "IN"
     resolves fine, it just isn't allowed.
     """
-    from search_zones import country_code, zone_verdict
+    from channel_vetting.discovery.search_zones import country_code, zone_verdict
 
     assert country_code("IN") == "IN"
     assert zone_verdict("IN") is False
@@ -289,7 +301,7 @@ def test_country_code_passes_through_an_unrecognised_two_letter_code():
     ("based out of Brazil", "BR"),
 ])
 def test_description_reveals_an_outside_location(description, expected):
-    from search_zones import description_location_outside_zone
+    from channel_vetting.discovery.search_zones import description_location_outside_zone
 
     assert description_location_outside_zone(description) == expected
 
@@ -304,6 +316,6 @@ def test_description_reveals_an_outside_location(description, expected):
     "Clips shot in Iceland last summer",         # 'shot in' isn't a cue (and IS is in-zone)
 ])
 def test_description_does_not_trip_on_mentions_or_in_zone_locations(description):
-    from search_zones import description_location_outside_zone
+    from channel_vetting.discovery.search_zones import description_location_outside_zone
 
     assert description_location_outside_zone(description) == ""

@@ -11,9 +11,9 @@ These tests pin the accounting, not the HTTP shape.
 """
 import pytest
 
-import credit_tracker
-import influencer_discovery
-from influencer_discovery import InfluencerDiscovery
+from channel_vetting.budget import credit_tracker
+from channel_vetting.discovery import influencers_club
+from channel_vetting.discovery.influencers_club import InfluencerDiscovery
 
 
 class _Resp:
@@ -42,10 +42,10 @@ _PAYLOAD = {
 
 def test_probe_records_spend_in_the_ledger(monkeypatch):
     spent = []
-    monkeypatch.setattr(influencer_discovery, "record_spend",
+    monkeypatch.setattr(influencers_club, "record_spend",
                         lambda cost, **kw: spent.append((cost, kw)) or True)
-    monkeypatch.setattr(influencer_discovery, "can_afford", lambda *a, **k: True)
-    monkeypatch.setattr(influencer_discovery, "record_vendor_balance", lambda *_: None)
+    monkeypatch.setattr(influencers_club, "can_afford", lambda *a, **k: True)
+    monkeypatch.setattr(influencers_club, "record_vendor_balance", lambda *_: None)
 
     d = _disc(monkeypatch, _PAYLOAD)
     accounts, total = d.probe({"ai_search": "x"}, limit=5)
@@ -60,7 +60,7 @@ def test_probe_records_spend_in_the_ledger(monkeypatch):
 
 def test_probe_refuses_when_the_ledger_says_no(monkeypatch):
     """A refused probe must issue no request and spend nothing."""
-    monkeypatch.setattr(influencer_discovery, "can_afford", lambda *a, **k: False)
+    monkeypatch.setattr(influencers_club, "can_afford", lambda *a, **k: False)
     posted = []
 
     d = InfluencerDiscovery(enabled=True, max_credits=10.0, sleep=lambda *_: None)
@@ -74,7 +74,7 @@ def test_probe_refuses_when_the_ledger_says_no(monkeypatch):
 
 def test_probe_respects_the_per_run_ceiling(monkeypatch):
     """The per-run ceiling is projected against the probe's price, not ignored."""
-    monkeypatch.setattr(influencer_discovery, "can_afford", lambda *a, **k: True)
+    monkeypatch.setattr(influencers_club, "can_afford", lambda *a, **k: True)
     posted = []
 
     d = InfluencerDiscovery(enabled=True, max_credits=0.10, sleep=lambda *_: None)
@@ -87,9 +87,9 @@ def test_probe_respects_the_per_run_ceiling(monkeypatch):
 
 def test_probe_counts_billed_creators(monkeypatch):
     """Billed count feeds the credits-per-row ratio, so a probe must not hide from it."""
-    monkeypatch.setattr(influencer_discovery, "record_spend", lambda *a, **k: True)
-    monkeypatch.setattr(influencer_discovery, "can_afford", lambda *a, **k: True)
-    monkeypatch.setattr(influencer_discovery, "record_vendor_balance", lambda *_: None)
+    monkeypatch.setattr(influencers_club, "record_spend", lambda *a, **k: True)
+    monkeypatch.setattr(influencers_club, "can_afford", lambda *a, **k: True)
+    monkeypatch.setattr(influencers_club, "record_vendor_balance", lambda *_: None)
 
     d = _disc(monkeypatch, _PAYLOAD)
     d.probe({"ai_search": "x"}, limit=5)
@@ -104,9 +104,9 @@ def test_probe_deactivates_on_a_failed_ledger_write(monkeypatch):
     Continuing would authorise later requests against a total the ledger no
     longer reflects.
     """
-    monkeypatch.setattr(influencer_discovery, "record_spend", lambda *a, **k: False)
-    monkeypatch.setattr(influencer_discovery, "can_afford", lambda *a, **k: True)
-    monkeypatch.setattr(influencer_discovery, "record_vendor_balance", lambda *_: None)
+    monkeypatch.setattr(influencers_club, "record_spend", lambda *a, **k: False)
+    monkeypatch.setattr(influencers_club, "can_afford", lambda *a, **k: True)
+    monkeypatch.setattr(influencers_club, "record_vendor_balance", lambda *_: None)
 
     d = _disc(monkeypatch, _PAYLOAD)
     d.probe({"ai_search": "x"}, limit=5)
@@ -121,8 +121,14 @@ def test_measurement_scripts_do_not_call_post_directly():
     nothing else in the suite would notice.
     """
     import pathlib
+
+    # Read as TEXT, never imported. The scripts now guard their entry points with
+    # `if __name__ == "__main__"`, so importing no longer spends credits, but they
+    # still call `logging.basicConfig()` at module scope — importing them would
+    # reconfigure the root logger for the rest of the suite. Text is enough here.
+    analysis = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "analysis"
     for name in ("measure_discovery_pool.py", "measure_query_union.py"):
-        src = pathlib.Path(name).read_text()
+        src = (analysis / name).read_text()
         code = "\n".join(
             line for line in src.splitlines() if not line.lstrip().startswith("#")
         )
@@ -142,9 +148,10 @@ def test_rejected_handle_cache_is_isolated_from_production():
     production. Those strings then shipped to the vendor in `exclude_handles`
     on every run, spending part of a 10,000-handle budget on nothing.
     """
-    import rejected_handles as rh
+    from channel_vetting.core.paths import data_path
+    from channel_vetting.discovery import rejected_handles as rh
 
-    assert rh.REJECTED_HANDLES_FILE != "rejected_handles.json", (
+    assert rh.REJECTED_HANDLES_FILE != data_path("rejected_handles.json"), (
         "the autouse isolation fixture is not active — a test writing a reject "
         "would land in the repo's production cache"
     )
@@ -156,7 +163,9 @@ def test_production_reject_cache_has_no_synthetic_handles():
     import pathlib
     import re
 
-    path = pathlib.Path("rejected_handles.json")
+    from channel_vetting.core.paths import data_path
+
+    path = pathlib.Path(data_path("rejected_handles.json"))
     if not path.exists():
         return
     niches = json.loads(path.read_text()).get("niches", {})

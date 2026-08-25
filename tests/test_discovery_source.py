@@ -10,7 +10,7 @@ were unreachable code — for the one niche whose paid pool was measurably spent
 """
 import pytest
 
-import main
+from channel_vetting import pipeline
 
 
 class _Disc:
@@ -66,7 +66,7 @@ def test_the_live_discovery_sources_are_pinned():
                                       corpus tops up the headroom paid
                                       discovery could not reach
     """
-    import niches
+    from channel_vetting.discovery import niches
     assert niches.NICHES["Home Theater"]["discovery_source"] == "search_list"
     assert niches.NICHES["Lifestyle Sofa"]["discovery_source"] == "both"
 
@@ -104,11 +104,11 @@ def test_both_mode_still_uses_paid_discovery_first():
 
 def test_home_theater_keeps_its_discovery_filters():
     """
-    Kept on purpose, not left behind: measure_discovery_pool.py probes them, and
+    Kept on purpose, not left behind: scripts/analysis/measure_discovery_pool.py probes them, and
     flipping back once the reject cache ages out (90 days) must stay a one-word
     change rather than a rewrite.
     """
-    import niches
+    from channel_vetting.discovery import niches
     ht = niches.NICHES["Home Theater"]
     assert "discovery_filters" in ht
     assert ht["discovery_filters"].get("ai_search")
@@ -119,7 +119,7 @@ def test_the_free_path_niche_still_has_keywords_to_use():
     An opted-out niche with no keywords would discover nothing at all — the
     silent-zero-rows failure. Guard it at config level.
     """
-    import niches
+    from channel_vetting.discovery import niches
     for name, cfg in niches.NICHES.items():
         if cfg.get("discovery_source", "influencers") != "influencers":
             assert cfg.get("keywords"), (

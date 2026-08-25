@@ -12,9 +12,9 @@ import json
 
 import pytest
 
-import gemini_tracker as gt
-from config import GEMINI_MAX_REQUESTS_PER_DAY as DAY
-from config import GEMINI_MAX_VIDEO_REQUESTS_PER_DAY as VDAY
+from channel_vetting.budget import gemini_tracker as gt
+from channel_vetting.config import GEMINI_MAX_REQUESTS_PER_DAY as DAY
+from channel_vetting.config import GEMINI_MAX_VIDEO_REQUESTS_PER_DAY as VDAY
 
 
 @pytest.fixture(autouse=True)

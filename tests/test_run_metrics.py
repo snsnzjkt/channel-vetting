@@ -123,7 +123,7 @@ def test_metrics_are_written_even_when_a_niche_raises(monkeypatch):
                         lambda rec, p=None: written.append(rec) or True)
     monkeypatch.setattr(main, "fetch_blocklist", lambda: _NullBlocklist())
     monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda: {})
+    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
     monkeypatch.setattr(main, "run_niche",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("niche exploded")))
 
@@ -153,7 +153,7 @@ def test_metrics_record_a_completed_run_as_completed(monkeypatch):
                         lambda rec, p=None: written.append(rec) or True)
     monkeypatch.setattr(main, "fetch_blocklist", lambda: _NullBlocklist())
     monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda: {})
+    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
     monkeypatch.setattr(main, "run_niche", lambda *a, **k: (7, 3, {"UC1"}, True))
 
     niches = {

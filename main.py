@@ -431,7 +431,10 @@ DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
 # badly-targeted discovery query from a thin-metadata one, and the two need
 # opposite responses. Both are discards; only the reason differs.
 DROP_NO_DECLARED_COUNTRY = "no_declared_country"
-# A television network or a TV show's own channel, not a creator.
+# A broadcaster's, network's or masthead's own channel, not a creator's —
+# television, radio or published. The reason string keeps its `broadcast_tv`
+# name so run summaries and the historical audits stay comparable; the scope
+# widened past television on 2026-08-25 (see niches.py).
 DROP_BROADCAST_TV = "broadcast_tv"
 DROP_EXCLUDED_TOPIC = "excluded_topic"
 DROP_UPLOAD_CADENCE_TOO_LOW = "upload_cadence_too_low"
@@ -534,8 +537,13 @@ _BROADCAST_TV_PHRASE_PATTERN = re.compile(
 
 def broadcast_tv_reason(channel_title: str, description: str) -> str | None:
     """
-    Whether this channel is a television network or a TV show rather than a
-    creator: 'broadcast_tv_name', 'broadcast_tv_phrase', or None.
+    Whether this channel belongs to a broadcaster, network or masthead rather
+    than to a creator: 'broadcast_tv_name', 'broadcast_tv_phrase', or None.
+
+    Covers television (HGTV, Escape To The Country), sports and radio networks
+    (Fox Sports Radio, Sky Sports, talkSPORT) and staffed newsrooms
+    (The Verge, DNVR Sports). It does NOT cover manufacturers' brand channels
+    — Dolby and ADAM Audio are deliberately still admitted.
 
     Free — reads only the title and About description `channels.list` already
     returned, so it sits with the other description checks and costs no
@@ -2557,7 +2565,23 @@ def run(
     # influencer tables (see external_dedupe.py) — cached, so this is
     # near-instant on any run within EXTERNAL_CACHE_MAX_AGE_HOURS of the
     # last one.
-    external_handles = fetch_external_handles()
+    # force_refresh: ALWAYS rebuild the dedupe index at the start of a run.
+    #
+    # The cache exists to make repeated local iteration cheap, and its 24-hour
+    # max age was fine when these tables were assumed static. They are not — the
+    # team edits the outreach tables continuously — so a run that starts with a
+    # 12-hour-old cache cannot see a channel added externally this morning, and
+    # pushes it as new.
+    #
+    # Measured 2026-08-25: 45 rows across the two niche tables were already
+    # tracked elsewhere, 43 of them matching on HANDLE, i.e. the index simply did
+    # not have them yet. 30 of Lifestyle's 31 arrived in a single day.
+    #
+    # The trade is ~90 seconds and ~180 Airtable reads per run against a
+    # duplicate costing a 0.20-credit email lookup plus a slot in the reviewer's
+    # queue. At 45 duplicates that is ~9 credits and 45 rows of human attention,
+    # so refreshing every run is comfortably the cheaper side.
+    external_handles = fetch_external_handles(force_refresh=True)
 
     total_discovered = 0
     total_processed = 0

@@ -52,7 +52,7 @@ def test_run_passes_configured_window_to_discovery(monkeypatch):
     monkeypatch.setattr(main, "run_niche", fake_run_niche)
     monkeypatch.setattr(main, "fetch_blocklist", lambda: object())
     monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda: {})
+    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
     monkeypatch.setattr(main, "get_today_spend", lambda: 0)
 
     main.run(niches=main.NICHES, max_results_per_keyword=50, days_back=7)

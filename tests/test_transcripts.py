@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-import transcripts
+from channel_vetting.verification import transcripts
 
 
 class _Snippet:

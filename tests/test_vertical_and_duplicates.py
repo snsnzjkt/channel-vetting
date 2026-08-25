@@ -19,8 +19,8 @@ The fixes are independent and both are needed:
 """
 import pytest
 
-import enrichment
-from enrichment import (
+from channel_vetting.enrichment import channels
+from channel_vetting.enrichment.channels import (
     DUPLICATE_DURATION_TOLERANCE_SECONDS,
     drop_duplicate_uploads,
     is_short_form,
@@ -200,7 +200,7 @@ def test_the_live_channel_shape_no_longer_produces_a_passing_sample(monkeypatch)
     is what the audience actually watched — not a 50/50 mix that clears the
     per-video floor.
     """
-    import main
+    from channel_vetting import pipeline
 
     pairs = []
     for i in range(5):
@@ -216,7 +216,7 @@ def test_the_live_channel_shape_no_longer_produces_a_passing_sample(monkeypatch)
 
     assert len(views) == 5, "five distinct videos, not ten"
     assert views == [200] * 5, "the watched-by-nobody landscape cuts are the real ones"
-    assert main.pre_push_drop_reason(
+    assert pipeline.pre_push_drop_reason(
         subscriber_count=68_700, avg_views=sum(views) / len(views),
         min_avg_views=10_000, video_count=1134, content_language="en",
         settled_views=views,

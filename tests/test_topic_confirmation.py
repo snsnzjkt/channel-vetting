@@ -9,13 +9,13 @@ which excludes the creator server-side for 90 days, so a false positive costs a
 real prospect for a quarter.
 
 There is no transcript. `spoken_summary` is what the model reports hearing; see
-video_topics.py for the measured reason a real transcript is unobtainable.
+verification/video_topics.py for the measured reason a real transcript is unobtainable.
 """
 import json
 
-import config
-import gemini_verify as gv
-import video_topics as vt
+from channel_vetting import config
+from channel_vetting.verification import gemini as gv
+from channel_vetting.verification import video_topics as vt
 import pytest
 
 from tests.test_gemini_verify import FakeResponse, stub_post, verifier  # noqa: F401
@@ -240,7 +240,7 @@ def test_the_prompt_names_the_topic_and_its_vocabulary():
 
 def test_every_vocabulary_key_has_a_readable_label():
     """A model handed `toys_and_kids` must guess the name's intent first."""
-    import niches
+    from channel_vetting.discovery import niches
     vocab = {**niches.EXCLUDED_TOPIC_TERMS, **niches.OFF_TARGET_TERMS}
     unlabelled = [k for k in vocab if k not in vt.TOPIC_LABELS]
     assert not unlabelled, f"unlabelled topics: {unlabelled}"

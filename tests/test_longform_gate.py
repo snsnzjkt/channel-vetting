@@ -10,7 +10,7 @@ already show MIN_LONGFORM_VIDEO_COUNT of them (2 quota units per extra page).
 No network: every YouTube call is monkeypatched.
 """
 import pytest
-from search_zones import ZONE_CORE
+from channel_vetting.discovery.search_zones import ZONE_CORE
 
 
 class _Resp:
@@ -64,20 +64,20 @@ class _FakeApi:
 @pytest.fixture
 def spend(monkeypatch):
     """Records quota units the scan books, so cost is asserted not assumed."""
-    import enrichment
+    from channel_vetting.enrichment import channels
 
     units = []
-    monkeypatch.setattr(enrichment, "record_spend", lambda u, call_name="": units.append(u))
-    monkeypatch.setattr(enrichment.time, "sleep", lambda s: None)
+    monkeypatch.setattr(channels, "record_spend", lambda u, call_name="": units.append(u))
+    monkeypatch.setattr(channels.time, "sleep", lambda s: None)
     return units
 
 
 def _count(monkeypatch, pages, already_counted, target=30, max_pages=3):
-    import enrichment
+    from channel_vetting.enrichment import channels
 
     api = _FakeApi(pages)
-    monkeypatch.setattr(enrichment.HTTP, "get", api.get)
-    total = enrichment.count_longform_in_older_videos(
+    monkeypatch.setattr(channels.HTTP, "get", api.get)
+    total = channels.count_longform_in_older_videos(
         "UC1", "PL1", "token0",
         already_counted=already_counted, target=target, max_pages=max_pages,
     )
@@ -86,13 +86,13 @@ def _count(monkeypatch, pages, already_counted, target=30, max_pages=3):
 
 def test_already_at_target_costs_nothing(monkeypatch, spend):
     """The common case — 29 of 47 measured candidates — must be free."""
-    import enrichment
+    from channel_vetting.enrichment import channels
 
     monkeypatch.setattr(
-        enrichment.HTTP, "get",
+        channels.HTTP, "get",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not page when already at target")),
     )
-    total = enrichment.count_longform_in_older_videos(
+    total = channels.count_longform_in_older_videos(
         "UC1", "PL1", "token0", already_counted=30, target=30,
     )
     assert total == 30
@@ -100,24 +100,24 @@ def test_already_at_target_costs_nothing(monkeypatch, spend):
 
 
 def test_no_page_token_means_no_older_uploads_to_read(monkeypatch, spend):
-    import enrichment
+    from channel_vetting.enrichment import channels
 
     monkeypatch.setattr(
-        enrichment.HTTP, "get",
+        channels.HTTP, "get",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not page without a token")),
     )
-    assert enrichment.count_longform_in_older_videos("UC1", "PL1", "", 5, 30) == 5
+    assert channels.count_longform_in_older_videos("UC1", "PL1", "", 5, 30) == 5
     assert spend == []
 
 
 def test_max_pages_zero_disables_the_scan(monkeypatch, spend):
-    import enrichment
+    from channel_vetting.enrichment import channels
 
     monkeypatch.setattr(
-        enrichment.HTTP, "get",
+        channels.HTTP, "get",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not page when disabled")),
     )
-    assert enrichment.count_longform_in_older_videos("UC1", "PL1", "t", 5, 30, max_pages=0) == 5
+    assert channels.count_longform_in_older_videos("UC1", "PL1", "t", 5, 30, max_pages=0) == 5
     assert spend == []
 
 
@@ -167,7 +167,7 @@ def test_a_shorts_factory_is_rejected_at_the_page_cap(monkeypatch, spend):
     assert api.playlist_calls == 3, "must stop at max_pages, not follow token3"
     assert sum(spend) == 6
 
-    from main import longform_drop_reason
+    from channel_vetting.pipeline import longform_drop_reason
     assert longform_drop_reason(total) == "too_few_longform_videos"
 
 
@@ -190,28 +190,28 @@ def test_an_unreadable_duration_never_counts_toward_the_floor(monkeypatch, spend
 def test_a_failed_page_returns_the_count_so_far_without_raising(monkeypatch, spend):
     """Soft failure, like the rest of enrichment — and it leans toward
     discarding, since the count stays below target."""
-    import enrichment
+    from channel_vetting.enrichment import channels
 
-    monkeypatch.setattr(enrichment.HTTP, "get", lambda *a, **k: _Resp(503))
-    monkeypatch.setattr(enrichment.time, "sleep", lambda s: None)
+    monkeypatch.setattr(channels.HTTP, "get", lambda *a, **k: _Resp(503))
+    monkeypatch.setattr(channels.time, "sleep", lambda s: None)
 
-    total = enrichment.count_longform_in_older_videos("UC1", "PL1", "t", 7, 30)
+    total = channels.count_longform_in_older_videos("UC1", "PL1", "t", 7, 30)
 
     assert total == 7
     assert spend == [], "a non-200 is not billed by Google and must not be charged here"
 
 
 def test_a_request_exception_returns_the_count_so_far(monkeypatch, spend):
-    import enrichment
+    from channel_vetting.enrichment import channels
     import requests
 
     def boom(*a, **k):
         raise requests.RequestException("network down")
 
-    monkeypatch.setattr(enrichment.HTTP, "get", boom)
-    monkeypatch.setattr(enrichment.time, "sleep", lambda s: None)
+    monkeypatch.setattr(channels.HTTP, "get", boom)
+    monkeypatch.setattr(channels.time, "sleep", lambda s: None)
 
-    assert enrichment.count_longform_in_older_videos("UC1", "PL1", "t", 7, 30) == 7
+    assert channels.count_longform_in_older_videos("UC1", "PL1", "t", 7, 30) == 7
     assert spend == []
 
 
@@ -221,7 +221,7 @@ def test_dominant_language_wins_over_a_single_odd_upload(monkeypatch):
     FIRST non-empty one let a single mislabelled upload decide the channel;
     the most common value across the window is the robust reading.
     """
-    from enrichment import dominant_language
+    from channel_vetting.enrichment.channels import dominant_language
 
     assert dominant_language(["es", "en", "en", "en"]) == "en"
     assert dominant_language(["", "", "en-GB", "en-GB", "de"]) == "en-GB"
@@ -235,30 +235,30 @@ def test_process_candidate_does_not_page_for_a_candidate_it_already_rejected(mon
     run AFTER the free ones. A channel below the view floor must be dropped
     without paging.
     """
-    import main
+    from channel_vetting import pipeline
 
     monkeypatch.setattr(
-        main, "count_longform_in_older_videos",
+        pipeline, "count_longform_in_older_videos",
         lambda *a, **k: pytest.fail("paged for a candidate the free gates already dropped"),
     )
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: {
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: {
         "channel_id": "UC1", "channel_title": "Chan", "handle": "chan", "published_at": "",
         "subscriber_count": 10_000, "uploads_playlist_id": "PL1", "business_email": "",
         "video_count": 500, "country": "US",
     })
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: {
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda cid, pl: {
         "avg_views": 9_000,          # below the 10,000 floor
         "avg_engagement_rate": 1.0, "upload_dates": [], "content_language": "en",
         "repeated_email": "", "longform_count": 1, "duration_sample_size": 50,
         "next_page_token": "t",
     })
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     class _NullBlocklist:
         def match(self, handle="", email="", name=""):
             return ""
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
@@ -270,7 +270,7 @@ def test_process_candidate_does_not_page_for_a_candidate_it_already_rejected(mon
 
 def test_process_candidate_pages_when_the_newest_window_is_short(monkeypatch):
     """...and DOES page for a candidate that passed every free gate."""
-    import main
+    from channel_vetting import pipeline
 
     calls = []
 
@@ -278,28 +278,28 @@ def test_process_candidate_pages_when_the_newest_window_is_short(monkeypatch):
         calls.append((already_counted, target))
         return 30
 
-    monkeypatch.setattr(main, "count_longform_in_older_videos", fake_page)
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: {
+    monkeypatch.setattr(pipeline, "count_longform_in_older_videos", fake_page)
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: {
         "channel_id": "UC1", "channel_title": "Chan", "handle": "chan", "published_at": "",
         "subscriber_count": 10_000, "uploads_playlist_id": "PL1", "business_email": "",
         "video_count": 500, "country": "US",
     })
-    monkeypatch.setattr(main, "get_recent_video_performance", lambda cid, pl: {
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", lambda cid, pl: {
         "avg_views": 50_000, "avg_engagement_rate": 1.0, "upload_dates": [],
         "content_language": "en", "repeated_email": "",
         "longform_count": 22, "duration_sample_size": 50, "next_page_token": "t",
     })
-    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda p: 100)
     # process_candidate resolves the email via resolve_email_with_source now;
     # None keeps the no-social drop dormant so this test isolates the paging.
-    monkeypatch.setattr(main, "resolve_email_with_source", lambda *a, **k: ("", "", None))
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source", lambda *a, **k: ("", "", None))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     class _NullBlocklist:
         def match(self, handle="", email="", name=""):
             return ""
 
-    record, qualification = main.process_candidate(
+    record, qualification = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None, "allowed_country_codes": ZONE_CORE}, None,
@@ -321,7 +321,7 @@ def test_the_videos_call_asks_for_duration_and_orientation(monkeypatch, spend):
     orientation-unknown, and the vertical half of count_longform silently stops
     working here while continuing to work in the main window.
     """
-    import enrichment
+    from channel_vetting.enrichment import channels
 
     seen = {}
 
@@ -332,10 +332,10 @@ def test_the_videos_call_asks_for_duration_and_orientation(monkeypatch, spend):
             return _Resp(200, _videos_payload([LONG] * 50))
         return _Resp(200, _playlist_payload(50))
 
-    monkeypatch.setattr(enrichment.HTTP, "get", get)
-    monkeypatch.setattr(enrichment.time, "sleep", lambda s: None)
+    monkeypatch.setattr(channels.HTTP, "get", get)
+    monkeypatch.setattr(channels.time, "sleep", lambda s: None)
 
-    enrichment.count_longform_in_older_videos("UC1", "PL1", "t", 0, 30)
+    channels.count_longform_in_older_videos("UC1", "PL1", "t", 0, 30)
 
     assert seen["part"] == "contentDetails,player"
-    assert seen["maxWidth"] == enrichment.PLAYER_EMBED_MAX_WIDTH
+    assert seen["maxWidth"] == channels.PLAYER_EMBED_MAX_WIDTH

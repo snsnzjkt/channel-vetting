@@ -47,7 +47,7 @@ def _spaced(n, gap_days):
 def test_an_odd_timestamp_does_not_raise(odd):
     """Each of these raised ValueError out of process_candidate and killed the
     run. The value must be READ, not merely survived."""
-    from enrichment import calc_upload_frequency
+    from channel_vetting.enrichment.channels import calc_upload_frequency
 
     older = _iso(datetime.now(timezone.utc) - timedelta(days=400))
     freq = calc_upload_frequency([odd, older])
@@ -55,7 +55,7 @@ def test_an_odd_timestamp_does_not_raise(odd):
 
 
 def test_a_mixed_sample_uses_the_readable_dates():
-    from enrichment import calc_upload_frequency
+    from channel_vetting.enrichment.channels import calc_upload_frequency
 
     dates = _spaced(4, 10)
     dates.insert(2, "not-a-timestamp")
@@ -79,7 +79,7 @@ def test_a_mixed_sample_uses_the_readable_dates():
 def test_too_thin_a_sample_is_unmeasurable_not_zero(dates):
     """None is KEPT by pre_push_drop_reason; 0.0 is below every floor and
     would discard the channel on absent data."""
-    from enrichment import calc_uploads_per_year
+    from channel_vetting.enrichment.channels import calc_uploads_per_year
 
     assert calc_uploads_per_year(dates) is None
 
@@ -88,7 +88,7 @@ def test_a_zero_width_window_is_unmeasurable_not_a_number():
     """Every sampled upload on one day cannot support a cadence. This used to
     report float(len(parsed)) — ten same-day uploads claimed 120/yr, under a
     comment saying it could not extrapolate from a zero-width window."""
-    from enrichment import calc_uploads_per_year
+    from channel_vetting.enrichment.channels import calc_uploads_per_year
 
     same_day = ["2026-08-01T0%d:00:00Z" % i for i in range(1, 9)]
     assert calc_uploads_per_year(same_day) is None
@@ -99,7 +99,7 @@ def test_the_score_facing_float_still_reports_the_zero_width_window():
     calc_overall_score and the "Upload Frequency" text column, so returning
     something new for a same-day window would make every Overall Score already
     in Airtable incomparable with new ones."""
-    from enrichment import calc_upload_frequency
+    from channel_vetting.enrichment.channels import calc_upload_frequency
 
     same_day = ["2026-08-01T0%d:00:00Z" % i for i in range(1, 9)]
     assert calc_upload_frequency(same_day) == 8.0
@@ -108,7 +108,10 @@ def test_the_score_facing_float_still_reports_the_zero_width_window():
 # --- the conversion has one home --------------------------------------------
 
 def test_annual_is_twelve_times_the_monthly_figure():
-    from enrichment import calc_upload_frequency, calc_uploads_per_year
+    from channel_vetting.enrichment.channels import (
+        calc_upload_frequency,
+        calc_uploads_per_year,
+    )
 
     dates = _spaced(6, 15)
     assert calc_uploads_per_year(dates) == pytest.approx(
@@ -117,13 +120,13 @@ def test_annual_is_twelve_times_the_monthly_figure():
 
 
 def test_the_pipeline_and_the_audit_script_share_the_conversion():
-    """audit_prospects.py promises it "can never disagree" with the pipeline
+    """scripts/audit/audit_prospects.py promises it "can never disagree" with the pipeline
     about what fits. Both must reach the same function, not two copies."""
-    import main
-    import audit_prospects
-    from enrichment import calc_uploads_per_year
+    from channel_vetting import pipeline
+    from scripts.audit import audit_prospects
+    from channel_vetting.enrichment.channels import calc_uploads_per_year
 
-    assert main.calc_uploads_per_year is calc_uploads_per_year
+    assert pipeline.calc_uploads_per_year is calc_uploads_per_year
     assert audit_prospects.calc_uploads_per_year is calc_uploads_per_year
 
 
@@ -133,7 +136,7 @@ def test_calc_upload_frequency_no_longer_uses_strict_strptime():
     Z-suffixed date."""
     import inspect
 
-    from enrichment import calc_upload_frequency
+    from channel_vetting.enrichment.channels import calc_upload_frequency
 
     src = inspect.getsource(calc_upload_frequency)
     # The CALL form, not the bare word: the comments name strptime deliberately

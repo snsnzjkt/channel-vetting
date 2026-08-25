@@ -6,6 +6,6 @@ def test_harness_runs():
 
 
 def test_config_imports():
-    import config
+    from channel_vetting import config
 
     assert hasattr(config, "QUOTA_CEILING")

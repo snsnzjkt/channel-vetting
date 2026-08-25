@@ -21,15 +21,15 @@ playwright==1.62.0
 playwright-stealth==2.0.3
 pytest==8.3.3
 
-# Direct, not transitive: http_client.py does
+# Direct, not transitive: core/http_client.py does
 # `from urllib3.util.retry import Retry`. It happens to be pinned anyway as a
 # dependency of requests, but the import is first-party, so pin it here —
 # otherwise a future requests bump that loosens or drops urllib3 breaks the
 # import with nothing in this file to catch it.
 urllib3==2.7.0
 
-# Required, not optional: quota_tracker.py resolves
-# ZoneInfo("America/Los_Angeles") and prospect_day.py resolves
+# Required, not optional: budget/quota_tracker.py resolves
+# ZoneInfo("America/Los_Angeles") and core/prospect_day.py resolves
 # PROSPECT_DAY_TZ. Windows ships no system tz database, so zoneinfo raises
 # ZoneInfoNotFoundError without this package. CI hides the problem because
 # ubuntu-latest has a system tzdb — the failure is local-Windows-only.

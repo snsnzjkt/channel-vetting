@@ -1,5 +1,5 @@
 """
-external_dedupe.py is a DEDUPE list, not a suppression list, so its read
+enrichment/external_dedupe.py is a DEDUPE list, not a suppression list, so its read
 failures deliberately log and return partial results (CLAUDE.md: worst
 case a known channel is re-added). What must be bulletproof instead is the
 CACHE WRITE: a plain open(..., "w") truncates before writing, so an
@@ -36,7 +36,7 @@ def cache_path(tmp_path, monkeypatch):
     chdir needed, which keeps these tests safe to run in parallel with
     anything else that touches the real cache file.
     """
-    import external_dedupe
+    from channel_vetting.enrichment import external_dedupe
 
     path = tmp_path / "external_handles_cache.json"
     monkeypatch.setattr(external_dedupe, "EXTERNAL_HANDLES_CACHE_FILE", str(path))
@@ -54,7 +54,7 @@ def _stub_fetch(monkeypatch, handles_by_table):
     when the two "Prospect Outreach" tables were added and the fixed-length
     iterator raised StopIteration mid-fetch.
     """
-    import external_dedupe
+    from channel_vetting.enrichment import external_dedupe
 
     padded = list(handles_by_table)
     padded += [set()] * max(0, len(external_dedupe.EXTERNAL_TABLES) - len(padded))
@@ -66,7 +66,7 @@ def _stub_fetch(monkeypatch, handles_by_table):
 
 
 def test_cache_write_leaves_no_tmp_file_behind(cache_path, monkeypatch):
-    import external_dedupe
+    from channel_vetting.enrichment import external_dedupe
 
     _stub_fetch(monkeypatch, [{"one"}, {"two"}, set(), {"three"}])
 
@@ -88,7 +88,7 @@ def test_existing_cache_survives_a_write_that_raises_midway(cache_path, monkeypa
     file first, so a crash mid-serialize destroyed a good cache. Writing
     to a .tmp sibling and os.replace()-ing it means the old file is either
     wholly replaced or wholly untouched."""
-    import external_dedupe
+    from channel_vetting.enrichment import external_dedupe
 
     good = {"fetched_at": 1_000.0, "handles": {"already": "Home Theatre – YouTube Leads"}}
     with open(cache_path, "w", encoding="utf-8") as f:
@@ -117,7 +117,7 @@ def test_no_cache_file_is_created_at_all_when_the_write_fails(cache_path, monkey
     """The same guarantee when there was nothing to protect: a failed
     refresh must not leave a half-written file that the next run would
     treat as a fresh cache."""
-    import external_dedupe
+    from channel_vetting.enrichment import external_dedupe
 
     _stub_fetch(monkeypatch, [{"new"}, set(), set(), set()])
     monkeypatch.setattr(
@@ -132,10 +132,10 @@ def test_no_cache_file_is_created_at_all_when_the_write_fails(cache_path, monkey
 
 
 def test_read_failure_returns_partial_rather_than_raising(monkeypatch, caplog):
-    """Pins the deliberate asymmetry with do_not_contact.py: this list may
+    """Pins the deliberate asymmetry with airtable/do_not_contact.py: this list may
     come back short. Do NOT "harden" this into raising — a missing handle
     costs a duplicate row a human can spot, while an abort costs the run."""
-    import external_dedupe
+    from channel_vetting.enrichment import external_dedupe
 
     monkeypatch.setattr(external_dedupe.time, "sleep", lambda s: None)
     monkeypatch.setattr(external_dedupe.HTTP, "get", lambda *a, **k: _Resp(500))
@@ -149,7 +149,7 @@ def test_pagination_error_body_is_truncated_in_the_log(monkeypatch, caplog):
     """resp.text went straight into this logging call before; an Airtable
     error can echo an entire rejected payload, and this call site runs once
     per page across four ~18k-row tables."""
-    import external_dedupe
+    from channel_vetting.enrichment import external_dedupe
 
     huge = "y" * 20_000
     monkeypatch.setattr(external_dedupe.time, "sleep", lambda s: None)
@@ -171,7 +171,7 @@ def test_match_by_name_when_the_handle_changed():
     """A creator already tracked externally under an OLD handle
     (@Newrecordday2013) whose CURRENT handle is @newrecordday must still be
     caught by their stable channel name."""
-    from external_dedupe import ExternalIndex
+    from channel_vetting.enrichment.external_dedupe import ExternalIndex
 
     idx = ExternalIndex(
         handles={"newrecordday2013": "Follow-up Outreach"},   # the old handle
@@ -182,14 +182,14 @@ def test_match_by_name_when_the_handle_changed():
 
 
 def test_match_prefers_handle_over_name():
-    from external_dedupe import ExternalIndex
+    from channel_vetting.enrichment.external_dedupe import ExternalIndex
 
     idx = ExternalIndex(handles={"foo": "Leads"}, names={"bar channel": "Outreach"})
     assert idx.match(handle="@Foo", name="Bar Channel") == "Leads"
 
 
 def test_match_is_blank_safe():
-    from external_dedupe import ExternalIndex
+    from channel_vetting.enrichment.external_dedupe import ExternalIndex
 
     idx = ExternalIndex(handles={"foo": "Leads"}, names={"bar": "Outreach"})
     assert idx.match() == ""
@@ -198,7 +198,7 @@ def test_match_is_blank_safe():
 
 
 def test_normalize_name_folds_whitespace_and_case():
-    from external_dedupe import _normalize_name
+    from channel_vetting.enrichment.external_dedupe import _normalize_name
 
     assert _normalize_name("  New Record   Day ") == "new record day"
     assert _normalize_name("") == ""
@@ -208,7 +208,7 @@ def test_normalize_name_folds_whitespace_and_case():
 def test_match_external_accepts_a_plain_handle_dict():
     """A bare {handle: table} dict (pre-names cache / lightweight callers) is
     handle-only, matching the old behaviour."""
-    from external_dedupe import match_external, ExternalIndex
+    from channel_vetting.enrichment.external_dedupe import match_external, ExternalIndex
 
     assert match_external({"foo": "Leads"}, handle="@Foo") == "Leads"
     assert match_external({"foo": "Leads"}, name="Foo") == ""   # dict carries no names
@@ -216,9 +216,9 @@ def test_match_external_accepts_a_plain_handle_dict():
 
 
 def test_external_index_is_a_drop_in_for_the_handle_dict():
-    """cleanup_external_duplicates.py and the discovery exclude set read it
+    """scripts/backfill/cleanup_external_duplicates.py and the discovery exclude set read it
     like the old dict; those operations must keep working."""
-    from external_dedupe import ExternalIndex
+    from channel_vetting.enrichment.external_dedupe import ExternalIndex
 
     idx = ExternalIndex(handles={"a": "T1", "b": "T2"}, names={"n": "T1"})
     assert "a" in idx and "b" in idx and "n" not in idx   # names are not handle keys
@@ -247,9 +247,9 @@ def test_run_rebuilds_the_dedupe_index_instead_of_trusting_the_cache():
     """
     import inspect
 
-    import main
+    from channel_vetting import pipeline
 
-    src = inspect.getsource(main.run)
+    src = inspect.getsource(pipeline.run)
     assert "fetch_external_handles(force_refresh=True)" in src, (
         "run() must rebuild the dedupe index, not trust a cache up to "
         "EXTERNAL_CACHE_MAX_AGE_HOURS old — see the comment at the call site"
@@ -264,7 +264,7 @@ def test_the_cache_is_still_used_when_nobody_forces_a_refresh(tmp_path, monkeypa
     import json
     import time
 
-    import external_dedupe as ed
+    from channel_vetting.enrichment import external_dedupe as ed
 
     cache = tmp_path / "ext.json"
     cache.write_text(json.dumps({

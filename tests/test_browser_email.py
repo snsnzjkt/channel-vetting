@@ -144,20 +144,20 @@ class _FakeBrowser:
 
 
 def test_unwrap_redirect_returns_the_real_destination():
-    from browser_email import unwrap_youtube_redirect
+    from channel_vetting.enrichment.email_browser import unwrap_youtube_redirect
 
     wrapped = _redirect("https://andrewr.link/contactus")
     assert unwrap_youtube_redirect(wrapped) == "https://andrewr.link/contactus"
 
 
 def test_unwrap_redirect_passes_through_a_plain_url():
-    from browser_email import unwrap_youtube_redirect
+    from channel_vetting.enrichment.email_browser import unwrap_youtube_redirect
 
     assert unwrap_youtube_redirect("https://theaterathome.com") == "https://theaterathome.com"
 
 
 def test_extract_link_urls_digs_through_the_real_nesting():
-    from browser_email import extract_link_urls
+    from channel_vetting.enrichment.email_browser import extract_link_urls
 
     view_model = _about(links=["https://iiwireviews.com/", "https://x.com/foo"])
     assert extract_link_urls(view_model) == [
@@ -167,14 +167,14 @@ def test_extract_link_urls_digs_through_the_real_nesting():
 
 
 def test_extract_link_urls_dedupes_preserving_order():
-    from browser_email import extract_link_urls
+    from channel_vetting.enrichment.email_browser import extract_link_urls
 
     view_model = _about(links=["https://a.com", "https://b.com", "https://a.com"])
     assert extract_link_urls(view_model) == ["https://a.com", "https://b.com"]
 
 
 def test_extract_link_urls_tolerates_a_channel_with_no_links():
-    from browser_email import extract_link_urls
+    from channel_vetting.enrichment.email_browser import extract_link_urls
 
     assert extract_link_urls(_about(links=[])) == []
     assert extract_link_urls({}) == []
@@ -186,7 +186,7 @@ def test_extract_link_urls_tolerates_a_channel_with_no_links():
 
 def test_candidate_links_drops_third_party_domains():
     """Social/platform links are never a creator's own contact page."""
-    from browser_email import candidate_links
+    from channel_vetting.enrichment.email_browser import candidate_links
 
     urls = [
         "https://www.instagram.com/srba_iiwi/",
@@ -199,14 +199,14 @@ def test_candidate_links_drops_third_party_domains():
 
 def test_candidate_links_drops_url_shorteners():
     """The shortener's domain is what gets screened, not the destination."""
-    from browser_email import candidate_links
+    from channel_vetting.enrichment.email_browser import candidate_links
 
     assert candidate_links(["https://bit.ly/m/ROBINSON-2025-FAVS"]) == []
 
 
 def test_candidate_links_accepts_a_scheme_less_link():
     """aboutChannelViewModel link content is often bare, e.g. www.foo.com."""
-    from browser_email import candidate_links
+    from channel_vetting.enrichment.email_browser import candidate_links
 
     assert candidate_links(["www.theaterathome.com"]) == ["https://www.theaterathome.com"]
 
@@ -215,7 +215,7 @@ def test_candidate_links_accepts_a_scheme_less_link():
 
 
 def test_contact_probe_url_hangs_off_the_origin():
-    from browser_email import contact_probe_url
+    from channel_vetting.enrichment.email_browser import contact_probe_url
 
     assert contact_probe_url("https://iiwireviews.com/some/page") == "https://iiwireviews.com/contact"
 
@@ -224,7 +224,7 @@ def test_contact_probe_url_hangs_off_the_origin():
 
 
 def test_finds_email_on_the_linked_site():
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://www.theaterathome.com"]),
@@ -236,7 +236,7 @@ def test_finds_email_on_the_linked_site():
 
 def test_finds_email_in_a_mailto_href():
     """Plenty of sites only expose the address as a mailto link."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://hackshopgarage.com.au"]),
@@ -248,7 +248,7 @@ def test_finds_email_in_a_mailto_href():
 
 def test_probes_contact_when_the_landing_page_has_no_email():
     """2 of the 3 real hits needed this probe, not the landing page."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://iiwireviews.com/"]),
@@ -266,7 +266,7 @@ def test_does_not_probe_a_link_that_is_already_a_contact_page():
     rather than the exception. When the link already points at the contact
     path there is nothing to gain from fetching it twice.
     """
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://andrewr.link/contact"]),
@@ -279,7 +279,7 @@ def test_does_not_probe_a_link_that_is_already_a_contact_page():
 
 def test_gmail_addresses_are_kept():
     """Freemail must never be screened out — it is the commonest case."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://iiwireviews.com/"]),
@@ -291,7 +291,7 @@ def test_gmail_addresses_are_kept():
 
 def test_third_party_addresses_on_the_linked_page_are_rejected():
     """A tip-jar address on a creator's own site is still not their email."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://amazingworldbiketour.com"]),
@@ -302,7 +302,7 @@ def test_third_party_addresses_on_the_linked_page_are_rejected():
 
 
 def test_returns_empty_when_the_channel_has_no_links():
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({"youtube.com": _about(links=[])})
     scraper = BrowserEmailScraper(browser=browser)
@@ -312,14 +312,14 @@ def test_returns_empty_when_the_channel_has_no_links():
 # --- find_contact: the link-list-presence signal for the no-social drop ---
 #
 # find_email is just find_contact()[0]; these pin the second element, which
-# main.process_candidate turns into DROP_NO_SOCIAL. The rule is: only a
+# pipeline.process_candidate turns into DROP_NO_SOCIAL. The rule is: only a
 # POSITIVELY-empty list is False; anything unread is None (never disqualify
 # on absent data).
 
 
 def test_find_contact_reports_false_for_an_empty_link_list():
     """The one case that drives the no-social drop: links read, none present."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({"youtube.com": _about(links=[])})
     scraper = BrowserEmailScraper(browser=browser)
@@ -332,7 +332,7 @@ def test_find_contact_reports_true_when_a_social_only_channel_has_links():
     HAS a social media page — presence is True, so it must NOT be dropped,
     even though candidate_links drops the social link for the email scan.
     """
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({"youtube.com": _about(links=["https://www.instagram.com/creator/"])})
     scraper = BrowserEmailScraper(browser=browser)
@@ -340,7 +340,7 @@ def test_find_contact_reports_true_when_a_social_only_channel_has_links():
 
 
 def test_find_contact_reports_true_alongside_a_found_email():
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://www.theaterathome.com"]),
@@ -355,7 +355,7 @@ def test_find_contact_reports_none_when_the_about_panel_never_loads():
     No aboutChannelViewModel at all (evaluate returns None) is UNKNOWN, not
     empty — presence is None so the channel is kept, not dropped.
     """
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({})  # nothing keyed on youtube.com -> evaluate returns None
     scraper = BrowserEmailScraper(browser=browser)
@@ -364,7 +364,7 @@ def test_find_contact_reports_none_when_the_about_panel_never_loads():
 
 def test_null_scraper_find_contact_is_none():
     """An inert scraper reports None presence, keeping the no-social drop off."""
-    from browser_email import null_scraper
+    from channel_vetting.enrichment.email_browser import null_scraper
 
     assert null_scraper().find_contact("UC123") == ("", None)
 
@@ -375,7 +375,7 @@ def test_does_not_rescan_the_about_description():
     here would double-count a step-2 hit as a step-4 hit and misreport which
     step actually moved email coverage.
     """
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=[], description="Business: already@found.com"),
@@ -386,7 +386,7 @@ def test_does_not_rescan_the_about_description():
 
 def test_only_the_first_working_link_is_needed():
     """Stop at the first address rather than visiting every link."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://first.com", "https://second.com"]),
@@ -408,7 +408,7 @@ def test_only_the_first_working_link_is_needed():
 
 
 def test_social_about_urls_builds_the_facebook_about_path():
-    from browser_email import social_about_urls
+    from channel_vetting.enrichment.email_browser import social_about_urls
 
     assert social_about_urls(["https://www.facebook.com/avnirvana"]) == [
         "https://www.facebook.com/avnirvana/about"
@@ -416,7 +416,7 @@ def test_social_about_urls_builds_the_facebook_about_path():
 
 
 def test_social_about_urls_normalises_a_trailing_slash():
-    from browser_email import social_about_urls
+    from channel_vetting.enrichment.email_browser import social_about_urls
 
     assert social_about_urls(["https://www.facebook.com/hifibros/"]) == [
         "https://www.facebook.com/hifibros/about"
@@ -425,7 +425,7 @@ def test_social_about_urls_normalises_a_trailing_slash():
 
 def test_social_about_urls_ignores_platforms_measured_as_walled():
     """Instagram was 0/8, X and Patreon empty. Don't pay for those loads."""
-    from browser_email import social_about_urls
+    from channel_vetting.enrichment.email_browser import social_about_urls
 
     assert social_about_urls([
         "https://www.instagram.com/srba_iiwi/",
@@ -436,13 +436,13 @@ def test_social_about_urls_ignores_platforms_measured_as_walled():
 
 def test_social_about_urls_skips_a_numeric_profile_url():
     """facebook.com/profile.php?id=... has no /about sibling to guess."""
-    from browser_email import social_about_urls
+    from channel_vetting.enrichment.email_browser import social_about_urls
 
     assert social_about_urls(["https://www.facebook.com/profile.php?id=100081"]) == []
 
 
 def test_social_about_urls_does_not_double_append_about():
-    from browser_email import social_about_urls
+    from channel_vetting.enrichment.email_browser import social_about_urls
 
     assert social_about_urls(["https://www.facebook.com/avnirvana/about"]) == [
         "https://www.facebook.com/avnirvana/about"
@@ -451,7 +451,7 @@ def test_social_about_urls_does_not_double_append_about():
 
 def test_facebook_about_is_used_when_no_website_yields_an_email():
     """AV NIRVANA's real case: site has no address, the FB page does."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=[
@@ -468,7 +468,7 @@ def test_facebook_about_is_used_when_no_website_yields_an_email():
 
 def test_the_creators_own_site_wins_over_facebook():
     """Their own domain is the better signal when both have an address."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=[
@@ -483,7 +483,7 @@ def test_the_creators_own_site_wins_over_facebook():
 
 
 def test_facebook_is_not_probed_when_a_website_already_answered():
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=[
@@ -503,14 +503,14 @@ def test_facebook_is_not_probed_when_a_website_already_answered():
 
 def test_browser_failure_is_soft():
     """A browser error must never break the pipeline."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     scraper = BrowserEmailScraper(browser=_FakeBrowser(fail=True))
     assert scraper.find_email("UC123") == ""
 
 
 def test_a_dead_link_does_not_stop_the_other_links():
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser(
         {
@@ -525,7 +525,7 @@ def test_a_dead_link_does_not_stop_the_other_links():
 
 def test_missing_about_view_model_is_soft():
     """If ytInitialData has no aboutChannelViewModel, return nothing."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({})  # evaluate() returns None for every URL
     scraper = BrowserEmailScraper(browser=browser)
@@ -534,7 +534,7 @@ def test_missing_about_view_model_is_soft():
 
 def test_one_session_serves_many_channels():
     """Regression: the backfill launched a browser per channel."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({"youtube.com": _about(links=[])})
     scraper = BrowserEmailScraper(browser=browser)
@@ -546,7 +546,7 @@ def test_one_session_serves_many_channels():
 
 
 def test_null_scraper_is_inert():
-    from browser_email import null_scraper
+    from channel_vetting.enrichment.email_browser import null_scraper
 
     assert null_scraper().find_email("UC123") == ""
 
@@ -557,11 +557,11 @@ def test_the_scraper_does_not_do_country_lookups():
     setting `channels.list` returns in snippet.country — the panel just
     renders it. All 5 live channels with an empty API country had no
     `country` key in the About payload either, so a lookup here recovers 0
-    and costs a page load per candidate. `search_zones.py` uses the
+    and costs a page load per candidate. `discovery/search_zones.py` uses the
     content-language region subtag instead. Pinned so it doesn't come back
     on the assumption that a browser must see more than the API.
     """
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     assert not hasattr(BrowserEmailScraper, "find_country")
 
@@ -575,8 +575,8 @@ def test_resolve_email_prefers_free_steps_over_browser():
     is in hand — but it does still read the About page for the link list, which
     is what the no-social drop runs on. One page load, no link navigations.
     """
-    import main
-    from browser_email import BrowserEmailScraper
+    from channel_vetting import pipeline
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://site.com"]),
@@ -586,10 +586,10 @@ def test_resolve_email_prefers_free_steps_over_browser():
 
     stats = {"business_email": "about@page.com", "channel_id": "UC1"}
     performance = {"repeated_email": ""}
-    email, source, has_links = main.resolve_email_with_source(stats, performance, scraper)
+    email, source, has_links = pipeline.resolve_email_with_source(stats, performance, scraper)
 
     assert email == "about@page.com"
-    assert source == main.EMAIL_SOURCE_ABOUT, "the browser must not be credited"
+    assert source == pipeline.EMAIL_SOURCE_ABOUT, "the browser must not be credited"
     # The link list was read, so the no-social signal is KNOWN rather than None
     # — the whole point of the change. site.com was never visited.
     assert has_links is True
@@ -603,24 +603,24 @@ def test_the_link_list_is_read_even_when_an_earlier_step_found_the_address():
     short-circuited before the link list was ever fetched. Measured live on
     "Timber Time" (171k subs, empty link list) on 2026-08-15.
     """
-    import main
-    from browser_email import BrowserEmailScraper
+    from channel_vetting import pipeline
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({"youtube.com": _about(links=[])})
     scraper = BrowserEmailScraper(browser=browser)
 
     stats = {"business_email": "", "channel_id": "UC1"}
     performance = {"repeated_email": "indescription@creator.com"}
-    email, source, has_links = main.resolve_email_with_source(stats, performance, scraper)
+    email, source, has_links = pipeline.resolve_email_with_source(stats, performance, scraper)
 
     assert email == "indescription@creator.com"
-    assert source == main.EMAIL_SOURCE_REPEATED
+    assert source == pipeline.EMAIL_SOURCE_REPEATED
     assert has_links is False, "an empty link list must be reported, not left unknown"
 
 
 def test_resolve_email_falls_through_to_browser():
-    import main
-    from browser_email import BrowserEmailScraper
+    from channel_vetting import pipeline
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser({
         "youtube.com": _about(links=["https://site.com"]),
@@ -630,7 +630,7 @@ def test_resolve_email_falls_through_to_browser():
 
     stats = {"business_email": "", "channel_id": "UC1"}
     performance = {"repeated_email": ""}
-    assert main.resolve_email(stats, performance, scraper) == "browser@found.com"
+    assert pipeline.resolve_email(stats, performance, scraper) == "browser@found.com"
 
 
 # --- JS-rendered pages ----------------------------------------------------
@@ -643,7 +643,7 @@ def test_resolve_email_falls_through_to_browser():
 
 
 def test_waits_for_a_js_rendered_page_before_reading_it():
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser(
         {
@@ -659,7 +659,7 @@ def test_waits_for_a_js_rendered_page_before_reading_it():
 
 def test_a_page_that_never_paints_is_not_fatal():
     """A settle timeout must fall through, not lose the remaining links."""
-    from browser_email import BrowserEmailScraper
+    from channel_vetting.enrichment.email_browser import BrowserEmailScraper
 
     browser = _FakeBrowser(
         {

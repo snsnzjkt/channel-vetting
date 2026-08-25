@@ -17,8 +17,8 @@ apostrophe (a malformed formula routes a duplicate row straight past the
 PATCH path), a rate-limited POST must be retried rather than dropped, and
 an error body must not be logged unbounded.
 
-All HTTP is mocked on `airtable_client.HTTP` — the shared retrying session
-from http_client.py — not on `airtable_client.requests`, which the module
+All HTTP is mocked on `airtable.client.HTTP` — the shared retrying session
+from core/http_client.py — not on `airtable.client.requests`, which the module
 now imports only for `requests.RequestException`.
 """
 import logging
@@ -50,9 +50,9 @@ def _full_record(channel_id="UC1"):
 
 
 def test_update_strips_status_and_notes_by_default(monkeypatch):
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: "recExisting")
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: "recExisting")
 
     captured = {}
 
@@ -60,13 +60,13 @@ def test_update_strips_status_and_notes_by_default(monkeypatch):
         captured["json"] = json
         return _Resp(200)
 
-    monkeypatch.setattr(airtable_client.HTTP, "patch", fake_patch)
+    monkeypatch.setattr(client.HTTP, "patch", fake_patch)
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must PATCH an existing record, not POST")),
     )
 
-    ok = airtable_client.push_record("tblFake", _full_record())
+    ok = client.push_record("tblFake", _full_record())
 
     assert ok is True
     fields = captured["json"]["fields"]
@@ -80,9 +80,9 @@ def test_update_strips_status_and_notes_by_default(monkeypatch):
 def test_create_sends_status_and_notes_as_given(monkeypatch):
     """A brand-new record has nothing to preserve — Status/Notes defaults
     must reach Airtable on the initial POST."""
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
 
     captured = {}
 
@@ -90,13 +90,13 @@ def test_create_sends_status_and_notes_as_given(monkeypatch):
         captured["json"] = json
         return _Resp(201)
 
-    monkeypatch.setattr(airtable_client, "post_with_rate_limit_retry", fake_post)
+    monkeypatch.setattr(client, "post_with_rate_limit_retry", fake_post)
     monkeypatch.setattr(
-        airtable_client.HTTP, "patch",
+        client.HTTP, "patch",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must POST a new record, not PATCH")),
     )
 
-    ok = airtable_client.push_record("tblFake", _full_record())
+    ok = client.push_record("tblFake", _full_record())
 
     assert ok is True
     fields = captured["json"]["fields"]
@@ -112,27 +112,27 @@ def test_create_goes_through_the_rate_limit_aware_post_helper(monkeypatch):
     is post_with_rate_limit_retry(). Patching HTTP.post to explode pins that
     push_record() never regresses to the bare session call.
     """
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
     monkeypatch.setattr(
-        airtable_client.HTTP, "post",
+        client.HTTP, "post",
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("POST must go through post_with_rate_limit_retry, not HTTP.post")
         ),
     )
-    monkeypatch.setattr(airtable_client, "post_with_rate_limit_retry", lambda *a, **k: _Resp(201))
+    monkeypatch.setattr(client, "post_with_rate_limit_retry", lambda *a, **k: _Resp(201))
 
-    assert airtable_client.push_record("tblFake", _full_record()) is True
+    assert client.push_record("tblFake", _full_record()) is True
 
 
 def test_update_with_explicit_opt_in_can_still_change_status(monkeypatch):
-    """audit_blocklist.py's --mark deliberately changes Status on an
+    """scripts/audit/audit_blocklist.py's --mark deliberately changes Status on an
     existing record — overwrite_status_and_notes=True must let that
     through rather than being silently stripped."""
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: "recExisting")
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: "recExisting")
 
     captured = {}
 
@@ -140,9 +140,9 @@ def test_update_with_explicit_opt_in_can_still_change_status(monkeypatch):
         captured["json"] = json
         return _Resp(200)
 
-    monkeypatch.setattr(airtable_client.HTTP, "patch", fake_patch)
+    monkeypatch.setattr(client.HTTP, "patch", fake_patch)
 
-    ok = airtable_client.push_record(
+    ok = client.push_record(
         "tblFake",
         {"Channel ID": "UC1", "Status": "Do Not Contact"},
         overwrite_status_and_notes=True,
@@ -153,12 +153,12 @@ def test_update_with_explicit_opt_in_can_still_change_status(monkeypatch):
 
 
 def test_update_without_status_or_notes_in_the_record_is_unaffected(monkeypatch):
-    """backfill_missing_emails.py only ever sends {Channel ID, Email} on
+    """scripts/backfill/backfill_missing_emails.py only ever sends {Channel ID, Email} on
     an update — stripping Status/Notes must be a no-op when neither key
     is present in the first place."""
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: "recExisting")
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: "recExisting")
 
     captured = {}
 
@@ -166,9 +166,9 @@ def test_update_without_status_or_notes_in_the_record_is_unaffected(monkeypatch)
         captured["json"] = json
         return _Resp(200)
 
-    monkeypatch.setattr(airtable_client.HTTP, "patch", fake_patch)
+    monkeypatch.setattr(client.HTTP, "patch", fake_patch)
 
-    airtable_client.push_record("tblFake", {"Channel ID": "UC1", "Email": "a@b.com"})
+    client.push_record("tblFake", {"Channel ID": "UC1", "Email": "a@b.com"})
 
     assert captured["json"]["fields"] == {"Channel ID": "UC1", "Email": "a@b.com"}
 
@@ -188,32 +188,32 @@ def _unescaped_quote_count(formula: str) -> int:
 
 
 def test_quote_formula_value_escapes_an_apostrophe():
-    import airtable_client
+    from channel_vetting.airtable import client
 
     # Returns the INNER text only — the caller supplies the surrounding
     # quotes — so the expected value carries no delimiters of its own.
-    assert airtable_client._quote_formula_value("O'Brien AV") == "O\\'Brien AV"
+    assert client._quote_formula_value("O'Brien AV") == "O\\'Brien AV"
 
 
 def test_quote_formula_value_escapes_backslashes_before_quotes():
     """Order matters: escaping quotes first would then double the
     backslashes this function just introduced."""
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    assert airtable_client._quote_formula_value("a\\b") == "a\\\\b"
-    assert airtable_client._quote_formula_value("a\\'b") == "a\\\\\\'b"
+    assert client._quote_formula_value("a\\b") == "a\\\\b"
+    assert client._quote_formula_value("a\\'b") == "a\\\\\\'b"
 
 
 def test_quote_formula_value_leaves_ordinary_values_alone():
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    assert airtable_client._quote_formula_value("UCabc123") == "UCabc123"
+    assert client._quote_formula_value("UCabc123") == "UCabc123"
 
 
 def test_channel_exists_sends_a_well_formed_formula_for_a_quoted_id(monkeypatch):
     """A channel_id containing an apostrophe must not close the formula
     string early — Airtable answers a malformed formula with a 422."""
-    import airtable_client
+    from channel_vetting.airtable import client
 
     captured = {}
 
@@ -221,9 +221,9 @@ def test_channel_exists_sends_a_well_formed_formula_for_a_quoted_id(monkeypatch)
         captured["params"] = params
         return _Resp(200, {"records": [{"id": "recFound"}]})
 
-    monkeypatch.setattr(airtable_client.HTTP, "get", fake_get)
+    monkeypatch.setattr(client.HTTP, "get", fake_get)
 
-    assert airtable_client.channel_exists("tblFake", "UC O'Brien") == "recFound"
+    assert client.channel_exists("tblFake", "UC O'Brien") == "recFound"
 
     formula = captured["params"]["filterByFormula"]
     assert formula == "{Channel ID} = 'UC O\\'Brien'"
@@ -244,7 +244,7 @@ def test_quoted_channel_id_does_not_fall_through_to_the_duplicating_post(monkeyp
     channel_exists() is deliberately NOT stubbed here: this drives the real
     formula construction end to end.
     """
-    import airtable_client
+    from channel_vetting.airtable import client
 
     captured = {}
 
@@ -257,16 +257,16 @@ def test_quoted_channel_id_does_not_fall_through_to_the_duplicating_post(monkeyp
         captured["patched_url"] = url
         return _Resp(200)
 
-    monkeypatch.setattr(airtable_client.HTTP, "get", fake_get)
-    monkeypatch.setattr(airtable_client.HTTP, "patch", fake_patch)
+    monkeypatch.setattr(client.HTTP, "get", fake_get)
+    monkeypatch.setattr(client.HTTP, "patch", fake_patch)
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("a quoted Channel ID must still resolve to a PATCH — a POST here is a duplicate row")
         ),
     )
 
-    ok = airtable_client.push_record("tblFake", _full_record("UC O'Brien"))
+    ok = client.push_record("tblFake", _full_record("UC O'Brien"))
 
     assert ok is True
     assert captured["patched_url"].endswith("/recExisting")
@@ -286,10 +286,10 @@ def test_push_record_retries_a_rate_limited_post_and_succeeds(monkeypatch):
     injected, so the test doesn't wait 32 seconds) rather than a fake, so
     the retry loop itself is under test.
     """
-    import airtable_client
-    import http_client
+    from channel_vetting.airtable import client
+    from channel_vetting.core import http_client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
 
     posts = []
     responses = [_Resp(429), _Resp(201)]
@@ -302,11 +302,11 @@ def test_push_record_retries_a_rate_limited_post_and_succeeds(monkeypatch):
 
     slept = []
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda url, **kwargs: http_client.post_with_rate_limit_retry(url, sleep=slept.append, **kwargs),
     )
 
-    assert airtable_client.push_record("tblFake", _full_record()) is True
+    assert client.push_record("tblFake", _full_record()) is True
     assert len(posts) == 2, "the 429 should have been retried exactly once"
     assert slept == [http_client.POST_RETRY_WAIT_SECONDS]
 
@@ -314,21 +314,21 @@ def test_push_record_retries_a_rate_limited_post_and_succeeds(monkeypatch):
 def test_push_record_honours_retry_after_on_a_429(monkeypatch):
     """Airtable's ~30s cooldown is advisory in the header; a sane value
     there beats the hardcoded default."""
-    import airtable_client
-    import http_client
+    from channel_vetting.airtable import client
+    from channel_vetting.core import http_client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
 
     responses = [_Resp(429, headers={"Retry-After": "5"}), _Resp(201)]
     monkeypatch.setattr(http_client.AIRTABLE, "post", lambda url, **k: responses.pop(0))
 
     slept = []
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda url, **kwargs: http_client.post_with_rate_limit_retry(url, sleep=slept.append, **kwargs),
     )
 
-    assert airtable_client.push_record("tblFake", _full_record()) is True
+    assert client.push_record("tblFake", _full_record()) is True
     assert slept == [5.0]
 
 
@@ -338,7 +338,7 @@ def test_retry_after_rejects_nan_and_infinity():
     without an isfinite() guard it reaches time.sleep(nan) and raises
     ValueError out of a path nothing above run() catches. inf is caught by
     the >300 bound but is rejected here too rather than relying on that."""
-    import http_client
+    from channel_vetting.core import http_client
 
     default = 32.0
     for bad in ("nan", "NaN", "inf", "-inf", "infinity"):
@@ -350,7 +350,7 @@ def test_retry_after_rejects_nan_and_infinity():
 def test_retry_after_still_reads_a_sane_value():
     """The guard must not regress the happy path: a plausible numeric header
     is still honoured over the default."""
-    import http_client
+    from channel_vetting.core import http_client
 
     assert http_client._retry_after_seconds(_Resp(429, headers={"Retry-After": "12"}), 32.0) == 12.0
 
@@ -360,21 +360,21 @@ def test_push_record_survives_a_nan_retry_after(monkeypatch):
     Before the isfinite() guard, post_with_rate_limit_retry() called
     time.sleep(nan) and the ValueError unwound through push_record() ->
     run_niche() -> run(), killing every remaining niche over one bad header."""
-    import airtable_client
-    import http_client
+    from channel_vetting.airtable import client
+    from channel_vetting.core import http_client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
 
     responses = [_Resp(429, headers={"Retry-After": "nan"}), _Resp(201)]
     monkeypatch.setattr(http_client.AIRTABLE, "post", lambda url, **k: responses.pop(0))
 
     slept = []
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda url, **kwargs: http_client.post_with_rate_limit_retry(url, sleep=slept.append, **kwargs),
     )
 
-    assert airtable_client.push_record("tblFake", _full_record()) is True
+    assert client.push_record("tblFake", _full_record()) is True
     # Fell back to the hardcoded default instead of sleeping nan.
     assert slept == [http_client.POST_RETRY_WAIT_SECONDS]
 
@@ -383,10 +383,10 @@ def test_push_record_does_not_retry_a_500_post(monkeypatch):
     """The other half of the contract: a 5xx is ambiguous — Airtable may
     have created the row before the response was lost — so the POST is
     reported as failed rather than repeated. One attempt, no duplicate."""
-    import airtable_client
-    import http_client
+    from channel_vetting.airtable import client
+    from channel_vetting.core import http_client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
 
     posts = []
 
@@ -396,13 +396,13 @@ def test_push_record_does_not_retry_a_500_post(monkeypatch):
 
     monkeypatch.setattr(http_client.AIRTABLE, "post", fake_session_post)
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda url, **kwargs: http_client.post_with_rate_limit_retry(
             url, sleep=lambda s: None, **kwargs
         ),
     )
 
-    assert airtable_client.push_record("tblFake", _full_record()) is False
+    assert client.push_record("tblFake", _full_record()) is False
     assert len(posts) == 1, "a 5xx POST must never be repeated — that is how duplicates appear"
 
 
@@ -414,17 +414,17 @@ def test_push_record_does_not_log_an_unbounded_error_body(caplog, monkeypatch):
     """An Airtable validation error echoes the whole rejected record back,
     so `resp.text` in a log call is unbounded by construction. safe_body()
     caps it; this pins that push_record() actually routes through it."""
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
     huge = "x" * 10_000
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda *a, **k: _Resp(500, text=huge),
     )
 
     with caplog.at_level(logging.ERROR, logger="airtable_client"):
-        ok = airtable_client.push_record("tblFake", _full_record())
+        ok = client.push_record("tblFake", _full_record())
 
     assert ok is False
     logged = "\n".join(r.getMessage() for r in caplog.records)
@@ -436,16 +436,16 @@ def test_push_record_does_not_log_an_unbounded_error_body(caplog, monkeypatch):
 def test_auth_failure_body_is_withheld_from_the_log(caplog, monkeypatch):
     """A 403 body is pure noise on the status most likely to be pasted into
     a ticket, so it is withheld entirely rather than truncated."""
-    import airtable_client
+    from channel_vetting.airtable import client
 
-    monkeypatch.setattr(airtable_client, "channel_exists", lambda table, cid: None)
+    monkeypatch.setattr(client, "channel_exists", lambda table, cid: None)
     monkeypatch.setattr(
-        airtable_client, "post_with_rate_limit_retry",
+        client, "post_with_rate_limit_retry",
         lambda *a, **k: _Resp(403, text='{"error":{"type":"INVALID_PERMISSIONS_OR_MODEL_NOT_FOUND"}}'),
     )
 
     with caplog.at_level(logging.ERROR, logger="airtable_client"):
-        assert airtable_client.push_record("tblFake", _full_record()) is False
+        assert client.push_record("tblFake", _full_record()) is False
 
     logged = "\n".join(r.getMessage() for r in caplog.records)
     assert "INVALID_PERMISSIONS" not in logged

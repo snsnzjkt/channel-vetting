@@ -34,8 +34,8 @@ import inspect
 
 import pytest
 
-import main
-from main import (
+from channel_vetting import pipeline
+from channel_vetting.pipeline import (
     DROP_BROADCAST_TV,
     DROP_NO_DECLARED_COUNTRY,
     DROP_OUTSIDE_SEARCH_ZONE,
@@ -43,13 +43,13 @@ from main import (
     broadcast_tv_reason,
     location_drop_reason,
 )
-from niches import (
+from channel_vetting.discovery.niches import (
     BROADCAST_TV_NAME_TERMS,
     BROADCAST_TV_PHRASE_TERMS,
     EXCLUDED_TOPIC_KEYWORDS,
     NICHES,
 )
-from search_zones import (
+from channel_vetting.discovery.search_zones import (
     ALLOWED_COUNTRY_CODES,
     EUROPE_COUNTRY_CODES,
     ZONE_CORE,
@@ -267,7 +267,7 @@ def test_the_zone_gate_runs_before_the_paid_performance_fetch(monkeypatch):
     """
     calls = []
 
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: {
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: {
         "channel_id": "UC1", "channel_title": "Chan", "handle": "chan",
         "published_at": "", "subscriber_count": 10_000,
         "uploads_playlist_id": "PL1", "business_email": "",
@@ -278,14 +278,14 @@ def test_the_zone_gate_runs_before_the_paid_performance_fetch(monkeypatch):
         calls.append(cid)
         raise AssertionError("performance must not be fetched for an out-of-zone channel")
 
-    monkeypatch.setattr(main, "get_recent_video_performance", _boom)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", _boom)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     niche_config = {
         "min_avg_views": 10_000, "min_channel_age_months": None,
         "allowed_country_codes": ZONE_CORE,
     }
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(), niche_config, None,
     )
@@ -452,7 +452,7 @@ def test_the_broadcast_terms_are_never_sent_to_the_discovery_vendor():
 
 def test_the_broadcast_gate_runs_before_the_paid_performance_fetch(monkeypatch):
     """Same quota rule as the zone gate: free inputs, so discard before paying."""
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: {
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: {
         "channel_id": "UC1", "channel_title": "HGTV", "handle": "hgtv",
         "published_at": "", "subscriber_count": 1_070_000,
         "uploads_playlist_id": "PL1", "business_email": "",
@@ -463,10 +463,10 @@ def test_the_broadcast_gate_runs_before_the_paid_performance_fetch(monkeypatch):
     def _boom(cid, pl):
         raise AssertionError("performance must not be fetched for a broadcaster")
 
-    monkeypatch.setattr(main, "get_recent_video_performance", _boom)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "get_recent_video_performance", _boom)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
-    record, reason = main.process_candidate(
+    record, reason = pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "HGTV", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None,

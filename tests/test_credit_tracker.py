@@ -27,8 +27,8 @@ import json
 
 import pytest
 
-import credit_tracker
-from credit_tracker import (
+from channel_vetting.budget import credit_tracker
+from channel_vetting.budget.credit_tracker import (
     KIND_DISCOVERY,
     KIND_EMAIL,
     CreditLedgerUnavailable,
@@ -210,7 +210,7 @@ def test_it_reuses_quota_trackers_windows_lock_retry():
     """The os.replace PermissionError fix (antivirus/indexer holding the path)
     ended three real runs. A second copy would be a second chance to get it
     wrong."""
-    import quota_tracker
+    from channel_vetting.budget import quota_tracker
 
     assert credit_tracker._replace_with_retry is quota_tracker._replace_with_retry
 

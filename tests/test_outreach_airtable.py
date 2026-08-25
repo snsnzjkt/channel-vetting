@@ -14,9 +14,9 @@ Two themes here, and both are about failing in the safe direction:
 """
 import pytest
 
-import outreach_airtable as OA
-import outreach_ledger as L
-import mailer as M
+from channel_vetting.airtable import outreach_store as OA
+from channel_vetting.outreach import ledger as L
+from channel_vetting.outreach import mailer as M
 
 
 class _Resp:
@@ -309,7 +309,7 @@ def test_only_the_literal_false_disables_a_default_true_flag(raw, monkeypatch):
     harmless outcome for its own feature. A browser step that fails to start
     costs email coverage; a demo gate that fails to start emails real creators.
     """
-    import config
+    from channel_vetting import config
 
     if raw is None:
         monkeypatch.delenv("PROBE_FLAG", raising=False)
@@ -320,7 +320,7 @@ def test_only_the_literal_false_disables_a_default_true_flag(raw, monkeypatch):
 
 @pytest.mark.parametrize("raw", ["false", "False", "FALSE", " FALSE "])
 def test_a_default_true_flag_is_disabled_only_deliberately(raw, monkeypatch):
-    import config
+    from channel_vetting import config
 
     monkeypatch.setenv("PROBE_FLAG", raw)
     assert config.env_flag("PROBE_FLAG", default=True) is False
@@ -331,7 +331,7 @@ def test_a_default_true_flag_is_disabled_only_deliberately(raw, monkeypatch):
     [("true", True), ("TRUE", True), (" true ", True), ("false", False), ("", False), ("yes", False)],
 )
 def test_a_default_false_flag_requires_the_literal_true(raw, expected, monkeypatch):
-    import config
+    from channel_vetting import config
 
     monkeypatch.setenv("PROBE_FLAG", raw)
     assert config.env_flag("PROBE_FLAG", default=False) is expected

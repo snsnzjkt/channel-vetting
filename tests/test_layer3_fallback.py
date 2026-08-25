@@ -14,9 +14,9 @@ import json
 
 import pytest
 
-import config
-import gemini_verify as gv
-import niches
+from channel_vetting import config
+from channel_vetting.verification import gemini as gv
+from channel_vetting.discovery import niches
 from tests.test_gemini_verify import FakeResponse, stub_post, verifier  # noqa: F401
 
 NICHE = niches.NICHES["Home Theater"]
@@ -160,31 +160,31 @@ def test_pipeline_level_a_transcript_means_ZERO_video_requests(monkeypatch):
     when the transcript fails.
 
     The verifier-level test above covers review_transcripts in isolation. This
-    one covers the wiring, because a future change to main.py's routing could
+    one covers the wiring, because a future change to pipeline.py's routing could
     reintroduce an always-on video call without touching gemini_verify at all.
     """
-    import main
+    from channel_vetting import pipeline
     from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_stats
-    from search_zones import ZONE_CORE
+    from channel_vetting.discovery.search_zones import ZONE_CORE
 
     class _Enricher:
         last_email_type = ""
         last_email_note = ""
 
-    monkeypatch.setattr(main, "GEMINI_STAGE2_MODE", "transcript")
+    monkeypatch.setattr(pipeline, "GEMINI_STAGE2_MODE", "transcript")
     monkeypatch.setattr(gv.transcripts, "fetch",
                         lambda vid, **kw: "We toured the basement media room. " * 20)
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance",
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance",
                         lambda cid, pl: _stub_performance(
                             settled_longform=[{"video_id": "vX", "views": 5000,
                                                "duration_s": 900}],
                             video_titles=["t"], video_descriptions=["d"]))
-    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source",
-                        lambda *a, **k: ("a@b.com", main.EMAIL_SOURCE_REPEATED, None))
-    monkeypatch.setattr(main, "table_has_field", lambda t, f: True)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source",
+                        lambda *a, **k: ("a@b.com", pipeline.EMAIL_SOURCE_REPEATED, None))
+    monkeypatch.setattr(pipeline, "table_has_field", lambda t, f: True)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
 
     real = gv.GeminiVerifier(
         model="gemini-3.5-flash-lite", cache_path="/dev/null",
@@ -193,7 +193,7 @@ def test_pipeline_level_a_transcript_means_ZERO_video_requests(monkeypatch):
         model_chain=("gemini-3.5-flash-lite",), video_always=True,
     )
     stub_post(monkeypatch, FakeResponse(200, _body(matches=True, conf=0.9)))
-    main.process_candidate(
+    pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(),
         {"min_avg_views": 10_000, "min_channel_age_months": None,
@@ -255,7 +255,7 @@ def test_the_banner_still_describes_the_legacy_video_mode():
 
 def test_the_shipping_config_produces_the_fallback_wording():
     """Guards the DEFAULTS, not just the function: transcript + fallback on."""
-    import config
+    from channel_vetting import config
 
     line = gv.stage2_banner(config, video_always=True)
     assert "TRANSCRIPT" in line and "FALLBACK ONLY" in line, line

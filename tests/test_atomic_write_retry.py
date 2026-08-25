@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-import quota_tracker
+from channel_vetting.budget import quota_tracker
 
 
 def test_retries_past_a_transient_lock(monkeypatch, tmp_path):
@@ -95,13 +95,13 @@ def test_the_spend_log_survives_a_lock_end_to_end(monkeypatch, tmp_path):
 def test_the_search_cache_uses_the_same_retry(monkeypatch, tmp_path):
     """search_cache.json has the identical rename; losing it re-spends 100
     units per keyword, and losing it by exception costs the run."""
-    import discovery
+    from channel_vetting.discovery import youtube_search
 
     cache_file = tmp_path / "search_cache.json"
-    monkeypatch.setattr(discovery, "SEARCH_CACHE_FILE", str(cache_file))
+    monkeypatch.setattr(youtube_search, "SEARCH_CACHE_FILE", str(cache_file))
     monkeypatch.setattr(quota_tracker.time, "sleep", lambda s: None)
 
-    real_replace = discovery.os.replace
+    real_replace = youtube_search.os.replace
     calls = {"n": 0}
 
     def flaky_replace(src, dst):
@@ -112,7 +112,7 @@ def test_the_search_cache_uses_the_same_retry(monkeypatch, tmp_path):
 
     monkeypatch.setattr(quota_tracker.os, "replace", flaky_replace)
 
-    discovery._save_cache({"2026-08-11::7d::n50::kw": []})
+    youtube_search._save_cache({"2026-08-11::7d::n50::kw": []})
 
     assert json.loads(cache_file.read_text(encoding="utf-8")) == {"2026-08-11::7d::n50::kw": []}
     assert calls["n"] == 2

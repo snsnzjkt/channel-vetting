@@ -17,8 +17,8 @@ The titles below are the real ones from the reviewer's screenshots.
 """
 import pytest
 
-import main
-import niches
+from channel_vetting import pipeline
+from channel_vetting.discovery import niches
 
 HT = niches.NICHES["Home Theater"]
 LS = niches.NICHES["Lifestyle Sofa"]
@@ -41,8 +41,8 @@ BABY_DOLL = [
 @pytest.mark.parametrize("niche", [HT, LS], ids=["home_theater", "lifestyle"])
 @pytest.mark.parametrize("titles", [BRICKSIE, BABY_DOLL], ids=["bricksie", "baby_doll"])
 def test_reviewer_rejected_channels_are_dropped(niche, titles):
-    reason, detail = main.off_target_reason(niche, "", titles)
-    assert reason == main.DROP_OFF_TARGET, f"still passing the gate: {detail!r}"
+    reason, detail = pipeline.off_target_reason(niche, "", titles)
+    assert reason == pipeline.DROP_OFF_TARGET, f"still passing the gate: {detail!r}"
     assert "toys_and_kids" in detail
 
 
@@ -64,7 +64,7 @@ def test_reviewer_rejected_channels_are_dropped(niche, titles):
 ])
 @pytest.mark.parametrize("niche", [HT, LS], ids=["home_theater", "lifestyle"])
 def test_substring_traps_are_not_dropped_as_toys(label, titles, niche):
-    reason, detail = main.off_target_reason(niche, "", titles)
+    reason, detail = pipeline.off_target_reason(niche, "", titles)
     if reason:
         assert "toys_and_kids" not in detail, (
             f"{label!r} was misread as toy content: {detail!r}"
@@ -99,7 +99,7 @@ def test_a_partly_on_topic_furniture_channel_is_kept():
         "Weekend Vlog: Coffee and Errands",
         "TV Wall Mount Install - Cable Management Tips",
     ]
-    reason, detail = main.off_target_reason(HT, "", titles)
+    reason, detail = pipeline.off_target_reason(HT, "", titles)
     assert reason is None, f"a partly on-topic furniture channel was dropped: {detail!r}"
 
 
@@ -167,14 +167,14 @@ def test_the_approved_tech_profile_survives_the_home_theater_gate():
         "Bane Tech (gadgets)": ["Southern Humidity CRUSHED: Why You Need This Dehumidifier"] * 10,
     }
     for name, titles in profiles.items():
-        reason, detail = main.off_target_reason(HT, "sharing my experiences about technology", titles)
+        reason, detail = pipeline.off_target_reason(HT, "sharing my experiences about technology", titles)
         assert reason is None, f"{name} was dropped, but the reviewer approved it: {detail!r}"
 
 
 def test_toy_content_still_drops_for_home_theater_despite_the_restriction():
     """The restriction must not disarm the reviewer's explicit instruction."""
-    reason, detail = main.off_target_reason(HT, "", BRICKSIE)
-    assert reason == main.DROP_OFF_TARGET
+    reason, detail = pipeline.off_target_reason(HT, "", BRICKSIE)
+    assert reason == pipeline.DROP_OFF_TARGET
     assert "toys_and_kids" in detail
 
 
@@ -182,8 +182,8 @@ def test_a_niche_without_the_key_still_applies_every_category():
     """Backward compatibility: absent the key, historical behaviour is unchanged."""
     unrestricted = {k: v for k, v in HT.items() if k != "off_target_categories"}
     gaming = ["NEW FORTNITE *SEASON 4* UPDATE RIGHT NOW!! NEW MAP, BATTLE PASS"] * 38
-    reason, detail = main.off_target_reason(unrestricted, "", gaming)
-    assert reason == main.DROP_OFF_TARGET
+    reason, detail = pipeline.off_target_reason(unrestricted, "", gaming)
+    assert reason == pipeline.DROP_OFF_TARGET
     assert "gaming" in detail
 
 
@@ -222,8 +222,8 @@ def test_av_specialist_vocabulary_is_an_exclusion_not_a_rescue():
 def test_the_four_rejected_av_reviewers_are_caught():
     """Zero Fidelity, Lenny Florentine, Forever Analog, New Record Day."""
     titles = ["Why Waste your Money on Expensive Speakers?"] * 13 + ["Weekly update"] * 12
-    reason, detail = main.off_target_reason(HT, "Hi-Fi on a budget", titles)
-    assert reason == main.DROP_OFF_TARGET
+    reason, detail = pipeline.off_target_reason(HT, "Hi-Fi on a budget", titles)
+    assert reason == pipeline.DROP_OFF_TARGET
     assert "av_specialist" in detail
 
 
@@ -235,8 +235,8 @@ def test_manhwa_recap_is_excluded_without_losing_the_keyword():
     """
     assert "movie review and reaction" in niches.NICHES["Home Theater"]["keywords"]
     titles = ["I Became the Strongest | Manhwa Recap Ep 1-40"] * 20
-    reason, detail = main.off_target_reason(HT, "", titles)
-    assert reason == main.DROP_OFF_TARGET
+    reason, detail = pipeline.off_target_reason(HT, "", titles)
+    assert reason == pipeline.DROP_OFF_TARGET
     assert "story_recap" in detail
 
 

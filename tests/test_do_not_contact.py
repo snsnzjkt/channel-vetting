@@ -4,7 +4,7 @@ generously. Wrongly skipping a prospect costs one lead; wrongly
 contacting a blocklisted person is the harm being prevented.
 
 HTTP is mocked by patching `do_not_contact.HTTP` (the shared retrying
-session from http_client.py), NOT `do_not_contact.requests` — which the
+session from core/http_client.py), NOT `do_not_contact.requests` — which the
 module now imports only for its exception TYPES. Patching the wrong one
 would send these tests at the real Airtable base; tests/conftest.py's
 autouse guard turns that into a hard failure rather than a live request.
@@ -37,7 +37,7 @@ def _page(records, offset=None):
 
 
 def test_parses_all_observed_url_formats(monkeypatch):
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     records = [
         {"fields": {FIELD_URL: "https://www.youtube.com/@EmmaMariesWorld"}},
@@ -52,7 +52,7 @@ def test_parses_all_observed_url_formats(monkeypatch):
 
 
 def test_matches_handle_case_insensitively(monkeypatch):
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     records = [{"fields": {FIELD_URL: "https://www.youtube.com/@LinusTechTips"}}]
     monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
@@ -65,7 +65,7 @@ def test_matches_handle_case_insensitively(monkeypatch):
 
 
 def test_matches_email_and_name(monkeypatch):
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     records = [
         {"fields": {FIELD_EMAIL: "  Info@LinusMediaGroup.com \n", FIELD_NAME: "Linus Tech Tips"}},
@@ -85,7 +85,7 @@ def test_blank_field_values_never_enter_the_index(monkeypatch):
     real row (a lone all-blank row would now correctly be rejected by the
     "non-empty table but empty index" backstop, so this mixes in a real
     row to isolate the behaviour under test: the indexing-side guard)."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     records = [
         {"fields": {FIELD_URL: "https://www.youtube.com/@RealChannel"}},
@@ -107,7 +107,7 @@ def test_blank_inputs_never_match_even_against_a_blank_index_entry():
     guard holds independently -- this is the case the old single-record
     fetch test could not isolate, since removing either guard alone still
     passed it."""
-    from do_not_contact import Blocklist
+    from channel_vetting.airtable.do_not_contact import Blocklist
 
     bl = Blocklist(handles={""}, emails={""}, names={""})
     assert bl.match(handle="", email="", name="") == ""
@@ -117,7 +117,7 @@ def test_blank_inputs_never_match_even_against_a_blank_index_entry():
 
 
 def test_raises_on_non_200(monkeypatch):
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _Resp(500))
 
@@ -126,7 +126,7 @@ def test_raises_on_non_200(monkeypatch):
 
 
 def test_raises_on_request_exception(monkeypatch):
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     def boom(*a, **k):
         raise do_not_contact.requests.RequestException("network down")
@@ -140,7 +140,7 @@ def test_raises_on_request_exception(monkeypatch):
 def test_raises_when_blocklist_is_suspiciously_empty(monkeypatch):
     """A 200 with no rows means the table moved or was emptied, not that
     nobody is blocklisted."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page([]))
     monkeypatch.setattr(do_not_contact.time, "sleep", lambda s: None)
@@ -155,7 +155,7 @@ def test_page_missing_records_key_raises_instead_of_returning_partial(monkeypatc
     page had zero rows" -- that would let a partial index through as if
     it were the whole list. Only page 1 has a valid body; page 2 (still
     200) is missing the "records" key altogether."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     page1 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelOne"}}], offset="o1")
     page2 = _Resp(200, {})  # 200, but no "records" key at all
@@ -176,7 +176,7 @@ def test_records_keyed_by_wrong_field_raises_instead_of_empty_index(monkeypatch)
     mints a brand-new field ID; this is not caught by the by-ID read
     alone). Rows exist but nothing indexes -- must raise, not return an
     empty-but-"successful" Blocklist."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     records = [
         {"fields": {"Name": "Someone", "URL": "https://www.youtube.com/@someone"}}
@@ -193,7 +193,7 @@ def test_non_json_response_body_raises_blocklist_unavailable(monkeypatch):
     """I1: a 200 with a non-JSON body (proxy interstitial, captive portal
     HTML, ...) must convert to BlocklistUnavailable, not escape as a raw
     JSONDecodeError that callers weren't told to expect."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     class _BadJsonResp:
         status_code = 200
@@ -212,7 +212,7 @@ def test_non_json_response_body_raises_blocklist_unavailable(monkeypatch):
 
 def test_multi_page_results_accumulate(monkeypatch):
     """I3: pagination must accumulate across pages, not just read page 1."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     page1 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelOne"}}], offset="o1")
     page2 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelTwo"}}])
@@ -228,7 +228,7 @@ def test_multi_page_results_accumulate(monkeypatch):
 def test_offset_is_forwarded_into_the_next_page_request(monkeypatch):
     """I3: the offset from page 1's response must be sent as a request
     param on page 2's request, and page 1's request must not send one."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     page1 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelOne"}}], offset="abc123")
     page2 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelTwo"}}])
@@ -251,7 +251,7 @@ def test_offset_is_forwarded_into_the_next_page_request(monkeypatch):
 def test_failure_on_a_later_page_raises_not_returns_earlier_pages(monkeypatch):
     """I3: the single most important pagination case -- a failure partway
     through must raise, never return whatever pages succeeded before it."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     page1 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelOne"}}], offset="o1")
     page2 = _page([{"fields": {FIELD_URL: "https://www.youtube.com/@ChannelTwo"}}], offset="o2")
@@ -267,7 +267,7 @@ def test_failure_on_a_later_page_raises_not_returns_earlier_pages(monkeypatch):
 def test_request_params_use_field_ids_and_returnFieldsByFieldId(monkeypatch):
     """I4: without this, deleting or typo'ing returnFieldsByFieldId, or
     changing a fld... constant, would pass every other test."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     captured = {}
     records = [{"fields": {FIELD_URL: "https://www.youtube.com/@Someone"}}]
@@ -291,7 +291,7 @@ def test_match_accepts_a_full_url_as_the_handle_input(monkeypatch):
     lookup side must accept the same shapes (a full URL, not just a bare
     handle) since the next task may pass a URL or snippet.customUrl
     straight through."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     records = [{"fields": {FIELD_URL: "https://www.youtube.com/@LinusTechTips"}}]
     monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _page(records))
@@ -308,9 +308,9 @@ def test_huge_error_body_is_truncated_not_reported_in_full(monkeypatch, caplog):
     """The non-200 path reports the body through http_client.safe_body(),
     so an Airtable error that echoes a whole rejected page back cannot
     dump unbounded text into the run log (or into the abort message
-    main.py logs verbatim). It must still fail closed."""
-    import do_not_contact
-    from http_client import safe_body
+    pipeline.py logs verbatim). It must still fail closed."""
+    from channel_vetting.airtable import do_not_contact
+    from channel_vetting.core.http_client import safe_body
 
     huge = "x" * 20_000
     monkeypatch.setattr(do_not_contact.HTTP, "get", lambda *a, **k: _Resp(500, text=huge))
@@ -333,7 +333,7 @@ def test_auth_failure_body_is_withheld_entirely(monkeypatch):
     """safe_body() reports nothing but the status for 401/403 — that body
     is noise attached to the one status most likely to get pasted into a
     ticket. The abort itself is unchanged."""
-    import do_not_contact
+    from channel_vetting.airtable import do_not_contact
 
     monkeypatch.setattr(
         do_not_contact.HTTP, "get",

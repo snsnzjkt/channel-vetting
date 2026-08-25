@@ -2,7 +2,7 @@
 
 
 def test_default_window_is_recent_not_ninety_days():
-    import config
+    from channel_vetting import config
 
     assert config.DISCOVERY_DAYS_BACK == 7
 
@@ -30,7 +30,7 @@ def test_the_daily_caps_are_the_operator_s_chosen_throughput():
     deliberate choice with a credit and a reviewer-attention cost behind it (see
     config.py), so it should fail loudly if someone changes it by accident.
     """
-    import config
+    from channel_vetting import config
 
     assert config.DAILY_QUALIFIED_CAP == 60
     assert config.DAILY_FLAGGED_CAP == 10, (
@@ -41,7 +41,7 @@ def test_the_daily_caps_are_the_operator_s_chosen_throughput():
 
 def test_run_passes_configured_window_to_discovery(monkeypatch):
     """run() must not hardcode 90 any more."""
-    import main
+    from channel_vetting import pipeline
 
     seen = {}
 
@@ -49,13 +49,13 @@ def test_run_passes_configured_window_to_discovery(monkeypatch):
         seen["days_back"] = days_back
         return 0, 0, set(), True
 
-    monkeypatch.setattr(main, "run_niche", fake_run_niche)
-    monkeypatch.setattr(main, "fetch_blocklist", lambda: object())
-    monkeypatch.setattr(main, "get_existing_channel_ids", lambda t: set())
-    monkeypatch.setattr(main, "fetch_external_handles", lambda **kw: {})
-    monkeypatch.setattr(main, "get_today_spend", lambda: 0)
+    monkeypatch.setattr(pipeline, "run_niche", fake_run_niche)
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: object())
+    monkeypatch.setattr(pipeline, "get_existing_channel_ids", lambda t: set())
+    monkeypatch.setattr(pipeline, "fetch_external_handles", lambda **kw: {})
+    monkeypatch.setattr(pipeline, "get_today_spend", lambda: 0)
 
-    main.run(niches=main.NICHES, max_results_per_keyword=50, days_back=7)
+    pipeline.run(niches=pipeline.NICHES, max_results_per_keyword=50, days_back=7)
     assert seen["days_back"] == 7
 
 
@@ -70,13 +70,13 @@ def test_days_back_cli_override(monkeypatch):
     """
     import sys
 
-    import main
+    from channel_vetting import pipeline
 
     captured = {}
-    monkeypatch.setattr(main, "run", lambda **kw: captured.update(kw))
-    monkeypatch.setattr(sys, "argv", ["main.py", "--days-back", "43"])
+    monkeypatch.setattr(pipeline, "run", lambda **kw: captured.update(kw))
+    monkeypatch.setattr(sys, "argv", ["pipeline.py", "--days-back", "43"])
 
-    main.main()
+    pipeline.main()
     assert captured["days_back"] == 43
 
 
@@ -90,23 +90,23 @@ def test_days_back_cli_override_in_test_mode(monkeypatch):
     """
     import sys
 
-    import main
+    from channel_vetting import pipeline
 
     captured = {}
-    monkeypatch.setattr(main, "run", lambda **kw: captured.update(kw))
+    monkeypatch.setattr(pipeline, "run", lambda **kw: captured.update(kw))
     # --test now also bounds the daily caps (so a test run can't discover
     # toward a full 30-row day of real credits/quota). main() reassigns these
     # module globals, which would otherwise LEAK into later tests — snapshot
     # them through monkeypatch so they're restored when this test ends.
-    monkeypatch.setattr(main, "DAILY_QUALIFIED_CAP", main.DAILY_QUALIFIED_CAP)
-    monkeypatch.setattr(main, "DAILY_FLAGGED_CAP", main.DAILY_FLAGGED_CAP)
-    monkeypatch.setattr(sys, "argv", ["main.py", "--test", "--days-back", "43"])
+    monkeypatch.setattr(pipeline, "DAILY_QUALIFIED_CAP", pipeline.DAILY_QUALIFIED_CAP)
+    monkeypatch.setattr(pipeline, "DAILY_FLAGGED_CAP", pipeline.DAILY_FLAGGED_CAP)
+    monkeypatch.setattr(sys, "argv", ["pipeline.py", "--test", "--days-back", "43"])
 
-    main.main()
+    pipeline.main()
     assert captured["days_back"] == 43
     # --test with no explicit --daily-cap bounds the run so discovery stays cheap.
-    assert main.DAILY_QUALIFIED_CAP == 2
-    assert main.DAILY_FLAGGED_CAP == 1
+    assert pipeline.DAILY_QUALIFIED_CAP == 2
+    assert pipeline.DAILY_FLAGGED_CAP == 1
 
 
 def test_days_back_defaults_to_discovery_days_back_when_omitted(monkeypatch):
@@ -119,12 +119,12 @@ def test_days_back_defaults_to_discovery_days_back_when_omitted(monkeypatch):
     """
     import sys
 
-    import main
-    import config
+    from channel_vetting import pipeline
+    from channel_vetting import config
 
     captured = {}
-    monkeypatch.setattr(main, "run", lambda **kw: captured.update(kw))
-    monkeypatch.setattr(sys, "argv", ["main.py"])
+    monkeypatch.setattr(pipeline, "run", lambda **kw: captured.update(kw))
+    monkeypatch.setattr(sys, "argv", ["pipeline.py"])
 
-    main.main()
+    pipeline.main()
     assert captured["days_back"] == config.DISCOVERY_DAYS_BACK

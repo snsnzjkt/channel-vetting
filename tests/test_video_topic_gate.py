@@ -7,10 +7,10 @@ is the pattern the Gemini text tier uses, and it exists because three relevance
 criteria in this pipeline have been caught pointing the wrong way — so a new one
 gets measured in production as advisory before it is allowed to remove a row.
 """
-import main
-import niches
-import gemini_verify as gv
-from search_zones import ZONE_CORE
+from channel_vetting import pipeline
+from channel_vetting.discovery import niches
+from channel_vetting.verification import gemini as gv
+from channel_vetting.discovery.search_zones import ZONE_CORE
 from tests.test_csv_injection import _NullBlocklist, _stub_performance, _stub_stats
 
 
@@ -51,21 +51,21 @@ PHONE_TAGS = ["iphone review", "android phone", "smartphone camera", "pixel phon
 
 def _run(monkeypatch, *, tags=None, gate=False, categories=None, share=0.40,
          verifier=None):
-    monkeypatch.setattr(main, "get_channel_stats", lambda cid: _stub_stats())
-    monkeypatch.setattr(main, "get_recent_video_performance",
+    monkeypatch.setattr(pipeline, "get_channel_stats", lambda cid: _stub_stats())
+    monkeypatch.setattr(pipeline, "get_recent_video_performance",
                         lambda cid, pl: _stub_performance(video_tags=tags or [],
                                                           video_category_ids=["20"]))
-    monkeypatch.setattr(main, "channel_age_months", lambda p: 100)
-    monkeypatch.setattr(main, "resolve_email_with_source",
-                        lambda *a, **k: ("a@b.com", main.EMAIL_SOURCE_REPEATED, None))
-    monkeypatch.setattr(main, "table_has_field", lambda table, field: True)
-    monkeypatch.setattr(main.time, "sleep", lambda s: None)
-    monkeypatch.setattr(main, "off_target_reason", lambda *a, **k: (None, ""))
-    monkeypatch.setattr(main, "VIDEO_TOPIC_GATE", gate)
-    monkeypatch.setattr(main, "VIDEO_TOPIC_MIN_SHARE", share)
+    monkeypatch.setattr(pipeline, "channel_age_months", lambda p: 100)
+    monkeypatch.setattr(pipeline, "resolve_email_with_source",
+                        lambda *a, **k: ("a@b.com", pipeline.EMAIL_SOURCE_REPEATED, None))
+    monkeypatch.setattr(pipeline, "table_has_field", lambda table, field: True)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "off_target_reason", lambda *a, **k: (None, ""))
+    monkeypatch.setattr(pipeline, "VIDEO_TOPIC_GATE", gate)
+    monkeypatch.setattr(pipeline, "VIDEO_TOPIC_MIN_SHARE", share)
     if categories is not None:
-        monkeypatch.setattr(main, "VIDEO_TOPIC_CATEGORIES", categories)
-    return main.process_candidate(
+        monkeypatch.setattr(pipeline, "VIDEO_TOPIC_CATEGORIES", categories)
+    return pipeline.process_candidate(
         {"channel_id": "UC1", "channel_title": "Chan", "matched_keywords": []},
         {}, _NullBlocklist(), NICHE, None, _Enricher(), verifier=verifier,
     )
@@ -89,7 +89,7 @@ def test_the_same_candidate_IS_dropped_once_the_gate_is_armed_AND_content_confir
     v = _StubVerifier(confirmed=True)
     record, reason = _run(monkeypatch, tags=LEGO_TAGS, gate=True, verifier=v)
     assert record is None
-    assert reason == main.DROP_OFF_TOPIC_TAGS
+    assert reason == pipeline.DROP_OFF_TOPIC_TAGS
     assert len(v.asked) == 1, "layer 2 runs exactly once on a layer-1 hit"
 
 
@@ -151,7 +151,7 @@ def test_a_measured_harmful_topic_is_recorded_but_never_drops(monkeypatch):
     -1 at 25%) and matches the 2026-08-21 title backtest that found the same
     category anti-predictive. It must not drop even with the gate armed.
     """
-    assert "phones_and_pcs" not in main.VIDEO_TOPIC_CATEGORIES
+    assert "phones_and_pcs" not in pipeline.VIDEO_TOPIC_CATEGORIES
     record, reason = _run(monkeypatch, tags=PHONE_TAGS, gate=True,
                           verifier=_StubVerifier(confirmed=True))
     assert record is not None, f"phones_and_pcs must never drop; got {reason!r}"
@@ -197,7 +197,7 @@ def test_the_threshold_is_what_decides(monkeypatch):
     assert record is not None, "33% is below a 40% bar"
     record, reason = _run(monkeypatch, tags=tags, gate=True, share=0.25,
                           verifier=_StubVerifier(confirmed=True))
-    assert record is None and reason == main.DROP_OFF_TOPIC_TAGS
+    assert record is None and reason == pipeline.DROP_OFF_TOPIC_TAGS
 
 
 # --- the gate is free, so it must sit ahead of the paid call ---
@@ -209,7 +209,7 @@ def test_the_topic_gate_runs_before_the_paid_gemini_call():
     for the same reason pre_push_drop_reason was moved there.
     """
     import inspect
-    src = inspect.getsource(main.process_candidate)
+    src = inspect.getsource(pipeline.process_candidate)
     assert src.index("video_topics.topic_evidence(") < src.index("verifier.judge("), (
         "the topic gate is free and must run before the paid Gemini request"
     )
@@ -220,7 +220,7 @@ def test_the_vocabularies_come_from_the_existing_lists(monkeypatch):
     Not a new hand-written term list. A positive result here has to be an INPUT
     change, or it is just a fresh unmeasured vocabulary wearing a measurement.
     """
-    import video_topics as vt
+    from channel_vetting.verification import video_topics as vt
     ev = vt.topic_evidence(LEGO_TAGS, {**niches.EXCLUDED_TOPIC_TERMS,
                                        **niches.OFF_TARGET_TERMS})
     assert "toys_and_kids" in ev["hits"]

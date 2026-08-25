@@ -20,20 +20,20 @@ class _NullBlocklist:
 
 def _run_prefilter(monkeypatch, discovered, tracked_ids):
     """Run run_niche() far enough to capture what the pre-filter passed on."""
-    import main
+    from channel_vetting import pipeline
 
     seen = []
 
-    monkeypatch.setattr(main, "count_added_today", lambda *a, **k: 0)
-    monkeypatch.setattr(main, "run_discovery", lambda *a, **k: discovered)
+    monkeypatch.setattr(pipeline, "count_added_today", lambda *a, **k: 0)
+    monkeypatch.setattr(pipeline, "run_discovery", lambda *a, **k: discovered)
     monkeypatch.setattr(
-        main, "push_until_full",
+        pipeline, "push_until_full",
         lambda candidates, *a, **k: seen.extend(candidates) or {
             "qualified": 0, "flagged": 0, "skipped": 0, "pushed_ids": set(),
         },
     )
 
-    main.run_niche(
+    pipeline.run_niche(
         niche_name="Home Theater",
         table_name="tbl",
         keywords=["kw"],

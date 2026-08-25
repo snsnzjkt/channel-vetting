@@ -14,7 +14,7 @@ weak day trains whoever watches it to ignore red.
 """
 import logging
 
-import airtable_client
+from channel_vetting.airtable import client
 import pytest
 
 
@@ -29,18 +29,18 @@ def test_field_probe_failure_is_not_cached(monkeypatch):
     """
     import requests
 
-    airtable_client._FIELD_PRESENCE.clear()
+    client._FIELD_PRESENCE.clear()
     calls = []
 
     def _boom(*a, **k):
         calls.append(1)
         raise requests.RequestException("transient")
 
-    monkeypatch.setattr(airtable_client.HTTP, "get", _boom)
-    assert airtable_client.table_has_field("tbl1", "Relevance State") is False
-    assert airtable_client.table_has_field("tbl1", "Relevance State") is False
+    monkeypatch.setattr(client.HTTP, "get", _boom)
+    assert client.table_has_field("tbl1", "Relevance State") is False
+    assert client.table_has_field("tbl1", "Relevance State") is False
     assert len(calls) == 2, "a failed probe must be RETRIED, not remembered"
-    assert ("tbl1", "Relevance State") not in airtable_client._FIELD_PRESENCE
+    assert ("tbl1", "Relevance State") not in client._FIELD_PRESENCE
 
 
 def test_a_successful_probe_is_still_cached(monkeypatch):
@@ -49,12 +49,12 @@ def test_a_successful_probe_is_still_cached(monkeypatch):
         status_code = 200
         text = "{}"
 
-    airtable_client._FIELD_PRESENCE.clear()
+    client._FIELD_PRESENCE.clear()
     calls = []
-    monkeypatch.setattr(airtable_client.HTTP, "get",
+    monkeypatch.setattr(client.HTTP, "get",
                         lambda *a, **k: (calls.append(1), _Resp())[1])
-    assert airtable_client.table_has_field("tbl2", "Handle") is True
-    assert airtable_client.table_has_field("tbl2", "Handle") is True
+    assert client.table_has_field("tbl2", "Handle") is True
+    assert client.table_has_field("tbl2", "Handle") is True
     assert len(calls) == 1, "a real answer is probed once per table per run"
 
 
@@ -64,12 +64,12 @@ def test_a_negative_probe_is_still_cached(monkeypatch):
         status_code = 422
         text = "unknown field"
 
-    airtable_client._FIELD_PRESENCE.clear()
+    client._FIELD_PRESENCE.clear()
     calls = []
-    monkeypatch.setattr(airtable_client.HTTP, "get",
+    monkeypatch.setattr(client.HTTP, "get",
                         lambda *a, **k: (calls.append(1), _Resp())[1])
-    assert airtable_client.table_has_field("tbl3", "Nope") is False
-    assert airtable_client.table_has_field("tbl3", "Nope") is False
+    assert client.table_has_field("tbl3", "Nope") is False
+    assert client.table_has_field("tbl3", "Nope") is False
     assert len(calls) == 1
 
 
@@ -78,7 +78,7 @@ def test_the_zero_row_error_names_the_creators_examined(caplog):
     Pins the message content, because the whole value of this line is that it
     distinguishes a weak day from a broken one and says what to check first.
     """
-    import main
+    from channel_vetting import pipeline
     logger = logging.getLogger("main")
     with caplog.at_level(logging.ERROR, logger="main"):
         # Exercise the same call the run-end block makes.
@@ -98,9 +98,9 @@ def test_the_run_end_block_does_not_raise_on_zero_rows():
     """
     import inspect
 
-    import main
+    from channel_vetting import pipeline
 
-    src = inspect.getsource(main.run)
+    src = inspect.getsource(pipeline.run)
     zero = src[src.index("if total_processed == 0"):]
     assert "SystemExit" not in zero, "a zero-yield day must not fail the job"
     assert "logger.error" in zero

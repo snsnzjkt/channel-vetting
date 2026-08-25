@@ -3,8 +3,8 @@ Shared pytest fixtures.
 
 The autouse guard below blocks any real HTTP request from a test. It was
 added alongside the move from bare `requests.get()` to the shared sessions
-in `http_client.py`: the tests mock HTTP by monkeypatching a *specific*
-attribute (e.g. `monkeypatch.setattr(airtable_client.HTTP, "get", ...)`),
+in `core/http_client.py`: the tests mock HTTP by monkeypatching a *specific*
+attribute (e.g. `monkeypatch.setattr(airtable.client.HTTP, "get", ...)`),
 so a call site that gets missed during a refactor — or a new one added
 later without a matching mock — would quietly fall through to the real
 network. With a populated `.env` on the machine running pytest, that means
@@ -75,7 +75,7 @@ def isolate_credit_ledger(tmp_path, monkeypatch):
       behaviour by default; its sibling `block_real_http` only ever *fails* by
       default. A test that wants a real ceiling opts in via `credit_ceilings`.
     """
-    import credit_tracker
+    from channel_vetting.budget import credit_tracker
 
     monkeypatch.setattr(
         credit_tracker, "CREDIT_LOG_FILE", str(tmp_path / "credit_log.json")
@@ -108,7 +108,7 @@ def isolate_rejected_handles(tmp_path, monkeypatch):
     `exclude_handles` on every run, so a polluted cache spends part of a
     10,000-handle request budget on strings that match no creator.
     """
-    import rejected_handles
+    from channel_vetting.discovery import rejected_handles
 
     monkeypatch.setattr(
         rejected_handles, "REJECTED_HANDLES_FILE", str(tmp_path / "rejected_handles.json")
@@ -139,7 +139,7 @@ def isolate_gemini_ledger(tmp_path, monkeypatch):
     about verdict logic, not budget; the tests that ARE about budget patch the
     ceiling down themselves.
     """
-    import gemini_tracker
+    from channel_vetting.budget import gemini_tracker
 
     monkeypatch.setattr(gemini_tracker, "GEMINI_LOG_FILE",
                         str(tmp_path / "gemini_log.json"))
@@ -164,7 +164,7 @@ def isolate_run_metrics(tmp_path, monkeypatch):
     rows and zero credits drag every before/after comparison toward zero. A
     polluted metrics file does not look broken, it looks like bad results.
     """
-    import run_metrics
+    from channel_vetting.core import run_metrics
 
     monkeypatch.setattr(
         run_metrics, "RUN_METRICS_FILE", str(tmp_path / "run_metrics.jsonl")
@@ -179,7 +179,7 @@ def credit_ceilings(monkeypatch):
     One factory rather than a near-identical local fixture per test file, so the
     numbers are visible in the test that depends on them.
     """
-    import credit_tracker
+    from channel_vetting.budget import credit_tracker
 
     def _set(day=1.0, month=5.0):
         monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_DAY", day)

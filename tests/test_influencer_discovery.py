@@ -1,5 +1,5 @@
 """
-influencer_discovery.InfluencerDiscovery must:
+discovery.influencers_club.InfluencerDiscovery must:
 
   - turn the discovery endpoint's {accounts:[{user_id, profile:{username,
     full_name, followers, engagement_percent}}]} into pipeline candidate
@@ -11,13 +11,16 @@ influencer_discovery.InfluencerDiscovery must:
     whatever was gathered so far,
   - be inert when no API key is configured.
 
-All HTTP is mocked on `influencer_discovery.HTTP` — the shared INFLUENCERS
+All HTTP is mocked on `discovery.influencers_club.HTTP` — the shared INFLUENCERS
 session — never on the real network (conftest hard-fails a real request).
 """
 import logging
 
-import influencer_discovery
-from influencer_discovery import InfluencerDiscovery, null_discovery
+from channel_vetting.discovery import influencers_club
+from channel_vetting.discovery.influencers_club import (
+    InfluencerDiscovery,
+    null_discovery,
+)
 
 
 class _Resp:
@@ -66,7 +69,7 @@ def _client(**kwargs):
 
 def test_accounts_become_candidates(monkeypatch):
     resp = _resp([_account("@MrBeast", full_name="MrBeast", followers=512000000, engagement=2.2)])
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: resp)
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: resp)
 
     got = _client().discover(filters={"profile_language": ["en"]}, target=5)
 
@@ -91,7 +94,7 @@ def test_vendor_statistics_never_reach_the_candidate(monkeypatch):
     survives someone adding an unrelated identifier field to the dict.
     """
     resp = _resp([_account("@Chan", full_name="Chan", followers=999, engagement=9.9)])
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: resp)
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: resp)
 
     got = _client().discover(filters={}, target=5)
 
@@ -116,7 +119,7 @@ def test_creators_billed_counts_what_the_vendor_returned(monkeypatch):
         _account(""),                                  # billed, unusable
         _account("youtube.com/c/LegacyName"),          # billed, unusable
     ])
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: resp)
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: resp)
 
     client = _client()
     got = client.discover(filters={}, target=10)
@@ -131,7 +134,7 @@ def test_accounts_without_a_handle_are_skipped(monkeypatch):
         _account("youtube.com/c/LegacyName"),          # /c/ url -> no @handle
         _account("@keep"),
     ])
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: resp)
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: resp)
 
     got = _client().discover(filters={}, target=10)
     assert [c["handle"] for c in got] == ["keep"]
@@ -143,8 +146,8 @@ def test_same_handle_across_pages_is_deduped(monkeypatch):
         _resp([_account("@b"), _account("@c")], total=3),        # @b repeats; total reached
     ]
     # Force pagination: make the first page look "full" by patching PAGE_LIMIT.
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: pages.pop(0))
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: pages.pop(0))
 
     got = _client().discover(filters={}, target=10)
     assert sorted(c["handle"] for c in got) == ["a", "b", "c"]
@@ -153,7 +156,7 @@ def test_same_handle_across_pages_is_deduped(monkeypatch):
 # --- pagination + stopping conditions ---------------------------------------
 
 def test_paginates_until_target_then_stops(monkeypatch):
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     calls = {"n": 0}
     pages = [
         _resp([_account("@a"), _account("@b")], total=100),
@@ -165,7 +168,7 @@ def test_paginates_until_target_then_stops(monkeypatch):
         calls["n"] += 1
         return pages.pop(0)
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     got = _client().discover(filters={}, target=3)
     # `target` stops the PAGING (2 pages, not 3)...
@@ -180,7 +183,7 @@ def test_paginates_until_target_then_stops(monkeypatch):
 
 
 def test_short_page_ends_pagination(monkeypatch):
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 50)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 50)
     # One page of 2 (< PAGE_LIMIT) means supply is exhausted; don't ask again.
     calls = {"n": 0}
 
@@ -188,7 +191,7 @@ def test_short_page_ends_pagination(monkeypatch):
         calls["n"] += 1
         return _resp([_account("@a"), _account("@b")], total=1000)
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     got = _client().discover(filters={}, target=100)
     assert len(got) == 2
@@ -204,7 +207,7 @@ def test_exclude_handles_are_normalized_and_sent(monkeypatch):
         sent["payload"] = json
         return _resp([_account("@fresh")])
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     _client().discover(
         filters={"profile_language": ["en"]},
@@ -216,7 +219,7 @@ def test_exclude_handles_are_normalized_and_sent(monkeypatch):
     # base filters preserved alongside the injected exclusion
     assert sent["payload"]["filters"]["profile_language"] == ["en"]
     assert sent["payload"]["platform"] == "youtube"
-    assert sent["payload"]["paging"]["limit"] == influencer_discovery.PAGE_LIMIT
+    assert sent["payload"]["paging"]["limit"] == influencers_club.PAGE_LIMIT
 
 
 def test_exclude_handles_over_the_cap_are_truncated_with_a_warning(monkeypatch, caplog):
@@ -226,8 +229,8 @@ def test_exclude_handles_over_the_cap_are_truncated_with_a_warning(monkeypatch, 
         sent["payload"] = json
         return _resp([_account("@fresh")])
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
-    monkeypatch.setattr(influencer_discovery, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 10)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club, "INFLUENCERS_MAX_EXCLUDE_HANDLES", 10)
 
     handles = [f"@h{i}" for i in range(25)]
     with caplog.at_level(logging.WARNING):
@@ -247,7 +250,7 @@ def test_already_bare_handles_are_kept_not_dropped(monkeypatch):
         sent["payload"] = json
         return _resp([_account("@fresh")])
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     _client().discover(
         filters={}, target=1,
@@ -263,7 +266,7 @@ def test_no_exclude_key_when_the_set_is_empty(monkeypatch):
         sent["payload"] = json
         return _resp([_account("@a")])
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     _client().discover(filters={"profile_language": ["en"]}, target=1, exclude_handles=[])
     assert "exclude_handles" not in sent["payload"]["filters"]
@@ -272,7 +275,7 @@ def test_no_exclude_key_when_the_set_is_empty(monkeypatch):
 # --- fail-soft ---------------------------------------------------------------
 
 def test_non_200_returns_empty_without_raising(monkeypatch):
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: _Resp(500, {}))
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: _Resp(500, {}))
     assert _client().discover(filters={}, target=5) == []
 
 
@@ -282,19 +285,19 @@ def test_transport_error_returns_empty_without_raising(monkeypatch):
     def boom(*a, **k):
         raise requests.ConnectionError("down")
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", boom)
+    monkeypatch.setattr(influencers_club.HTTP, "post", boom)
     assert _client().discover(filters={}, target=5) == []
 
 
 def test_non_json_200_returns_empty(monkeypatch):
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: _Resp(200, _BAD_JSON))
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: _Resp(200, _BAD_JSON))
     assert _client().discover(filters={}, target=5) == []
 
 
 def test_partial_before_a_failing_page_is_kept(monkeypatch):
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     pages = [_resp([_account("@a"), _account("@b")], total=100), _Resp(503, {})]
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: pages.pop(0))
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: pages.pop(0))
 
     got = _client().discover(filters={}, target=10)
     assert sorted(c["handle"] for c in got) == ["a", "b"]   # page 1 kept, page 2 dropped
@@ -303,12 +306,12 @@ def test_partial_before_a_failing_page_is_kept(monkeypatch):
 # --- credit accounting + ceiling --------------------------------------------
 
 def test_credits_spent_accumulates_from_credits_cost(monkeypatch):
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     pages = [
         _resp([_account("@a"), _account("@b")], total=100, credits_cost=0.02, credits_left=9.5),
         _resp([_account("@c"), _account("@d")], total=100, credits_cost=0.02, credits_left=9.48),
     ]
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", lambda *a, **k: pages.pop(0))
+    monkeypatch.setattr(influencers_club.HTTP, "post", lambda *a, **k: pages.pop(0))
 
     client = _client()
     client.discover(filters={}, target=4)
@@ -317,7 +320,7 @@ def test_credits_spent_accumulates_from_credits_cost(monkeypatch):
 
 
 def test_credit_ceiling_stops_pagination(monkeypatch):
-    monkeypatch.setattr(influencer_discovery, "PAGE_LIMIT", 2)
+    monkeypatch.setattr(influencers_club, "PAGE_LIMIT", 2)
     calls = {"n": 0}
 
     def fake_post(*a, **k):
@@ -326,7 +329,7 @@ def test_credit_ceiling_stops_pagination(monkeypatch):
         return _resp([_account(f"@a{calls['n']}"), _account(f"@b{calls['n']}")],
                      total=10_000, credits_cost=0.02)
 
-    monkeypatch.setattr(influencer_discovery.HTTP, "post", fake_post)
+    monkeypatch.setattr(influencers_club.HTTP, "post", fake_post)
 
     client = _client(max_credits=0.02)   # room for exactly one page
     client.discover(filters={}, target=1000)
@@ -337,22 +340,22 @@ def test_credit_ceiling_stops_pagination(monkeypatch):
 # --- soft-disable ------------------------------------------------------------
 
 def test_from_config_is_inert_without_a_key(monkeypatch):
-    monkeypatch.setattr(influencer_discovery, "INFLUENCERS_API_KEY", None)
+    monkeypatch.setattr(influencers_club, "INFLUENCERS_API_KEY", None)
     client = InfluencerDiscovery.from_config()
     assert client.enabled is False
     # even with a live-looking HTTP, a disabled client never calls it
-    monkeypatch.setattr(influencer_discovery.HTTP, "post",
+    monkeypatch.setattr(influencers_club.HTTP, "post",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
     assert client.discover(filters={}, target=5) == []
 
 
 def test_null_discovery_returns_nothing(monkeypatch):
-    monkeypatch.setattr(influencer_discovery.HTTP, "post",
+    monkeypatch.setattr(influencers_club.HTTP, "post",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
     assert null_discovery().discover(filters={}, target=5) == []
 
 
 def test_target_zero_short_circuits(monkeypatch):
-    monkeypatch.setattr(influencer_discovery.HTTP, "post",
+    monkeypatch.setattr(influencers_club.HTTP, "post",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call")))
     assert _client().discover(filters={}, target=0) == []

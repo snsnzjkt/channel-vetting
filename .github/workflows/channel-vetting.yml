@@ -58,7 +58,7 @@ on:
 #
 # Two concurrent runners are the single most likely way to blow the 10,000
 # unit/day YouTube budget. Every guard in this pipeline is per-process or
-# read-then-write: quota_tracker.py keeps its ledger in a local
+# read-then-write: budget/quota_tracker.py keeps its ledger in a local
 # quota_log.json (one per runner, neither seeing the other's spend), and
 # count_added_today() reads Airtable BEFORE either run has pushed anything.
 # So a workflow_dispatch fired while the 18:00 cron is still going gives two
@@ -147,7 +147,7 @@ jobs:
       # datacenter IP reputation, and GitHub runners sit in Azure ranges
       # YouTube challenges hard. Turning it on makes the browser step RUN;
       # whether YouTube serves it real pages is a separate question the run
-      # log now answers (main.py warns when the step was requested but the
+      # log now answers (pipeline.py warns when the step was requested but the
       # browser could not start).
       USE_PLAYWRIGHT_STEALTH: ${{ github.event_name != 'workflow_dispatch' || inputs.use_playwright_stealth }}
       # Pinned so the runner (UTC) agrees with head office on the day.
@@ -177,21 +177,26 @@ jobs:
       # requirements.txt for how to regenerate the file — adding or bumping
       # ANY dependency without regenerating it will fail this step.
       - name: Install dependencies
-        run: pip install --require-hashes -r requirements.txt
+        run: |
+          pip install --require-hashes -r requirements.txt
+          # Puts `channel_vetting` (src/ layout) on sys.path. --no-deps so
+          # nothing is resolved outside the hash-pinned lock above; the
+          # project itself declares no dependencies for this reason.
+          pip install -e . --no-deps
 
       # Persists quota_log.json / search_cache.json / external_handles_cache.json
       # across runs so a same-day manual re-run (workflow_dispatch) doesn't
       # lose track of quota already spent or re-search a keyword already
       # cached today. Not load-bearing for a once-daily schedule for the
-      # first two — quota_tracker.py's own Pacific-Time day-keying is what
+      # first two — budget/quota_tracker.py's own Pacific-Time day-keying is what
       # actually enforces the reset. external_handles_cache.json IS
       # load-bearing for run time even on a once-daily schedule: without it
       # every scheduled run re-paginates ~18k Airtable rows across the 4
-      # external tables (external_dedupe.py) before any discovery starts.
+      # external tables (enrichment/external_dedupe.py) before any discovery starts.
       #
       # Split restore/save rather than one `actions/cache` step. The
       # combined step only saves on a SUCCESSFUL job, and the runs whose
-      # spend you least want to forget are the failures: main.py exits 1
+      # spend you least want to forget are the failures: pipeline.py exits 1
       # when fetch_blocklist() or the dedupe set can't be read, and by then
       # discovery may already have spent hundreds of units. The save step
       # below is `if: always()` for exactly that.
@@ -201,7 +206,7 @@ jobs:
       # repo passes the 10GB cache cap, with no signal to the run that it
       # went missing. A run that comes up empty here behaves like a first
       # run — fresh ledger, cold caches — so treat this as an optimisation
-      # and a courtesy, and rely on quota_tracker.py's Pacific-Time day key
+      # and a courtesy, and rely on budget/quota_tracker.py's Pacific-Time day key
       # plus Airtable's own "Date Added" counts for correctness.
       #
       # credit_log.json is the ONE path here with no correctness backstop
@@ -230,13 +235,13 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            quota_log.json
-            search_cache.json
-            external_handles_cache.json
-            credit_log.json
-            rejected_handles.json
-            gemini_log.json
-            gemini_cache.json
+            data/quota_log.json
+            data/search_cache.json
+            data/external_handles_cache.json
+            data/credit_log.json
+            data/rejected_handles.json
+            data/gemini_log.json
+            data/gemini_cache.json
           # The exact key intentionally never hits (github.run_id is unique
           # per run) — it exists so the SAVE step below always has a fresh,
           # unclaimed key to write to. A cache key is immutable once
@@ -249,7 +254,7 @@ jobs:
             channel-vetting-state-
 
       # pip installs the playwright package but not the browser binary it
-      # drives, so this is what makes browser_email.py functional at all.
+      # drives, so this is what makes enrichment/email_browser.py functional at all.
       # --with-deps pulls the shared libraries a headless Chromium links
       # against on a bare ubuntu-latest runner.
       #
@@ -265,7 +270,7 @@ jobs:
 
       # DAYS_BACK is empty on a schedule and on any dispatch that left the
       # box blank, in which case no --days-back flag is passed at all and
-      # main.py falls back to DISCOVERY_DAYS_BACK (7). Deliberately not
+      # pipeline.py falls back to DISCOVERY_DAYS_BACK (7). Deliberately not
       # given a non-empty default: a wide window is a one-off backlog
       # sweep, and making it the standing behaviour would have every daily
       # run re-reading the same already-consumed pool for 100 units a
@@ -279,12 +284,12 @@ jobs:
       #
       # env: alone is not sufficient, though. `$DAYS_BACK` is UNQUOTED in
       # the ${:+...} expansion, so bash word-splits it into separate argv
-      # entries — an input of `7 --daily-cap 9999` would reach main.py as
+      # entries — an input of `7 --daily-cap 9999` would reach pipeline.py as
       # three arguments and quietly override BOTH daily caps, spending a
       # day's quota and filling the tables past the row cap. That is
       # argument injection, not shell injection, and quoting alone would
       # only turn it into an argparse error at the far end. So the value is
-      # validated as digits-only here and the run aborts before main.py is
+      # validated as digits-only here and the run aborts before pipeline.py is
       # invoked at all.
       #
       # Note the empty case is ACCEPTED, not rejected: blank is the normal
@@ -302,7 +307,7 @@ jobs:
               exit 1
               ;;
           esac
-          python main.py ${DAYS_BACK:+--days-back "$DAYS_BACK"}
+          python -m channel_vetting.pipeline ${DAYS_BACK:+--days-back "$DAYS_BACK"}
 
       # Same validation as the step above — duplicated rather than factored
       # into an earlier step on purpose, so neither run path can ever be
@@ -320,10 +325,10 @@ jobs:
               exit 1
               ;;
           esac
-          python main.py --test ${DAYS_BACK:+--days-back "$DAYS_BACK"}
+          python -m channel_vetting.pipeline --test ${DAYS_BACK:+--days-back "$DAYS_BACK"}
 
       # `if: always()` is the whole reason the cache step is split in two.
-      # A failed run has usually already spent quota — main.py aborts with
+      # A failed run has usually already spent quota — pipeline.py aborts with
       # SystemExit(1) when fetch_blocklist() or the external dedupe set
       # can't be read, and discovery runs before neither of those — so
       # dropping quota_log.json on failure is precisely the case where the
@@ -343,11 +348,11 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
-            quota_log.json
-            search_cache.json
-            external_handles_cache.json
-            credit_log.json
-            rejected_handles.json
-            gemini_log.json
-            gemini_cache.json
+            data/quota_log.json
+            data/search_cache.json
+            data/external_handles_cache.json
+            data/credit_log.json
+            data/rejected_handles.json
+            data/gemini_log.json
+            data/gemini_cache.json
           key: channel-vetting-state-${{ github.run_id }}

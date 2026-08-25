@@ -1,7 +1,7 @@
 """
 Which step of the email chain produced an address.
 
-backfill_missing_emails.py reports coverage by step, and it used to infer
+scripts/backfill/backfill_missing_emails.py reports coverage by step, and it used to infer
 the step by comparing the resolved email back against stats/performance —
 "not repeated_email and not business_email, therefore the browser". That
 inference silently became wrong the moment a third source (the older-
@@ -45,56 +45,56 @@ class _Browser:
 
 
 def test_repeated_recent_videos_is_labelled(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
-    email, source, _ = main.resolve_email_with_source(
+    email, source, _ = pipeline.resolve_email_with_source(
         _stats(), _performance(repeated_email="a@b.com"), None,
     )
-    assert (email, source) == ("a@b.com", main.EMAIL_SOURCE_REPEATED)
+    assert (email, source) == ("a@b.com", pipeline.EMAIL_SOURCE_REPEATED)
 
 
 def test_about_description_is_labelled(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
-    email, source, _ = main.resolve_email_with_source(
+    email, source, _ = pipeline.resolve_email_with_source(
         _stats(business_email="a@b.com"), _performance(), None,
     )
-    assert (email, source) == ("a@b.com", main.EMAIL_SOURCE_ABOUT)
+    assert (email, source) == ("a@b.com", pipeline.EMAIL_SOURCE_ABOUT)
 
 
 def test_older_uploads_scan_is_labelled(monkeypatch):
     """The case the old comparison-based inference got wrong."""
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "a@b.com")
+    monkeypatch.setattr(pipeline, "scan_older_videos_for_email", lambda *a, **k: "a@b.com")
 
-    email, source, _ = main.resolve_email_with_source(
+    email, source, _ = pipeline.resolve_email_with_source(
         _stats(), _performance(next_page_token="T2"), _Browser("browser@b.com"),
     )
-    assert (email, source) == ("a@b.com", main.EMAIL_SOURCE_OLDER)
+    assert (email, source) == ("a@b.com", pipeline.EMAIL_SOURCE_OLDER)
 
 
 def test_browser_is_labelled(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "")
+    monkeypatch.setattr(pipeline, "scan_older_videos_for_email", lambda *a, **k: "")
 
-    email, source, has_links = main.resolve_email_with_source(
+    email, source, has_links = pipeline.resolve_email_with_source(
         _stats(), _performance(), _Browser("browser@b.com"),
     )
-    assert (email, source) == ("browser@b.com", main.EMAIL_SOURCE_BROWSER)
+    assert (email, source) == ("browser@b.com", pipeline.EMAIL_SOURCE_BROWSER)
     # A browser hit implies the link list was non-empty.
     assert has_links is True
 
 
 def test_nothing_found_reports_no_source(monkeypatch):
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "")
+    monkeypatch.setattr(pipeline, "scan_older_videos_for_email", lambda *a, **k: "")
 
     # _Browser("") models a scraper that read the link list but found no
     # email; with no has_links override it reports None (unknown presence).
-    assert main.resolve_email_with_source(_stats(), _performance(), _Browser("")) == ("", "", None)
+    assert pipeline.resolve_email_with_source(_stats(), _performance(), _Browser("")) == ("", "", None)
 
 
 def test_empty_link_list_surfaces_as_false(monkeypatch):
@@ -103,11 +103,11 @@ def test_empty_link_list_surfaces_as_false(monkeypatch):
     has_external_links=False — the signal process_candidate turns into the
     no-social drop. Distinct from None (list never read).
     """
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "")
+    monkeypatch.setattr(pipeline, "scan_older_videos_for_email", lambda *a, **k: "")
 
-    result = main.resolve_email_with_source(
+    result = pipeline.resolve_email_with_source(
         _stats(), _performance(), _Browser("", has_links=False),
     )
     assert result == ("", "", False)
@@ -115,14 +115,14 @@ def test_empty_link_list_surfaces_as_false(monkeypatch):
 
 def test_every_source_label_is_distinct():
     """Two steps sharing a label would silently merge in the summary."""
-    import main
+    from channel_vetting import pipeline
 
     labels = [
-        main.EMAIL_SOURCE_REPEATED,
-        main.EMAIL_SOURCE_ABOUT,
-        main.EMAIL_SOURCE_OLDER,
-        main.EMAIL_SOURCE_INFLUENCERS,
-        main.EMAIL_SOURCE_BROWSER,
+        pipeline.EMAIL_SOURCE_REPEATED,
+        pipeline.EMAIL_SOURCE_ABOUT,
+        pipeline.EMAIL_SOURCE_OLDER,
+        pipeline.EMAIL_SOURCE_INFLUENCERS,
+        pipeline.EMAIL_SOURCE_BROWSER,
     ]
     assert len(set(labels)) == len(labels)
     assert all(labels)
@@ -130,11 +130,11 @@ def test_every_source_label_is_distinct():
 
 def test_resolve_email_returns_the_same_address(monkeypatch):
     """resolve_email stays the plain-string entry point the pipeline uses."""
-    import main
+    from channel_vetting import pipeline
 
-    monkeypatch.setattr(main, "scan_older_videos_for_email", lambda *a, **k: "older@b.com")
+    monkeypatch.setattr(pipeline, "scan_older_videos_for_email", lambda *a, **k: "older@b.com")
 
     stats, performance = _stats(), _performance(next_page_token="T2")
-    assert main.resolve_email(stats, performance, None) == "older@b.com"
-    assert main.resolve_email(stats, performance, None) == \
-        main.resolve_email_with_source(stats, performance, None)[0]
+    assert pipeline.resolve_email(stats, performance, None) == "older@b.com"
+    assert pipeline.resolve_email(stats, performance, None) == \
+        pipeline.resolve_email_with_source(stats, performance, None)[0]

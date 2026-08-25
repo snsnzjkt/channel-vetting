@@ -45,8 +45,8 @@
 #
 # --- tzdata is REQUIRED, not optional ---
 #
-# quota_tracker.py does ZoneInfo("America/Los_Angeles") (YouTube's quota
-# reset zone) and prospect_day.py does ZoneInfo(PROSPECT_DAY_TZ). zoneinfo
+# budget/quota_tracker.py does ZoneInfo("America/Los_Angeles") (YouTube's quota
+# reset zone) and core/prospect_day.py does ZoneInfo(PROSPECT_DAY_TZ). zoneinfo
 # falls back to the tzdata PyPI package only when there is no SYSTEM tz
 # database - and Windows has none. Without this pin, importing
 # quota_tracker on a Windows dev machine raises ZoneInfoNotFoundError and

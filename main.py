@@ -431,7 +431,10 @@ DROP_OUTSIDE_SEARCH_ZONE = "outside_search_zone"
 # badly-targeted discovery query from a thin-metadata one, and the two need
 # opposite responses. Both are discards; only the reason differs.
 DROP_NO_DECLARED_COUNTRY = "no_declared_country"
-# A television network or a TV show's own channel, not a creator.
+# A broadcaster's, network's or masthead's own channel, not a creator's —
+# television, radio or published. The reason string keeps its `broadcast_tv`
+# name so run summaries and the historical audits stay comparable; the scope
+# widened past television on 2026-08-25 (see niches.py).
 DROP_BROADCAST_TV = "broadcast_tv"
 DROP_EXCLUDED_TOPIC = "excluded_topic"
 DROP_UPLOAD_CADENCE_TOO_LOW = "upload_cadence_too_low"
@@ -534,8 +537,13 @@ _BROADCAST_TV_PHRASE_PATTERN = re.compile(
 
 def broadcast_tv_reason(channel_title: str, description: str) -> str | None:
     """
-    Whether this channel is a television network or a TV show rather than a
-    creator: 'broadcast_tv_name', 'broadcast_tv_phrase', or None.
+    Whether this channel belongs to a broadcaster, network or masthead rather
+    than to a creator: 'broadcast_tv_name', 'broadcast_tv_phrase', or None.
+
+    Covers television (HGTV, Escape To The Country), sports and radio networks
+    (Fox Sports Radio, Sky Sports, talkSPORT) and staffed newsrooms
+    (The Verge, DNVR Sports). It does NOT cover manufacturers' brand channels
+    — Dolby and ADAM Audio are deliberately still admitted.
 
     Free — reads only the title and About description `channels.list` already
     returned, so it sits with the other description checks and costs no

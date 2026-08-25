@@ -975,7 +975,7 @@ EXCLUDED_TOPIC_TERMS = {
 }
 
 # ---------------------------------------------------------------------------
-# BROADCASTERS AND TV SHOWS (2026-08-20)
+# BROADCASTERS, NETWORKS AND MEDIA ORGANISATIONS (2026-08-20, widened 2026-08-25)
 #
 # Added after HGTV (1.07M subs), Entertainment Tonight (7.71M) and Escape To
 # The Country — a BBC daytime property programme — were all written into the
@@ -1003,17 +1003,32 @@ EXCLUDED_TOPIC_TERMS = {
 #      The credit saving forgone is trivial (0.01 per creator, and this fires
 #      on 3 of 144 rows); the pool damage would not have been.
 #
-# Verified over all 144 tracked rows: exactly HGTV, Entertainment Tonight and
-# Escape To The Country fire. Zero false positives. This is the same honest
-# whack-a-mole as sim_racing / forestry above — it catches the broadcasters
-# named here and the shows that describe themselves as shows, and nothing
-# else. It deliberately does NOT catch corporate/brand channels that are not
-# television (Dolby, ADAM Audio, Apartment Therapy are all still admitted);
-# widening to those was considered and declined as a separate decision.
+# Verified 2026-08-20 over the 144 rows tracked then: exactly HGTV,
+# Entertainment Tonight and Escape To The Country fired, zero false positives.
+#
+# WIDENED 2026-08-25, after `Fox Sports Radio` was written to Home Theater as
+# Qualified. The brief: "it shouldnt find network channels like tv channels
+# just content creators, vloggers, podcasters." Television was never the real
+# category — a network's channel is a network's channel whether it broadcasts,
+# transmits or publishes — so the gate now also carries sports networks, radio
+# networks and mastheads. Re-measured over all 305 tracked rows (title + About
+# text) and over an 883-title discovery pool: 9 channels fire, ZERO false
+# positives, and no Approved row is touched.
+#
+#   Fox Sports Radio · Sky Sports Cricket · Sky Sports Premier League ·
+#   The Herd with Colin Cowherd · 3AW Football · DNVR Sports · The Verge ·
+#   House Beautiful UK · Apartment Therapy
+#
+# This is still honest whack-a-mole for the NAME half, the same as sim_racing /
+# forestry above. MANUFACTURERS REMAIN ADMITTED — Dolby and ADAM Audio are
+# brand channels, not media outlets, and that half of the 2026-08-20 decision
+# is unchanged. Content farms (`123 GO!`, `5-Minute Crafts` — both TheSoul
+# Publishing) are a THIRD category, are not caught here, and are not addressed
+# by this change.
 #
 # Matched on the channel TITLE ONLY — see reason (1) above. Keep this list to
-# broadcaster BRANDS whose name in a channel title can only mean the
-# broadcaster. Show names do not belong here: they are unbounded, and
+# network and masthead BRANDS whose name in a channel title can only mean the
+# outlet. Show names do not belong here: they are unbounded, and
 # BROADCAST_TV_PHRASE_TERMS catches a show generically instead (Escape To The
 # Country is caught by "daytime television", not by its own name).
 BROADCAST_TV_NAME_TERMS = [
@@ -1023,6 +1038,48 @@ BROADCAST_TV_NAME_TERMS = [
     "cnn", "msnbc", "fox news", "abc news", "nbc news", "cbs news", "pbs",
     "tlc", "bravo tv", "a&e", "lifetime tv", "paramount network",
     "nickelodeon", "disney channel",
+    # --- SPORTS NETWORKS (2026-08-25) ---------------------------------------
+    # "Fox Sports Radio" (241K) and two Sky Sports channels (776K, 6M) were
+    # written to Home Theater as Qualified: the pre-2026-08-25 list carried
+    # "fox news" and "sky news" but neither network's SPORTS arm, and nothing
+    # else in the pipeline asks whether a channel belongs to a broadcaster.
+    "fox sports", "sky sports", "sky sport", "espn", "nbc sports",
+    "cbs sports", "tnt sports", "bein sports", "bt sport", "sportsnet",
+    "eurosport", "dazn",
+    # --- RADIO NETWORKS AND SYNDICATORS (2026-08-25) ------------------------
+    # Radio is the same thing as TV for this pipeline's purpose — the channel
+    # belongs to a network, not to a person — and the gate had no radio
+    # vocabulary at all. "talkSPORT" and "3AW Football" (an Australian AFL
+    # station) both reached the pool; 3AW was rejected by hand.
+    "talksport", "iheartradio", "iheart radio", "siriusxm", "sirius xm",
+    "bbc radio", "npr", "audacy", "3aw",
+    # --- NEWS AND BUSINESS NETWORKS (2026-08-25) ----------------------------
+    "cnbc", "bloomberg", "al jazeera", "reuters", "associated press",
+    "vice news", "newsnation", "euronews", "france 24", "dw news",
+    "cbc news", "ctv news", "abc australia",
+    # --- PUBLICATIONS AND MAGAZINE BRANDS (2026-08-25) ----------------------
+    # WIDENS PAST TELEVISION, and this reverses half of the 2026-08-20
+    # decision recorded above at the user's request (2026-08-25: "it shouldnt
+    # find network channels like tv channels just content creators, vloggers,
+    # podcasters"). A masthead's channel is staffed editorial output, not a
+    # creator's, so it belongs with the broadcasters. `The Verge` (3.5M),
+    # `House Beautiful UK`, `Apartment Therapy` and `Architectural Digest` are
+    # the four in the pool today; the reviewer had already rejected the middle
+    # two by hand.
+    #
+    # MANUFACTURERS ARE STILL ADMITTED — the other half of that decision
+    # stands. Dolby and ADAM Audio are brand channels, not media outlets, and
+    # nothing here catches them (see the "official youtube channel of"
+    # note below, which is still declined for exactly that reason).
+    "the verge", "engadget", "cnet", "techcrunch", "gizmodo", "buzzfeed",
+    "vox media", "architectural digest", "house beautiful",
+    "apartment therapy", "better homes and gardens", "good housekeeping",
+    "elle decor",
+    # Deliberately NOT added, having been measured against the 883-title pool
+    # and found to be ordinary creator vocabulary in these two niches rather
+    # than a masthead: bare "wired" (matches "Wired For Sound"), "country
+    # living", "ideal home", "real simple", "vox". A term earns its place here
+    # only when its appearance in a channel TITLE can only mean the outlet.
 ]
 
 # Matched on the channel title AND the About description. These are how a
@@ -1034,8 +1091,15 @@ BROADCAST_TV_NAME_TERMS = [
 # rejected: `CritiX tv`, a film-and-TV fan-review channel and a legitimate
 # creator, uses the word three times in its bio. "official youtube channel of"
 # was also measured and dropped — it caught ADAM Audio, a speaker
-# manufacturer, which is a brand channel but not a TV one, and this gate is
-# scoped to TV.
+# manufacturer, which is a brand channel but not a media outlet. That stays
+# declined after the 2026-08-25 widening: this gate catches broadcasters,
+# networks and mastheads, not every company with a YouTube page.
+#
+# Re-measured 2026-08-25 and dropped for false positives: bare "magazine"
+# (Penny Modern, Approved), "home of" (Cozy DIY Home, Approved; The Wild
+# Between Us; Dori Turner Interiors), "brings you the latest" and
+# "news coverage" (clean today, but ordinary channel-trailer boilerplate any
+# creator could write — Fox Sports Radio is already caught twice over).
 BROADCAST_TV_PHRASE_TERMS = [
     "full episodes", "full episode", "new episodes air", "episodes air",
     "airs every", "first airing", "first aired", "originally aired",
@@ -1044,11 +1108,37 @@ BROADCAST_TV_PHRASE_TERMS = [
     "broadcast network", "television channel", "daytime television",
     "television programming", "season premiere", "series premiere",
     "tune in every",
+    # --- RADIO (2026-08-25) -------------------------------------------------
+    # The generalising half of the sports/radio widening above. `The Herd with
+    # Colin Cowherd` (1.4M) carries no network brand in its title — it is a
+    # person's name — and is caught only by its own bio, "a three-hour sports
+    # television and radio show on FS1 and iHeartRadio".
+    #
+    # "radio show" is the term to WATCH. A podcast is explicitly wanted here
+    # and plenty of podcasts began as radio shows, so this is the one phrase
+    # that could plausibly cost a real prospect. It was measured at zero false
+    # positives over all 305 tracked rows, and the podcasts in the pool
+    # (`The Big Podcast with Shaq`, `Club 520 Podcast`, `The Pivot Podcast`,
+    # `Nightcap`, `The Pat McAfee Show`) describe themselves as podcasts
+    # rather than as radio. If a podcaster is ever lost to this gate, drop
+    # this one term first — the rest of the radio vocabulary is unambiguous.
+    "radio show", "radio station", "radio network", "sports radio",
+    "talk radio", "radio programme", "radio program", "syndicated radio",
+    "nationally syndicated",
+    # --- MEDIA ORGANISATIONS (2026-08-25) -----------------------------------
+    # How an outlet that is NOT broadcast describes itself. `DNVR Sports`
+    # ("a digital media company ... we have credentialed reporters") and
+    # `The Verge` ("a team of journalists", "Editorial Director:") are both
+    # staffed newsrooms and both cleared every other gate. A staff masthead in
+    # the About text is the tell no brand name can be relied on to give.
+    "media company", "media network", "media group", "team of journalists",
+    "our journalists", "credentialed reporters", "editorial director",
+    "editor in chief", "editor-in-chief", "our newsroom",
 ]
 
 
 # The off-brand terms from EXCLUDED_TOPIC_TERMS ONLY — deliberately NOT the
-# broadcast-TV lists above, which are local-only for the reasons recorded
+# broadcaster lists above, which are local-only for the reasons recorded
 # there — flattened for influencers.club discovery's
 # SERVER-SIDE negation filter (see the wiring loop below). Sent as the
 # vendor's `keywords_not_in_description`, which withholds any creator whose

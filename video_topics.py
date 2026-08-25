@@ -94,7 +94,7 @@ TOPIC_LABELS = {
     "forestry": "forestry, logging or sawmilling",
     "kids_craft": "children's craft activities",
     "movie_review_farm": "film reviews and reaction content",
-    "broadcast_tv": "broadcast television programming",
+    "broadcast_tv": "broadcast television or radio programming, or a media outlet's own channel",
     "music_perf": "music performance",
     "food_only": "cooking and food",
     "news_politics": "news and current affairs",

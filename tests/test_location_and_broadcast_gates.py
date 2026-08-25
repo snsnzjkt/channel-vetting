@@ -341,6 +341,91 @@ def test_ordinary_creators_survive_the_broadcast_gate(title, description):
     assert broadcast_tv_reason(title, description) is None
 
 
+# --- networks past television (2026-08-25) ---------------------------------
+#
+# `Fox Sports Radio` (241K) reached the Home Theater table as Qualified: the
+# name list carried "fox news" and "sky news" but neither network's sports arm,
+# and it had no radio or masthead vocabulary at all. Every case below is a live
+# row, and each is annotated with WHICH half of the gate has to catch it.
+
+@pytest.mark.parametrize("title,description,expected", [
+    # A network's sports arm. The pre-2026-08-25 list would have caught
+    # "Fox News" and missed both of these.
+    ("Fox Sports Radio",
+     "Welcome to Fox Sports Radio's official YouTube channel. Fox Sports "
+     "Radio brings you the latest sports news coverage 24/7!",
+     "broadcast_tv_name"),
+    ("Sky Sports Premier League",
+     "Sky Sports Premier League is the home of Sky Sports' Premier League "
+     "videos on YouTube featuring highlights from every game of the season!",
+     "broadcast_tv_name"),
+    # NAME half is useless here — the title is a person's name. Only the bio
+    # gives it away, which is the whole reason the phrase list exists.
+    ("The Herd with Colin Cowherd",
+     "The Herd with Colin Cowherd and Jason McIntyre is a three-hour sports "
+     "television and radio show on FS1 and iHeartRadio.",
+     "broadcast_tv_phrase"),
+    # A staffed newsroom with no broadcast brand in its title at all.
+    ("DNVR Sports",
+     "DNVR is a digital media company for die-hard Denver sports fans. We "
+     "have credentialed reporters and analysts covering the Broncos.",
+     "broadcast_tv_phrase"),
+    # A masthead. This is the half of the 2026-08-20 "corporate channels stay
+    # admitted" decision that 2026-08-25 deliberately reversed.
+    ("The Verge",
+     "Welcome to the YouTube channel for TheVerge.com, a team of journalists "
+     "that examines how technology will change life in the future.",
+     "broadcast_tv_name"),
+    ("House Beautiful UK",
+     "House Beautiful champions modern living and affordable style.",
+     "broadcast_tv_name"),
+])
+def test_networks_radio_and_mastheads_are_dropped(title, description, expected):
+    assert broadcast_tv_reason(title, description) == expected
+
+
+@pytest.mark.parametrize("title,description", [
+    # THE OTHER HALF OF THE 2026-08-25 DECISION, and the line the widening
+    # must not cross: a manufacturer's brand channel is not a media outlet.
+    # Both are live rows and both must still reach a human reviewer.
+    ("Dolby", "Dolby Laboratories - experience entertainment in Dolby."),
+    ("ADAM Audio",
+     "The official YouTube channel of Berlin-based monitor manufacturer, ADAM Audio."),
+    # PODCASTS ARE THE POINT OF THE PIPELINE and every one of these is a live
+    # row. "radio show" is the one added phrase that could plausibly cost a
+    # real prospect, so the podcasts in the pool are pinned here directly.
+    ("The Big Podcast with Shaq",
+     "The biggest podcast in the world is here. Watch new episodes every Friday!"),
+    ("Club 520 Podcast", "Official YouTube Page for Club520 Podcast!! "
+                         "Episodes Drop Weekly! Like Share & Subscribe"),
+    ("Nightcap", "Come for the sports, stay for the stories. You've never "
+                 "heard Shannon Sharpe and Chad Johnson like this."),
+    ("The Joel Klatt Show: A College Football Podcast", ""),
+    # MEASURED FALSE POSITIVES of terms considered and rejected on 2026-08-25.
+    # Bare "magazine" caught this Approved row; "home of" caught this one.
+    ("Penny Modern", "A magazine-style look at modern interiors."),
+    ("Cozy DIY Home", "The home of cosy, affordable DIY projects."),
+    # "sky sports" must not fire on an ordinary use of either word.
+    ("Jsky", "Interviews and reviews."),
+])
+def test_creators_podcasters_and_manufacturers_survive_the_widened_gate(title, description):
+    assert broadcast_tv_reason(title, description) is None
+
+
+def test_both_halves_of_the_gate_still_fire():
+    """
+    The health check the function's own docstring asks for: it returns WHICH
+    half fired because the name list is unbounded whack-a-mole and the phrase
+    list is meant to generalise. A suite where only name hits appear means the
+    phrase list has gone stale — which is exactly how radio was missed until
+    2026-08-25.
+    """
+    assert broadcast_tv_reason("Sky Sports Cricket", "") == "broadcast_tv_name"
+    assert broadcast_tv_reason(
+        "Some Show", "A nationally syndicated talk radio programme.",
+    ) == "broadcast_tv_phrase"
+
+
 def test_network_names_are_matched_against_the_title_only():
     """
     The scope rule, stated directly rather than via a sample. Same network

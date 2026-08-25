@@ -24,11 +24,8 @@ logging.basicConfig(level=logging.ERROR)
 from channel_vetting.discovery import niches
 from channel_vetting.discovery.influencers_club import InfluencerDiscovery
 
-d = InfluencerDiscovery.from_config(max_credits=1.0)
-if not d.enabled:
-    sys.exit("discovery not configured")
 
-def total(filters):
+def total(d, filters):
     # Goes through InfluencerDiscovery.probe, NOT _post. probe() is the one that
     # checks can_afford and writes record_spend; _post is only the HTTP call, so
     # calling it directly spent real credits the ledger never saw. See probe()'s
@@ -54,19 +51,18 @@ def total(filters):
 # is filtering the page but not the count. The script says so rather than
 # quietly reporting a bad figure.
 # ---------------------------------------------------------------------------
-def net_pool():
-    from channel_vetting import pipeline as _main
+def net_pool(d):
     from channel_vetting.discovery import rejected_handles as _rejected
 
     for niche in ("Home Theater", "Lifestyle Sofa"):
         base = niches.NICHES[niche]["discovery_filters"]
-        gross = total(base)
+        gross = total(d, base)
         rejected = _rejected.for_niche(niche)
         # The exclusion the real run sends, minus the parts that need live
         # Airtable/blocklist reads — rejects dominate it for a mature niche.
         f = copy.deepcopy(base)
         f["exclude_handles"] = sorted(rejected)[:10000]
-        net = total(f)
+        net = total(d, f)
         print(f"\n{niche}")
         print(f"  gross pool                 {gross if gross is not None else 'failed':>8}")
         print(f"  reject cache               {len(rejected):>8}")
@@ -78,37 +74,45 @@ def net_pool():
             print(f"  -> {net/gross:.0%} of the gross pool is still buyable")
 
 
-if "--net" in sys.argv:
-    net_pool()
-    raise SystemExit(0)
+def main():
+    d = InfluencerDiscovery.from_config(max_credits=1.0)
+    if not d.enabled:
+        sys.exit("discovery not configured")
 
+    if "--net" in sys.argv:
+        net_pool(d)
+        return
 
-for niche in ("Home Theater", "Lifestyle Sofa"):
-    base = niches.NICHES[niche]["discovery_filters"]
-    b = total(base)
-    print(f"\n{niche}   baseline total = {b:,}")
-    print(f"  {'ablation':38} {'total':>7}   {'change':>9}")
-    variants = [
-        ("subscriber floor 10k -> 2.5k",  lambda f: f.update({"number_of_subscribers": {"min": 2500}})),
-        ("drop the negation keyword list", lambda f: f.pop("keywords_not_in_description", None)),
-        ("drop the gender filter",         lambda f: f.pop("gender", None)),
-        ("drop the location filter",       lambda f: f.pop("location", None)),
-        ("drop profile_language",          lambda f: f.pop("profile_language", None)),
-        ("drop ai_search (query text)",    lambda f: f.pop("ai_search", None)),
-    ]
-    for label, mutate in variants:
+    for niche in ("Home Theater", "Lifestyle Sofa"):
+        base = niches.NICHES[niche]["discovery_filters"]
+        b = total(d, base)
+        print(f"\n{niche}   baseline total = {b:,}")
+        print(f"  {'ablation':38} {'total':>7}   {'change':>9}")
+        variants = [
+            ("subscriber floor 10k -> 2.5k",  lambda f: f.update({"number_of_subscribers": {"min": 2500}})),
+            ("drop the negation keyword list", lambda f: f.pop("keywords_not_in_description", None)),
+            ("drop the gender filter",         lambda f: f.pop("gender", None)),
+            ("drop the location filter",       lambda f: f.pop("location", None)),
+            ("drop profile_language",          lambda f: f.pop("profile_language", None)),
+            ("drop ai_search (query text)",    lambda f: f.pop("ai_search", None)),
+        ]
+        for label, mutate in variants:
+            f = copy.deepcopy(base)
+            mutate(f)
+            t = total(d, f)
+            if t is None:
+                print(f"  {label:38} {'failed':>7}")
+                continue
+            pct = f"{(t/b - 1) * 100:+.0f}%" if b else "n/a"
+            print(f"  {label:38} {t:>7,}   {pct:>9}")
+        # the two most promising, together
         f = copy.deepcopy(base)
-        mutate(f)
-        t = total(f)
-        if t is None:
-            print(f"  {label:38} {'failed':>7}")
-            continue
-        pct = f"{(t/b - 1) * 100:+.0f}%" if b else "n/a"
-        print(f"  {label:38} {t:>7,}   {pct:>9}")
-    # the two most promising, together
-    f = copy.deepcopy(base)
-    f["number_of_subscribers"] = {"min": 2500}
-    f.pop("gender", None)
-    t = total(f)
-    if t is not None:
-        print(f"  {'subs 2.5k + no gender (combined)':38} {t:>7,}   {(t/b-1)*100:+.0f}%")
+        f["number_of_subscribers"] = {"min": 2500}
+        f.pop("gender", None)
+        t = total(d, f)
+        if t is not None:
+            print(f"  {'subs 2.5k + no gender (combined)':38} {t:>7,}   {(t/b-1)*100:+.0f}%")
+
+
+if __name__ == "__main__":
+    main()

@@ -122,9 +122,10 @@ def test_measurement_scripts_do_not_call_post_directly():
     """
     import pathlib
 
-    # Read as TEXT, never imported. scripts/analysis/measure_discovery_pool.py has no
-    # `if __name__ == "__main__"` guard, so importing it runs the probe for
-    # real — this guard against spending must not itself spend.
+    # Read as TEXT, never imported. The scripts now guard their entry points with
+    # `if __name__ == "__main__"`, so importing no longer spends credits, but they
+    # still call `logging.basicConfig()` at module scope — importing them would
+    # reconfigure the root logger for the rest of the suite. Text is enough here.
     analysis = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "analysis"
     for name in ("measure_discovery_pool.py", "measure_query_union.py"):
         src = (analysis / name).read_text()

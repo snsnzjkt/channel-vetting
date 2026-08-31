@@ -111,6 +111,49 @@ SOURCE_LABEL = "YouTube Discovery Pipeline"
 # to retune it live at MIN_VIEWS_PER_VIDEO_RATIO in pipeline.py.
 MIN_VIEWS_PER_VIDEO_RATIO = float(os.getenv("MIN_VIEWS_PER_VIDEO_RATIO", 0.30))
 
+# --- The two view floors ---
+# MIN_AVG_VIEWS is the niche's AVERAGE-views bar (was hardcoded per-niche in
+# discovery/niches.py). MIN_VIEWS_PER_VIDEO is the PER-VIDEO bar that
+# MIN_VIEWS_PER_VIDEO_RATIO above applies to (was hardcoded in pipeline.py).
+#
+# LOWERED 10,000 -> 5,000, BOTH TOGETHER, on 2026-09-01 at the operator's
+# direction. The instruction was to raise the number of records reaching
+# Airtable to ~10 qualified per niche per run without spending another vendor
+# credit, and with discovery already dry in both niches the only remaining
+# lever was this one.
+#
+# THIS IS A CRITERIA CHANGE, NOT A THROUGHPUT KNOB. Unlike DAILY_QUALIFIED_CAP
+# (which only defers rows), a row admitted at 5,000 would NEVER have been
+# admitted at 10,000. The 10,000 figure came from the influencer profiling
+# brief, so if the brief still governs, this needs the brief's owner to agree.
+#
+# THEY MOVE TOGETHER ON PURPOSE. pre_push_drop_reason checks below_view_minimum
+# BEFORE video_below_view_minimum, so lowering only the average floor just moves
+# the same channels one gate down the list and drops them there instead.
+#
+# MEASURED against the 2026-08-28 scheduled run (the run that produced the 8/4
+# split the operator escalated). Channels dropped on below_view_minimum that
+# clear a lower AVERAGE bar:
+#
+#            floor    Home Theater    Lifestyle Sofa
+#           10,000               0                 0
+#            7,500               7                 5
+#            5,000              23                20
+#            3,000              40                47
+#            2,000              51                73
+#
+# 5,000 is chosen to clear the ~10 target with margin on BOTH niches (Home
+# Theater needed +2, Lifestyle +6), since these counts are measured at the
+# average gate only and an unknown share still fail downstream on the per-video
+# ratio, channel age, relevance and email/social gates.
+#
+# EXPECT TO RETUNE THIS AFTER ONE RUN. Both are env vars precisely so the
+# next calibration is a GitHub secret change and not a deploy. If the queue
+# floods, raise them; DAILY_QUALIFIED_CAP (60) is the backstop and
+# scripts/rank_pending.py triages what gets through.
+MIN_AVG_VIEWS = int(os.getenv("MIN_AVG_VIEWS", 5_000))
+MIN_VIEWS_PER_VIDEO = int(os.getenv("MIN_VIEWS_PER_VIDEO", 5_000))
+
 # The discovery-side SUBSCRIBER floor, as a fraction of the niche's own
 # min_avg_views. Lowered 1.0 -> 0.25 on 2026-08-21, so a 10,000-average-views
 # niche asks the vendor for 2,500+ subscribers instead of 10,000+.
@@ -295,6 +338,33 @@ INFLUENCERS_ENRICH_PATH = "/public/v1/creators/enrich/handle/profile/"
 # billed (see EMAIL_REQUIRED below), so this caps a runaway, not normal use.
 INFLUENCERS_MAX_LOOKUPS_PER_RUN = int(
     os.getenv("INFLUENCERS_MAX_LOOKUPS_PER_RUN", 100)
+)
+
+# The per-run EMAIL credit ceiling, mirroring
+# INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN. ADDED 2026-09-01 alongside the
+# MIN_AVG_VIEWS drop, and it is that change's safety belt rather than a
+# feature.
+#
+# WHY THE LOOKUP CAP ABOVE WAS NOT ENOUGH. It bounds REQUESTS (100), not money,
+# so its real ceiling is 100 x EMAIL_COST_CREDITS = 20 credits/run — double the
+# INFLUENCERS_MAX_CREDITS_PER_DAY of 10. It never fired because so few channels
+# survived the gates: measured spend was 2.40 credits (2026-08-25), 0.60
+# (08-26), 0.00 (08-27) and 1.00 (08-28), i.e. 0-12 billable lookups against a
+# cap of 100. Lowering the view floors removes exactly that accidental
+# protection, because email lookups scale with the number of channels that
+# reach step 4.
+#
+# 2.5 is the pre-change HIGH-WATER MARK (2.40 on 2026-08-25) rounded up, so the
+# criteria change cannot cost a credit more than the strictest gates already
+# did. Discovery needs no equivalent: it is already pinned at its own 6.00
+# ceiling on every run, so it cannot grow either.
+#
+#   worst case per run, before: 6.00 discovery + up to 20.00 email = 26.00
+#   worst case per run, after:  6.00 discovery + up to  2.50 email =  8.50
+#
+# against an observed pre-change maximum of 8.40 (2026-08-25).
+INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN = float(
+    os.getenv("INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN", 2.5)
 )
 
 # "must_have" over the "preferred" default: the docs state no credits are

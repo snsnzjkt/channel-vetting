@@ -68,10 +68,12 @@ weak day can't flood a table with below-criteria channels:
 
 5. **Hard requirements** (`pipeline.pre_push_drop_reason`, `discovery/search_zones.py`) —
    a candidate is **discarded**, with no row written, unless it clears all
-   of: 10,000+ average views (both niches), **at least half of the judgeable
-   long-form videos in that window over 10,000 views** (see
-   `MIN_VIEWS_PER_VIDEO_RATIO` — the README previously said "each of the last
-   10", which has not been the rule since the ratio was introduced), 30+ public videos, **at least 10 uploads a year**,
+   of: **5,000+ average views** (both niches; lowered from 10,000 on
+   2026-09-01, env-tunable via `MIN_AVG_VIEWS`), **at least 30% of the
+   judgeable long-form videos in that window over 5,000 views each** (see
+   `MIN_VIEWS_PER_VIDEO_RATIO` and `MIN_VIEWS_PER_VIDEO`, which must stay equal
+   to `MIN_AVG_VIEWS` — a per-video floor left above the average floor re-drops
+   the same channels one gate later), 30+ public videos, **at least 10 uploads a year**,
    **a most-recent upload inside a rolling 12 months**, and a location
    inside the allowed search zones — **US, Canada, UK, Europe, Australia;
    Ireland excluded**. Dead channels and Shorts-only channels are dropped
@@ -79,10 +81,14 @@ weak day can't flood a table with below-criteria channels:
    already-fetched last-10 window as the average, so they cost no extra
    quota; an unmeasurable one (too thin a window, no parseable upload date)
    is *kept*, not dropped. Location comes from the channel's own `country`
-   setting (85% of channels in the live tables set it), falling back to the
-   region subtag of its content language (`en-GB` → GB) for the rest. A
-   channel that declares neither is *kept*, not dropped — absent data
-   isn't evidence against it.
+   setting (85% of channels in the live tables set it). A channel that
+   declares no country is **discarded** (`no_declared_country`), on the
+   2026-08-20 instruction "don't include channels unless they have a specific
+   location listed on YouTube" — this is the one place the pipeline's standing
+   "absent data never disqualifies" rule is deliberately overridden, and it is
+   the single largest drop reason after the view floor (420 of ~1,500 drops on
+   the 2026-08-28 run). The content-language region subtag is no longer used as
+   a location source; `en-US` describes the audience, not the creator.
 6. **Qualification** (`ranking/scoring.py`) — the one soft criterion left: whether
    the channel meets that niche's minimum age. A channel that doesn't is
    **flagged for review, not discarded** — a human makes the final call.
@@ -285,7 +291,9 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 |---|---|---|
 | `QUOTA_CEILING` | 8000 | YouTube quota ceiling per day (of the 10,000 free-tier budget) |
 | `API_SLEEP_SECONDS` | 0.5 | Delay between individual API calls |
-| `DAILY_QUALIFIED_CAP` | 30 | Max qualified rows pushed per niche table per day |
+| `MIN_AVG_VIEWS` | 5000 | Average-views floor, both niches. Lowered from 10,000 on 2026-09-01 to raise records reaching Airtable. **A criteria change, not a throughput knob** — a row admitted here would not have been admitted at 10,000 |
+| `MIN_VIEWS_PER_VIDEO` | 5000 | Per-video views floor. **Must equal `MIN_AVG_VIEWS`**; enforced by `test_the_two_view_floors_move_together` |
+| `DAILY_QUALIFIED_CAP` | 60 | Max qualified rows pushed per niche table per day (raised 30 -> 60 on 2026-08-25) |
 | `DAILY_FLAGGED_CAP` | 10 | Max flagged (below-criteria) rows pushed per niche table per day |
 | `CANDIDATE_OVERSHOOT` | 1.5 | Multiple of the remaining row shortfall that one discovery round banks in fresh candidates. Sizes a round only — `run_niche()` keeps discovering until the qualified cap is met or the keywords run out, so this does not limit the day's yield |
 | `EXPECTED_CANDIDATES_PER_KEYWORD` | 40 | Unique channels one keyword is expected to yield (measured ~42 at `max_results=50` over a 7-day window). Converts a row shortfall into a keyword count for the next discovery round |
@@ -340,9 +348,11 @@ set these drive discovery; the `keywords` are only the `search.list`
 fallback used when no key is configured. Reword `ai_search` to steer which
 creators surface.
 
-Note that `min_avg_views` is **10,000 for both niches** as of the 2026-08
-criteria change. Lifestyle Sofa's brief says 2,000; that was deliberately
-overridden to put the two niches on the same bar. The other two shared
+Note that `min_avg_views` is **5,000 for both niches** as of the 2026-09-01
+change (was 10,000). Lifestyle Sofa's brief says 2,000 and Home Theater's says
+10,000; both are deliberately overridden to put the two niches on the same bar.
+Both niches now read `MIN_AVG_VIEWS` from `config.py`, so this is an env var
+rather than a code edit. The other two shared
 requirements — 30+ public videos and the allowed search zones — aren't
 per-niche knobs: they live in `MIN_VIDEO_COUNT` (`pipeline.py`) and
 `discovery/search_zones.py`.
@@ -673,8 +683,9 @@ calls or real credentials are needed — everything is mocked.
 - Per-niche thresholds (`min_avg_views`, `min_channel_age_months`) live on
   each `NICHES` entry in `pipeline.py`, not in `.env`.
 - The shared hard requirements are elsewhere: at the top of `pipeline.py`,
-  `MIN_VIDEO_COUNT` (30), `MIN_VIEWS_PER_VIDEO` (10,000 per video across the
-  last 10), `MIN_UPLOADS_PER_YEAR` (6), and `MAX_DAYS_SINCE_LAST_UPLOAD`
+  `MIN_VIDEO_COUNT` (30), `MIN_VIEWS_PER_VIDEO` (5,000 per video across the
+  last 10, read from `config.py` and required to equal `MIN_AVG_VIEWS`),
+  `MIN_UPLOADS_PER_YEAR` (6), and `MAX_DAYS_SINCE_LAST_UPLOAD`
   (365); and the allowed countries in `discovery/search_zones.py`
   (`ALLOWED_COUNTRY_CODES`, plus the name tables the About-panel lookup
   uses). Widening "Europe" to include Russia, Belarus or Turkey is a

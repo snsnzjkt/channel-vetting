@@ -340,6 +340,33 @@ INFLUENCERS_MAX_LOOKUPS_PER_RUN = int(
     os.getenv("INFLUENCERS_MAX_LOOKUPS_PER_RUN", 100)
 )
 
+# The per-run EMAIL credit ceiling, mirroring
+# INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN. ADDED 2026-09-01 alongside the
+# MIN_AVG_VIEWS drop, and it is that change's safety belt rather than a
+# feature.
+#
+# WHY THE LOOKUP CAP ABOVE WAS NOT ENOUGH. It bounds REQUESTS (100), not money,
+# so its real ceiling is 100 x EMAIL_COST_CREDITS = 20 credits/run — double the
+# INFLUENCERS_MAX_CREDITS_PER_DAY of 10. It never fired because so few channels
+# survived the gates: measured spend was 2.40 credits (2026-08-25), 0.60
+# (08-26), 0.00 (08-27) and 1.00 (08-28), i.e. 0-12 billable lookups against a
+# cap of 100. Lowering the view floors removes exactly that accidental
+# protection, because email lookups scale with the number of channels that
+# reach step 4.
+#
+# 2.5 is the pre-change HIGH-WATER MARK (2.40 on 2026-08-25) rounded up, so the
+# criteria change cannot cost a credit more than the strictest gates already
+# did. Discovery needs no equivalent: it is already pinned at its own 6.00
+# ceiling on every run, so it cannot grow either.
+#
+#   worst case per run, before: 6.00 discovery + up to 20.00 email = 26.00
+#   worst case per run, after:  6.00 discovery + up to  2.50 email =  8.50
+#
+# against an observed pre-change maximum of 8.40 (2026-08-25).
+INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN = float(
+    os.getenv("INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN", 2.5)
+)
+
 # "must_have" over the "preferred" default: the docs state no credits are
 # charged for an empty result or a failed validation under must_have, which
 # turns a miss into a free call. "preferred" would bill 0.2 credits to be

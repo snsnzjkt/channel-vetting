@@ -7,6 +7,8 @@ returned address has to survive before it reaches an Airtable cell a human
 runs outreach from.
 """
 import json
+import os
+from unittest import mock
 
 import pytest
 import requests
@@ -738,3 +740,75 @@ def test_airtable_session_still_refuses_to_retry_post():
 # which now includes EMAIL_SOURCE_INFLUENCERS. A second copy here would be
 # the same guarantee asserted in two places — and the way one of them
 # quietly stops covering the full set.
+
+
+# --- the per-run email CREDIT ceiling (added 2026-09-01) -------------------
+
+
+def test_the_email_step_is_bounded_by_credits_not_just_requests():
+    """
+    The default cap must be the CREDIT ceiling, not the 100-request one.
+
+    INFLUENCERS_MAX_LOOKUPS_PER_RUN bounds requests, so its real cost is
+    100 x EMAIL_COST_CREDITS = 20 credits/run — double
+    INFLUENCERS_MAX_CREDITS_PER_DAY. It never fired only because the view
+    floors were strict enough that few channels reached step 4. Lowering
+    MIN_AVG_VIEWS on 2026-09-01 removed that accidental protection, so this
+    asserts money is what bounds the step now.
+    """
+    from channel_vetting.config import (
+        INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN,
+        INFLUENCERS_MAX_LOOKUPS_PER_RUN,
+    )
+    from channel_vetting.enrichment.email_influencers import (
+        EMAIL_COST_CREDITS,
+        InfluencersClient,
+    )
+
+    client = InfluencersClient()
+    ceiling = client._max_lookups * EMAIL_COST_CREDITS
+
+    assert ceiling <= INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN
+    # ...and the credit ceiling is the one actually binding, not the request cap.
+    assert client._max_lookups < INFLUENCERS_MAX_LOOKUPS_PER_RUN
+
+
+def test_the_email_ceiling_holds_spend_at_its_pre_change_level():
+    """
+    Measured email spend per run BEFORE the 2026-09-01 view-floor change was
+    2.40 credits (08-25), 0.60 (08-26), 0.00 (08-27), 1.00 (08-28). The
+    operator's requirement when lowering the floors was that credit spend not
+    increase, so the ceiling must sit at that 2.40 high-water mark.
+
+    A regression here means the criteria change started costing money, which is
+    the one thing it was required not to do.
+    """
+    from channel_vetting.enrichment.email_influencers import (
+        EMAIL_COST_CREDITS,
+        InfluencersClient,
+    )
+
+    PRE_CHANGE_HIGH_WATER = 2.40
+    client = InfluencersClient()
+    assert client._max_lookups * EMAIL_COST_CREDITS <= PRE_CHANGE_HIGH_WATER + 1e-9
+
+
+def test_the_email_ceiling_is_env_tunable():
+    """Retuning is a secret change, not a deploy — same as the view floors."""
+    import importlib
+
+    from channel_vetting import config
+    from channel_vetting.enrichment import email_influencers
+
+    with mock.patch.dict(
+        os.environ, {"INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN": "1.0"}, clear=False
+    ):
+        importlib.reload(config)
+        importlib.reload(email_influencers)
+        try:
+            client = email_influencers.InfluencersClient()
+            # 1.0 / 0.2 == 5 lookups
+            assert client._max_lookups == 5
+        finally:
+            importlib.reload(config)
+            importlib.reload(email_influencers)

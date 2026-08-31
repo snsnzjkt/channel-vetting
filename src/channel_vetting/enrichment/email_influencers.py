@@ -35,6 +35,7 @@ from channel_vetting.config import (
     INFLUENCERS_EMAIL_REQUIRED,
     INFLUENCERS_ENRICH_PATH,
     INFLUENCERS_MAX_LOOKUPS_PER_RUN,
+    INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN,
 )
 from channel_vetting.budget.credit_tracker import KIND_EMAIL, can_afford, record_spend
 from channel_vetting.enrichment.channels import EMAIL_PATTERN, is_blocklisted_email
@@ -95,8 +96,24 @@ class InfluencersClient:
         # is already logged where it is DETECTED, and nothing ever read the
         # two apart — so the split was state carrying no information.
         self._active = enabled
+        # TWO bounds, and the TIGHTER one wins.
+        #
+        # INFLUENCERS_MAX_LOOKUPS_PER_RUN bounds REQUESTS and stays as the
+        # runaway guard it always was. INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN
+        # bounds MONEY, which is the thing that actually needed a ceiling: the
+        # request cap's real cost is 100 x 0.2 = 20 credits/run, double the
+        # daily cap, and it only never fired because the view floors were
+        # strict enough that few channels reached step 4. Lowering those floors
+        # on 2026-09-01 removed that accidental protection, so the credit
+        # ceiling is what holds spend at its pre-change level now.
+        #
+        # int() floors deliberately: a partial lookup cannot be bought, and
+        # rounding up would let the run exceed the ceiling by one hit.
+        credit_capped = int(INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN / EMAIL_COST_CREDITS)
         self._max_lookups = (
-            INFLUENCERS_MAX_LOOKUPS_PER_RUN if max_lookups is None else max_lookups
+            min(INFLUENCERS_MAX_LOOKUPS_PER_RUN, credit_capped)
+            if max_lookups is None
+            else max_lookups
         )
         self._lookups_spent = 0
         # Credits as the VENDOR reports them, when it does. Separate from
@@ -275,9 +292,12 @@ class InfluencersClient:
         self._lookups_spent += 1
         if self._lookups_spent >= self._max_lookups:
             logger.warning(
-                "influencers.club credit budget (%d) reached — step 4 is "
-                "disabled for the rest of this run.",
+                "influencers.club per-run email ceiling reached (%d lookups "
+                "= %.2f credits, cap %.2f) — step 4 is disabled for the rest "
+                "of this run.",
                 self._max_lookups,
+                self._max_lookups * EMAIL_COST_CREDITS,
+                INFLUENCERS_MAX_EMAIL_CREDITS_PER_RUN,
             )
 
     def _send(self, channel_id: str):

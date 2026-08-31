@@ -81,6 +81,7 @@ from channel_vetting.airtable.do_not_contact import (
 )
 from channel_vetting.config import (
     MIN_VIEWS_PER_VIDEO_RATIO as CONFIG_MIN_VIEWS_PER_VIDEO_RATIO,
+    MIN_VIEWS_PER_VIDEO as CONFIG_MIN_VIEWS_PER_VIDEO,
     API_SLEEP_SECONDS,
     DEFAULT_STATUS,
     SOURCE_LABEL,
@@ -280,11 +281,17 @@ MAX_NON_LATIN_DESCRIPTION_RATIO = 0.10
 MIN_NON_LATIN_DESCRIPTION_CHARS = 8
 
 # The per-video view floor, applied to BOTH niches. This is the per-video
-# reading of "min 10k+ views" — stricter than the niche's min_avg_views floor,
-# which one strong upload can carry over the line while other recent videos
-# flopped. Kept alongside min_avg_views, not replacing it, so a niche can still
-# be given its own average bar.
-MIN_VIEWS_PER_VIDEO = 10_000
+# reading of the niche's view bar — stricter than the niche's min_avg_views
+# floor, which one strong upload can carry over the line while other recent
+# videos flopped. Kept alongside min_avg_views, not replacing it, so a niche
+# can still be given its own average bar.
+#
+# MOVED to config on 2026-09-01 and lowered 10,000 -> 5,000 together with
+# MIN_AVG_VIEWS. It must track that floor: this gate sits immediately behind
+# below_view_minimum in pre_push_drop_reason, so leaving it at 10,000 while the
+# average bar drops would catch the same channels one line later. See the
+# measured yield table above MIN_AVG_VIEWS in config.py.
+MIN_VIEWS_PER_VIDEO = CONFIG_MIN_VIEWS_PER_VIDEO
 
 # ...but only MIN_VIEWS_PER_VIDEO_RATIO of the sampled LONG-FORM videos has to
 # clear it, not all of them (changed 2026-08-14, at the user's direction, and

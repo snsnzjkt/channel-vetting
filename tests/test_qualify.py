@@ -73,13 +73,19 @@ def test_qualify_no_longer_takes_view_arguments():
 
 @pytest.mark.parametrize(
     "niche,expected_views,expected_age",
-    [("Home Theater", 10_000, 12), ("Lifestyle Sofa", 10_000, None)],
+    [("Home Theater", 5_000, 12), ("Lifestyle Sofa", 5_000, None)],
 )
 def test_both_niches_share_the_same_view_floor(niche, expected_views, expected_age):
     """
-    2026-08: both niches want 10,000 average views. Lifestyle Sofa was
-    raised from the 2,000 in its brief; Home Theater is unchanged. The age
+    2026-08: both niches want the SAME average-view floor. Lifestyle Sofa was
+    raised from the 2,000 in its brief; Home Theater matched it. The age
     requirement stayed per-niche and is NOT unified.
+
+    2026-09-01: both LOWERED 10,000 -> 5,000 at the operator's direction, to
+    raise the number of records reaching Airtable to ~10 qualified per niche
+    per run without spending another vendor credit. The unification is the
+    invariant under test here; the value is env-tunable via MIN_AVG_VIEWS and
+    is expected to be recalibrated once live yield is known.
     """
     from channel_vetting.pipeline import NICHES
 

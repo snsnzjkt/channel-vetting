@@ -14,6 +14,7 @@ import logging
 from channel_vetting.config import (
     AIRTABLE_TABLE_HOME_THEATER,
     AIRTABLE_TABLE_LIFESTYLE_SOFA,
+    MIN_AVG_VIEWS as CONFIG_MIN_AVG_VIEWS,
     DISCOVERY_SUBSCRIBER_FLOOR_RATIO as CONFIG_DISCOVERY_SUBSCRIBER_FLOOR_RATIO,
 )
 from channel_vetting.discovery.search_zones import ZONE_CORE, vendor_locations_for
@@ -348,7 +349,10 @@ NICHES = {
                      "a screen being reviewed. If you cannot tell what the "
                      "subject is, answer yes and lower your confidence."},
         ],
-        "min_avg_views": 10_000,
+        # LOWERED 10,000 -> 5,000 on 2026-09-01, env-tunable via MIN_AVG_VIEWS.
+        # This is a criteria change, not a throughput knob — see the measured
+        # yield table above MIN_AVG_VIEWS in config.py.
+        "min_avg_views": CONFIG_MIN_AVG_VIEWS,
         "min_channel_age_months": 12,
         # NARROWED 2026-08-20 from US/CA/UK/Europe/AU to US/CA/UK/AU. The
         # instruction named Lifestyle ("Europe is not in our search zone for
@@ -754,7 +758,10 @@ NICHES = {
                      "a screen being reviewed. If you cannot tell what the "
                      "subject is, answer yes and lower your confidence."},
         ],
-        "min_avg_views": 10_000,
+        # LOWERED 10,000 -> 5,000 on 2026-09-01, env-tunable via MIN_AVG_VIEWS.
+        # This is a criteria change, not a throughput knob — see the measured
+        # yield table above MIN_AVG_VIEWS in config.py.
+        "min_avg_views": CONFIG_MIN_AVG_VIEWS,
         "min_channel_age_months": None,
         # NARROWED 2026-08-20. This is the niche the instruction actually
         # named: "Europe is not in our search zone for lifestyle. Only UK USA

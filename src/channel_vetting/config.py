@@ -111,6 +111,49 @@ SOURCE_LABEL = "YouTube Discovery Pipeline"
 # to retune it live at MIN_VIEWS_PER_VIDEO_RATIO in pipeline.py.
 MIN_VIEWS_PER_VIDEO_RATIO = float(os.getenv("MIN_VIEWS_PER_VIDEO_RATIO", 0.30))
 
+# --- The two view floors ---
+# MIN_AVG_VIEWS is the niche's AVERAGE-views bar (was hardcoded per-niche in
+# discovery/niches.py). MIN_VIEWS_PER_VIDEO is the PER-VIDEO bar that
+# MIN_VIEWS_PER_VIDEO_RATIO above applies to (was hardcoded in pipeline.py).
+#
+# LOWERED 10,000 -> 5,000, BOTH TOGETHER, on 2026-09-01 at the operator's
+# direction. The instruction was to raise the number of records reaching
+# Airtable to ~10 qualified per niche per run without spending another vendor
+# credit, and with discovery already dry in both niches the only remaining
+# lever was this one.
+#
+# THIS IS A CRITERIA CHANGE, NOT A THROUGHPUT KNOB. Unlike DAILY_QUALIFIED_CAP
+# (which only defers rows), a row admitted at 5,000 would NEVER have been
+# admitted at 10,000. The 10,000 figure came from the influencer profiling
+# brief, so if the brief still governs, this needs the brief's owner to agree.
+#
+# THEY MOVE TOGETHER ON PURPOSE. pre_push_drop_reason checks below_view_minimum
+# BEFORE video_below_view_minimum, so lowering only the average floor just moves
+# the same channels one gate down the list and drops them there instead.
+#
+# MEASURED against the 2026-08-28 scheduled run (the run that produced the 8/4
+# split the operator escalated). Channels dropped on below_view_minimum that
+# clear a lower AVERAGE bar:
+#
+#            floor    Home Theater    Lifestyle Sofa
+#           10,000               0                 0
+#            7,500               7                 5
+#            5,000              23                20
+#            3,000              40                47
+#            2,000              51                73
+#
+# 5,000 is chosen to clear the ~10 target with margin on BOTH niches (Home
+# Theater needed +2, Lifestyle +6), since these counts are measured at the
+# average gate only and an unknown share still fail downstream on the per-video
+# ratio, channel age, relevance and email/social gates.
+#
+# EXPECT TO RETUNE THIS AFTER ONE RUN. Both are env vars precisely so the
+# next calibration is a GitHub secret change and not a deploy. If the queue
+# floods, raise them; DAILY_QUALIFIED_CAP (60) is the backstop and
+# scripts/rank_pending.py triages what gets through.
+MIN_AVG_VIEWS = int(os.getenv("MIN_AVG_VIEWS", 5_000))
+MIN_VIEWS_PER_VIDEO = int(os.getenv("MIN_VIEWS_PER_VIDEO", 5_000))
+
 # The discovery-side SUBSCRIBER floor, as a fraction of the niche's own
 # min_avg_views. Lowered 1.0 -> 0.25 on 2026-08-21, so a 10,000-average-views
 # niche asks the vendor for 2,500+ subscribers instead of 10,000+.

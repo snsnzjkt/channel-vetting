@@ -5,7 +5,8 @@ This is a deliberate exception to the project's "flag, never discard" rule
 (see CLAUDE.md > Qualification). After the 2026-08 criteria change it holds
 every hard requirement:
 
-  - Below the niche's average-view floor (10,000 for both niches). This
+  - Below the niche's average-view floor (5,000 for both niches since
+    2026-09-01, lowered from 10,000; env-tunable via MIN_AVG_VIEWS). This
     used to be a "Below View Minimum" row for a human to dismiss; it is now
     a discard, which is what retired that Qualification value.
   - Fewer than MIN_VIDEO_COUNT (30) public videos — not enough of a
@@ -387,7 +388,10 @@ def test_drops_a_channel_when_too_much_of_the_sample_is_weak():
 def test_the_thirty_percent_boundary_is_kept():
     from channel_vetting.pipeline import MIN_VIEWS_PER_VIDEO, MIN_VIEWS_PER_VIDEO_RATIO
 
-    assert MIN_VIEWS_PER_VIDEO == 10_000
+    # LOWERED 10,000 -> 5,000 on 2026-09-01, together with MIN_AVG_VIEWS.
+    # See test_the_two_view_floors_move_together for why "together" is the
+    # part that matters.
+    assert MIN_VIEWS_PER_VIDEO == 5_000
     # LOWERED 0.50 -> 0.30 on 2026-08-21 at the operator's direction; the
     # pipeline was returning too few rows and sometimes none for Home Theater.
     assert MIN_VIEWS_PER_VIDEO_RATIO == 0.30
@@ -403,8 +407,35 @@ def test_the_thirty_percent_boundary_is_kept():
 
 
 def test_a_video_exactly_at_the_floor_counts_as_clearing_it():
-    """The comparison is >=, so a video on exactly 10,000 is not a failure."""
-    assert drop_reason(settled_views=[10_000] * 10) is None
+    """The comparison is >=, so a video on exactly the floor is not a failure."""
+    from channel_vetting.pipeline import MIN_VIEWS_PER_VIDEO
+
+    # Reads the constant rather than a literal: this asserts the BOUNDARY rule,
+    # and hardcoding 10,000 made it silently stop testing the boundary the
+    # moment the floor moved on 2026-09-01.
+    assert drop_reason(settled_views=[MIN_VIEWS_PER_VIDEO] * 10) is None
+    assert drop_reason(settled_views=[MIN_VIEWS_PER_VIDEO - 1] * 10) == "video_below_view_minimum"
+
+
+def test_the_two_view_floors_move_together():
+    """
+    The average floor and the per-video floor must stay equal.
+
+    pre_push_drop_reason checks below_view_minimum BEFORE
+    video_below_view_minimum, so a per-video floor left ABOVE the average floor
+    silently re-drops every channel the lower average bar just admitted, one
+    gate later and under a different reason string. That is exactly the trap
+    the 2026-09-01 change had to avoid, and nothing else in the suite catches
+    it: every other test here passes min_avg_views in explicitly.
+    """
+    from channel_vetting.pipeline import MIN_VIEWS_PER_VIDEO, NICHES
+
+    for niche, config in NICHES.items():
+        assert config["min_avg_views"] == MIN_VIEWS_PER_VIDEO, (
+            f"{niche} average floor {config['min_avg_views']} != per-video floor "
+            f"{MIN_VIEWS_PER_VIDEO}; channels admitted by the average bar will be "
+            "dropped as video_below_view_minimum instead"
+        )
 
 
 def test_the_per_video_floor_still_catches_a_shorts_inflated_channel():

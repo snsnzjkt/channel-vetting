@@ -400,8 +400,34 @@ INFLUENCERS_DISCOVERY_PATH = "/public/v1/discovery/"
 # backlog sweep; do not raise it to make a low-yield day fill its cap — that is
 # the pre-2026-08-14 mistake, and the yield problem is upstream (see the
 # per-video view floor in pipeline.py).
+#
+# LOWERED AGAIN from 6 to 2 (2026-09-02), and this time it is NOT a runaway
+# guard — it is the primary fair-use brake, so read the next paragraph before
+# raising it.
+#
+# The vendor emailed on 2026-09-01: 5,042 of 5,000 HANDLES used this billing
+# period. That is a second meter, separate from the credit balance this file
+# already tracks, and nothing here was counting it. At 0.01 credits per creator
+# RETURNED, 6 credits is 600 handles a run, and 22 weekday runs is ~13,200 —
+# roughly 2.6x the allowance, which is how we walked past it without a single
+# local ceiling firing.
+#
+# 2 credits is 200 handles a run, so 22 weekday runs is ~4,400 — under the 5,000
+# allowance EVEN IF THE LEDGER NEVER PERSISTS. That last clause is the whole
+# point of fixing this here rather than only in credit_tracker: this ceiling
+# lives on the client instance, so it cannot fail open, while the period cap in
+# the ledger rides on a GitHub Actions cache that the workflow itself documents
+# as best-effort (see the "no correctness backstop" comment in
+# .github/workflows/channel-vetting.yml). Belt here, braces there.
+#
+# The cost is real and was accepted deliberately: Lifestyle Sofa drops from ~600
+# bought creators a run to ~200. It is `discovery_source: "both"`, so the free
+# YouTube keyword loop still tops up the same headroom afterwards — but a thinner
+# day on that niche is the expected trade for staying on standard billing.
+# Raising this back toward 6 means asking the vendor to raise the handle
+# allowance FIRST; the two numbers are now coupled.
 INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN = float(
-    os.getenv("INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN", 6)
+    os.getenv("INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN", 2)
 )
 
 # --test is a smoke test, so give it its own much tighter discovery ceiling.
@@ -479,6 +505,65 @@ INFLUENCERS_MAX_CREDITS_PER_DAY = float(
 INFLUENCERS_MAX_CREDITS_PER_MONTH = float(
     os.getenv("INFLUENCERS_MAX_CREDITS_PER_MONTH", 200)
 )
+
+# --- The DISCOVERY HANDLE allowance: the vendor's fair-use meter itself ------
+#
+# The limit above is denominated in CREDITS, which is the money meter. The
+# vendor's 2026-09-01 email revealed a SECOND meter denominated in HANDLES —
+# "5042 of 5000 handles" — that is metered per Discovery API call and that no
+# credit figure makes visible. The two are not interchangeable: email
+# enrichment burns credits and consumes NO handles, so a credit ceiling loose
+# enough for email is always too loose for handles.
+#
+# One handle == one creator the vendor RETURNED, which is exactly the thing it
+# bills 0.01 for and exactly what `InfluencerDiscovery._creators_billed`
+# already counted per run and then threw away at process exit. We now persist
+# it, because a per-run counter can never see a billing period.
+#
+# 4,500 not 5,000, for three reasons worth keeping:
+#   1. The vendor was already 42 over when it wrote, so its count and ours have
+#      drifted at least that far and the direction of the drift is unknown.
+#   2. Discovery fails SOFT everywhere, so a page bought at 4,999 is charged
+#      and then possibly discarded; the headroom absorbs that.
+#   3. The measurement scripts (`probe()`) spend from the same meter, off the
+#      normal schedule, and are the exact class of spend that surprises a cap.
+INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD = int(
+    os.getenv("INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", 4500)
+)
+
+# ROLLING window, deliberately, rather than the calendar month the credit
+# ceiling uses.
+#
+# credit_tracker's own docstring records that the fair-use cap "resets only at
+# subscription renewal", and the API exposes neither that date nor the handle
+# balance. So a calendar-month counter can be fully reset while the vendor's
+# period is only half over — the classic misalignment, and it would let us
+# spend a second full allowance inside one real period.
+#
+# Enforcing "no more than N in any trailing W days" needs no renewal date at
+# all: if W is at least as long as the longest possible billing period, no
+# billing period can contain more than N. 31 covers a calendar month. Shorten
+# this only if the vendor confirms a shorter period.
+#
+# Cheap to compute and needs no new storage: credit_tracker already keeps
+# DAILY_RETENTION_DAYS (62) days of per-day detail, comfortably more than 31.
+INFLUENCERS_HANDLE_PERIOD_DAYS = int(
+    os.getenv("INFLUENCERS_HANDLE_PERIOD_DAYS", 31)
+)
+
+# The renewal date, ONCE THE VENDOR TELLS US WHAT IT IS. Empty means "unknown",
+# which is the state this was written in, and the rolling window above handles.
+#
+# Set this (YYYY-MM-DD, the day the current fair-use period began) and the
+# handle count is taken from that date forward instead of from a trailing
+# window. That is strictly more accurate and strictly less conservative: a
+# rolling window keeps charging us for spend the vendor has already forgiven at
+# renewal, so it can hold discovery dark for up to 31 days after a reset that
+# actually freed the whole allowance.
+#
+# Worth asking for. It is one line in a reply to info@influencers.club and it
+# converts a blunt safe default into an exact one.
+INFLUENCERS_HANDLE_PERIOD_START = os.getenv("INFLUENCERS_HANDLE_PERIOD_START", "")
 
 
 # --- Gemini relevance verification (FREE TIER ONLY) -----------------------

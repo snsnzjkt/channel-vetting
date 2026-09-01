@@ -82,6 +82,14 @@ def isolate_credit_ledger(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_DAY", float("inf"))
     monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_CREDITS_PER_MONTH", float("inf"))
+    # The handle allowance is lifted for the same reason as the two above, and
+    # it bites harder than either: the production default (4,500) is only 90
+    # pages, so a pagination test that walks a long result set would start
+    # failing as a "pagination bug" in a module that never mentions handles.
+    # Tests that want the real cap opt in by patching this name themselves.
+    monkeypatch.setattr(
+        credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", 10**9
+    )
 
 
 @pytest.fixture(autouse=True)

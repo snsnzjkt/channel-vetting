@@ -70,6 +70,7 @@ from channel_vetting.config import (
 from channel_vetting.budget.credit_tracker import (
     KIND_DISCOVERY,
     can_afford,
+    can_afford_handles,
     record_spend,
     record_vendor_balance,
 )
@@ -156,8 +157,20 @@ class InfluencerDiscovery:
         the niche got NO discovery at all: worse than either the overshoot or the
         clean stop.
         """
-        return self._active and (
-            self._credits_spent + page_cost_credits() <= self._max_credits
+        # The handle allowance is checked here as well as inside discover()'s
+        # loop, and the placement is deliberate. run_niche reads this property
+        # as `use_discovery`; when it is False for a discovery_source="both"
+        # niche the free YouTube keyword loop keeps its full keyword list and
+        # simply fills the headroom instead (pipeline.py). So an exhausted
+        # allowance degrades to "the free source does the whole job" rather
+        # than to a niche that quietly produces nothing.
+        #
+        # Costs one ledger read per call, and this is called once per niche and
+        # once at the top of discover() — not per page.
+        return (
+            self._active
+            and self._credits_spent + page_cost_credits() <= self._max_credits
+            and can_afford_handles(PAGE_LIMIT, "discovery")
         )
 
     @property
@@ -262,6 +275,18 @@ class InfluencerDiscovery:
                 self._active = False
                 break
 
+            # The vendor's OTHER meter. Checked separately from can_afford
+            # because handles are not credits: an account can sit well inside
+            # every credit ceiling and still be over its fair-use handle
+            # allowance, which is exactly the state the 2026-09-01 email
+            # reported. Projects a FULL page (PAGE_LIMIT) rather than the
+            # short page this might turn out to be — same reasoning as
+            # page_cost_credits above, since the ceiling has to hold against
+            # the worst case, not the typical one.
+            if not can_afford_handles(PAGE_LIMIT, source_label):
+                self._active = False
+                break
+
             payload = {
                 "platform": platform,
                 "paging": {"limit": PAGE_LIMIT, "page": page},
@@ -279,7 +304,16 @@ class InfluencerDiscovery:
             # Persisted at the same moment and for the same reason. A failed
             # write stops discovery: continuing would authorise every later page
             # against a total the ledger no longer reflects.
-            if not record_spend(cost, kind=KIND_DISCOVERY, detail=source_label):
+            #
+            # `handles` is len(accounts), NOT a figure derived from `cost`. The
+            # two agree at the observed 0.01/creator rate, but the handle meter
+            # is the vendor's and the rate is our measurement — if the rate ever
+            # changes, a derived count would drift silently against the exact
+            # limit it is meant to defend.
+            if not record_spend(
+                cost, kind=KIND_DISCOVERY, detail=source_label,
+                handles=len(accounts),
+            ):
                 self._active = False
             if credits_left is not None:
                 self._credits_left_reported = credits_left
@@ -354,7 +388,16 @@ class InfluencerDiscovery:
         dedupe, and does NOT convert to candidates: it is for measuring, and
         the raw account dicts are what a precision read needs.
         """
-        if not self.enabled:
+        # `_active`, NOT `enabled`. `enabled` answers "can this client buy a
+        # whole PAGE?" — it projects PAGE_LIMIT creators and a full page's
+        # credits. A probe buys `limit` creators, often 1-3, so gating it on the
+        # page-sized projection refuses cheap probes whenever fewer than 50
+        # handles remain: the last 49 handles of an allowance became unusable
+        # for measurement even though a limit=1 probe fits in them comfortably.
+        # `_active` is the part that actually means "this client is still
+        # alive"; the exact pricing follows immediately below and is what
+        # enforces both ceilings for this call.
+        if not self._active:
             return None, None
         # The vendor bills per creator RETURNED, so a limit=N request costs at
         # most N * 0.01 — much cheaper than discover()'s whole-page projection,
@@ -370,6 +413,13 @@ class InfluencerDiscovery:
         if not can_afford(cost_estimate, source_label):
             self._active = False
             return None, None
+        # Probes spend from the fair-use meter exactly like a real page does,
+        # and they run off the normal schedule — a variant sweep is precisely
+        # the unplanned spend a period cap is for. `limit` is the worst case
+        # here, not PAGE_LIMIT, since probe() asks for a short page on purpose.
+        if not can_afford_handles(limit, source_label):
+            self._active = False
+            return None, None
 
         resp = self._post({
             "platform": "youtube",
@@ -382,7 +432,9 @@ class InfluencerDiscovery:
 
         accounts, total, cost, credits_left = self._parse(resp)
         self._credits_spent += cost
-        if not record_spend(cost, kind=KIND_DISCOVERY, detail=source_label):
+        if not record_spend(
+            cost, kind=KIND_DISCOVERY, detail=source_label, handles=len(accounts),
+        ):
             self._active = False
         if credits_left is not None:
             self._credits_left_reported = credits_left

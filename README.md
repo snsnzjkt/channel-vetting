@@ -308,7 +308,10 @@ table IDs from step 1.7), and `YOUTUBE_API_KEY`. Everything else in
 | `INFLUENCERS_API_KEY` | _(unset)_ | Enables influencers.club **discovery** (replacing `search.list`) and email chain **step 4** (enrich-by-handle). Unset means both are skipped and discovery falls back to `search.list` — the pipeline runs fine without it |
 | `INFLUENCERS_BASE_URL` | `https://api-dashboard.influencers.club` | API host override |
 | `INFLUENCERS_MAX_LOOKUPS_PER_RUN` | 100 | Hard cap on step-4 email lookups per run, bounding credit spend. Only channels the free steps missed consume one, and a lookup that finds no address is not billed |
-| `INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN` | 6 | Per-run credit ceiling for discovery (0.01 credits per creator returned). A runaway guard, not a normal-use limit |
+| `INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN` | 2 | Per-run credit ceiling for discovery (0.01 credits per creator returned) = 200 handles a run. Lowered from 6 on 2026-09-02: this is now the PRIMARY fair-use brake, not a runaway guard, because it lives on the client instance and so holds even when the credit ledger's Actions cache is evicted |
+| `INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD` | 4500 | The vendor's **fair-use handle meter**, which is separate from credits — one handle is one creator the Discovery API returned, and email enrichment consumes none. Counted across runs in `credit_log.json`. Set to `0` to pause paid discovery entirely |
+| `INFLUENCERS_HANDLE_PERIOD_DAYS` | 31 | Trailing window the handle allowance is counted over. Long enough to cover any calendar month, so no billing period can contain more than the allowance whatever date it renews on |
+| `INFLUENCERS_HANDLE_PERIOD_START` | _(unset)_ | The real renewal date (`YYYY-MM-DD`), once the vendor tells us. Counts from that date instead of the trailing window — more accurate and less conservative. An unparseable or future date falls back to the window rather than widening the cap |
 | `GEMINI_ENABLED` | `false` | Master switch for relevance verification. Only the literal `true` enables it |
 | `GEMINI_FREE_ONLY` | `true` | Enforces the hardcoded free-tier model allowlist. Only the literal `false` disables it |
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Must be in `GEMINI_FREE_TIER_MODELS`; anything else switches verification off for the run with a loud error |

@@ -21,6 +21,19 @@ bodyless 429 that no retry clears) could be walked into blind.
 3. `INFLUENCERS_MAX_CREDITS_PER_DAY` — paces a single day and stops a second run
    quietly doubling the spend.
 
+**And a fourth limit on a DIFFERENT meter entirely.**
+`INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD` counts HANDLES — creators the
+discovery endpoint returned — over a rolling `INFLUENCERS_HANDLE_PERIOD_DAYS`
+window. It is not a credit figure and does not convert to one: email enrichment
+spends credits and zero handles, so no credit ceiling can bound it. Added
+2026-09-02 after the vendor mailed to say we had used 5,042 of 5,000 handles in
+a period during which every credit ceiling above was reading comfortably green.
+
+The window is ROLLING because the fair-use period resets at subscription
+renewal, a date the API does not expose — see the config comment. A trailing
+window at least as long as the longest possible billing period bounds every
+billing period inside it without needing to know where the boundary falls.
+
 **The clock.** Keyed on `prospect_day.today_iso()` — NOT a new fourth clock, and
 not the Pacific quota day (that tracks Google's reset and has nothing to do with
 a vendor invoice). Credits buy rows stamped with a prospect day and counted
@@ -44,8 +57,11 @@ from datetime import date, timedelta
 
 from channel_vetting.config import (
     CREDIT_LOG_FILE,
+    INFLUENCERS_HANDLE_PERIOD_DAYS,
+    INFLUENCERS_HANDLE_PERIOD_START,
     INFLUENCERS_MAX_CREDITS_PER_DAY,
     INFLUENCERS_MAX_CREDITS_PER_MONTH,
+    INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD,
 )
 from channel_vetting.core.prospect_day import today_iso
 from channel_vetting.budget.quota_tracker import _replace_with_retry
@@ -211,9 +227,139 @@ def credits_this_month() -> float:
         return 0.0
 
 
-def record_spend(credits: float, *, kind: str, detail: str = "") -> bool:
+def handles_this_period() -> int:
+    """
+    Discovery handles bought in the trailing INFLUENCERS_HANDLE_PERIOD_DAYS.
+
+    0 if the ledger is unreadable — the same shape as `credits_today()`. This is
+    the REPORTING helper and it fails open on purpose; the SPENDING gate is
+    `can_afford_handles()`, which fails closed. Keeping the two apart means a
+    corrupt ledger cannot both hide a total from the run summary and authorise
+    more buying.
+    """
+    try:
+        return _handles_in_window(load_log())
+    except CreditLedgerUnavailable:
+        return 0
+
+
+def _handle_window_start():
+    """
+    The first day that counts toward the handle allowance, or None to count all
+    retained days.
+
+    Two modes, and the fallback direction matters. With
+    INFLUENCERS_HANDLE_PERIOD_START set to the real renewal date we count from
+    it exactly. With it empty — or unparseable, or dated in the future, both of
+    which are typos rather than instructions — we fall back to the trailing
+    window, which over-counts rather than under-counts. A typo in a date should
+    never widen a cap.
+    """
+    try:
+        today = date.fromisoformat(today_iso())
+    except ValueError:
+        return None
+
+    if INFLUENCERS_HANDLE_PERIOD_START:
+        try:
+            anchored = date.fromisoformat(INFLUENCERS_HANDLE_PERIOD_START.strip())
+        except ValueError:
+            logger.warning(
+                "INFLUENCERS_HANDLE_PERIOD_START=%r is not a YYYY-MM-DD date — "
+                "falling back to the %d-day rolling window.",
+                INFLUENCERS_HANDLE_PERIOD_START, INFLUENCERS_HANDLE_PERIOD_DAYS,
+            )
+        else:
+            if anchored <= today:
+                return anchored
+            logger.warning(
+                "INFLUENCERS_HANDLE_PERIOD_START=%s is in the future — falling "
+                "back to the %d-day rolling window.",
+                INFLUENCERS_HANDLE_PERIOD_START, INFLUENCERS_HANDLE_PERIOD_DAYS,
+            )
+
+    return today - timedelta(days=INFLUENCERS_HANDLE_PERIOD_DAYS - 1)
+
+
+def _handles_in_window(log: dict) -> int:
+    """
+    Sum `handles` across every retained day inside the trailing window.
+
+    Days are summed rather than a running counter being kept, because a counter
+    would need to know when the window rolls and a sum does not. Daily detail is
+    pruned at DAILY_RETENTION_DAYS (62), which must stay comfortably above
+    INFLUENCERS_HANDLE_PERIOD_DAYS (31) or this silently starts undercounting —
+    the one coupling between those two numbers.
+
+    An unparseable day key is COUNTED, not skipped: `_prune` deliberately keeps
+    keys it does not understand, and the safe reading of "I cannot tell when this
+    spend happened" is that it might be inside the window.
+    """
+    cutoff = _handle_window_start()
+
+    total = 0
+    for day, entry in log.get("days", {}).items():
+        if cutoff is not None:
+            try:
+                if date.fromisoformat(day) < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass  # undated spend counts against us, see docstring
+        try:
+            total += int(entry.get("handles", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def can_afford_handles(handles: int, what: str = "call") -> bool:
+    """
+    Whether buying `handles` MORE discovery handles stays inside the allowance.
+
+    Projects the cost exactly as `can_afford` does, and for the same reason: the
+    caller must pass what the next call could COST, not ask whether the current
+    total is fine. A discovery page returns up to PAGE_LIMIT (50) creators, so a
+    balance-only check could overshoot by 50 handles per page.
+
+    Fails CLOSED on an unreadable ledger. That is the opposite of
+    `handles_this_period()` and matches `can_afford`: not knowing the balance
+    means not spending.
+    """
+    if handles <= 0:
+        return True
+
+    try:
+        log = load_log()
+    except CreditLedgerUnavailable as exc:
+        logger.error("Skipping %s: credit ledger unreadable (%s).", what, exc)
+        return False
+
+    used = _handles_in_window(log)
+    if used + handles > INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD:
+        logger.warning(
+            "Skipping %s: projected %d discovery handles in the last %d days "
+            "would exceed INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD %d (%d "
+            "already bought). This is the vendor's OWN fair-use meter, not a "
+            "credit ceiling — going past it is what triggered the 2026-09-01 "
+            "over-limit email. Discovery stops here; the free YouTube keyword "
+            "loop still runs for any niche configured discovery_source=both.",
+            what, used + handles, INFLUENCERS_HANDLE_PERIOD_DAYS,
+            INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD, used,
+        )
+        return False
+    return True
+
+
+def record_spend(
+    credits: float, *, kind: str, detail: str = "", handles: int = 0
+) -> bool:
     """
     Add `credits` to today's and this month's totals. True if persisted.
+
+    `handles` is the count of creators the DISCOVERY endpoint returned for this
+    same charge — the vendor's fair-use meter, which does not derive from the
+    credit figure and so has to be passed in alongside it. Email enrichment
+    passes nothing and correctly contributes 0.
 
     Call at the point the VENDOR bills, not where we decide to keep the result —
     the rule `enrichment.email_influencers._record_billable` already follows. Rejecting an address
@@ -225,7 +371,10 @@ def record_spend(credits: float, *, kind: str, detail: str = "") -> bool:
     `must_have` result genuinely costs nothing, and callers should not have to
     branch on that to stay honest.
     """
-    if credits <= 0:
+    # Both meters must be zero to skip. Guarding on `credits <= 0` alone would
+    # drop the handle count of any page the vendor returned but did not charge
+    # for, and an uncounted handle is exactly the leak this meter exists to stop.
+    if credits <= 0 and handles <= 0:
         return True
 
     day = today_iso()
@@ -233,10 +382,15 @@ def record_spend(credits: float, *, kind: str, detail: str = "") -> bool:
     try:
         log = load_log()
         entry = log["days"].setdefault(day, {"total": 0.0, "by_kind": {}})
-        entry["total"] = round(float(entry.get("total", 0.0)) + credits, 4)
-        by_kind = entry.setdefault("by_kind", {})
-        by_kind[kind] = round(float(by_kind.get(kind, 0.0)) + credits, 4)
-        log["months"][month] = round(float(log["months"].get(month, 0.0)) + credits, 4)
+        if credits > 0:
+            entry["total"] = round(float(entry.get("total", 0.0)) + credits, 4)
+            by_kind = entry.setdefault("by_kind", {})
+            by_kind[kind] = round(float(by_kind.get(kind, 0.0)) + credits, 4)
+            log["months"][month] = round(
+                float(log["months"].get(month, 0.0)) + credits, 4
+            )
+        if handles > 0:
+            entry["handles"] = int(entry.get("handles", 0) or 0) + int(handles)
         _save_log(log)
     except (CreditLedgerUnavailable, OSError) as exc:
         logger.error(
@@ -248,9 +402,15 @@ def record_spend(credits: float, *, kind: str, detail: str = "") -> bool:
         return False
 
     logger.info(
-        "Credit spend: +%.3f (%s%s) -> %.3f today, %.3f this month",
+        "Credit spend: +%.3f (%s%s) -> %.3f today, %.3f this month%s",
         credits, kind, f", {detail}" if detail else "",
-        entry["total"], log["months"][month],
+        entry["total"], log["months"].get(month, 0.0),
+        (
+            f"; +{handles} handles -> {_handles_in_window(log)} in the last "
+            f"{INFLUENCERS_HANDLE_PERIOD_DAYS}d of "
+            f"{INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD}"
+            if handles > 0 else ""
+        ),
     )
     return True
 
@@ -359,7 +519,14 @@ def spend_summary() -> str:
         if isinstance(vendor, (int, float)) and not isinstance(vendor, bool)
         else ""
     )
+    # Handles ride in the same line as the credits rather than a line of their
+    # own, because the failure this summary exists to make visible is a run
+    # where one meter looks fine and the other does not — which is precisely
+    # what happened on 2026-09-01, when every credit figure was green.
+    handles = _handles_in_window(log)
     return (
         f"today {today:.2f}/{INFLUENCERS_MAX_CREDITS_PER_DAY:.2f} ({split}); "
-        f"month {month:.2f}/{INFLUENCERS_MAX_CREDITS_PER_MONTH:.2f}{vendor_note}"
+        f"month {month:.2f}/{INFLUENCERS_MAX_CREDITS_PER_MONTH:.2f}; "
+        f"handles {handles}/{INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD} "
+        f"in {INFLUENCERS_HANDLE_PERIOD_DAYS}d{vendor_note}"
     )

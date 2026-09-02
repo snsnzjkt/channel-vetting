@@ -112,11 +112,11 @@ jobs:
       #
       AIRTABLE_TOKEN: ${{ secrets.MYTHUMI_AIRTABLE_TOKEN }}
       AIRTABLE_BASE_ID: ${{ secrets.MYTHUMI_AIRTABLE_BASE_ID }}
-      # The social path's destination. AIRTABLE_TABLE_SOCIAL_CREATORS is the one
-      # that must be set — the pipeline aborts without it rather than guessing.
-      AIRTABLE_TABLE_SOCIAL_CREATORS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_CREATORS }}
-      AIRTABLE_TABLE_SOCIAL_TIKTOK: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_TIKTOK }}
-      AIRTABLE_TABLE_SOCIAL_INSTAGRAM: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_INSTAGRAM }}
+      # The destination: one prospect table per platform. A platform whose table
+      # is unset ABORTS rather than guessing, so a half-configured run produces
+      # nothing instead of writing somewhere unintended.
+      AIRTABLE_TABLE_TIKTOK_PROSPECTS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_TIKTOK_PROSPECTS }}
+      AIRTABLE_TABLE_INSTAGRAM_PROSPECTS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_INSTAGRAM_PROSPECTS }}
 
       # --- SHARED WITH THE VALENCIA RUN, INTENTIONALLY ---
       #
@@ -173,7 +173,8 @@ jobs:
           MYTHUMI_BASE: ${{ secrets.MYTHUMI_AIRTABLE_BASE_ID }}
           VALENCIA_BASE: ${{ secrets.AIRTABLE_BASE_ID }}
           MYTHUMI_TOKEN: ${{ secrets.MYTHUMI_AIRTABLE_TOKEN }}
-          MYTHUMI_TABLE_CREATORS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_CREATORS }}
+          MYTHUMI_TABLE_TIKTOK: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_TIKTOK_PROSPECTS }}
+          MYTHUMI_TABLE_INSTAGRAM: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_INSTAGRAM_PROSPECTS }}
         run: |
           set -euo pipefail
 
@@ -195,8 +196,9 @@ jobs:
           # A base id without a token or tables cannot write anything useful,
           # and failing here is cheaper than failing after discovery has spent.
           missing=""
-          [ -z "$MYTHUMI_TOKEN" ]          && missing="$missing MYTHUMI_AIRTABLE_TOKEN"
-          [ -z "$MYTHUMI_TABLE_CREATORS" ] && missing="$missing MYTHUMI_AIRTABLE_TABLE_CREATORS"
+          [ -z "$MYTHUMI_TOKEN" ]           && missing="$missing MYTHUMI_AIRTABLE_TOKEN"
+          [ -z "$MYTHUMI_TABLE_TIKTOK" ]    && missing="$missing MYTHUMI_AIRTABLE_TABLE_TIKTOK_PROSPECTS"
+          [ -z "$MYTHUMI_TABLE_INSTAGRAM" ] && missing="$missing MYTHUMI_AIRTABLE_TABLE_INSTAGRAM_PROSPECTS"
           if [ -n "$missing" ]; then
             echo "::error::MYTHUMI_AIRTABLE_BASE_ID is set but these are missing:$missing"
             exit 1

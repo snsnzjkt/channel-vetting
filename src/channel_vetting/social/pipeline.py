@@ -75,9 +75,6 @@ class PlatformResult:
     already_tracked: int = 0
     blocked: int = 0
     write_failures: int = 0
-    accounts_written: int = 0
-    account_failures: int = 0
-    accounts_skipped: int = 0
     rejections: dict = field(default_factory=dict)
 
     def note_rejection(self, reason: str) -> None:
@@ -90,16 +87,10 @@ class PlatformResult:
             f"{reason}={count}"
             for reason, count in sorted(self.rejections.items(), key=lambda kv: -kv[1])
         )
-        accounts = f"accounts {self.accounts_written}"
-        if self.account_failures:
-            accounts += f" (+{self.account_failures} failed)"
-        if self.accounts_skipped:
-            accounts += f" (+{self.accounts_skipped} skipped, table not configured)"
         return (
             f"{self.platform}: discovered {self.discovered}, screened {self.screened}, "
-            f"admitted {self.admitted}, {accounts} (already tracked "
-            f"{self.already_tracked}, DNC {self.blocked}, write failures "
-            f"{self.write_failures})"
+            f"admitted {self.admitted} (already tracked {self.already_tracked}, "
+            f"DNC {self.blocked}, write failures {self.write_failures})"
             + (f" | rejected: {top}" if top else "")
         )
 
@@ -129,132 +120,97 @@ def affordable_posts_screens() -> int:
     return per_run_allowance
 
 
-def _social_record(platform, candidate, followers, metrics, country=None) -> dict:
-    """The Creators-table row for an admitted creator."""
-    handle = candidate["handle"]
-    points, out_of = criteria.auto_score(
-        platform, followers=followers, metrics=metrics, country=country
-    )
-    band = criteria.follower_band(int(followers or 0))
-    rate = metrics.engagement_rate(platform, followers) if metrics else None
-    priority = criteria.is_priority(platform, followers=followers, metrics=metrics)
-
-    notes = [
-        f"Auto-screened {out_of and f'{points}/{out_of}' or points} on the automatable "
-        f"rubric components only (the draft's full rubric is "
-        f"{criteria.RUBRIC_MAX}, pass {criteria.RUBRIC_PASS_MARK}).",
-        f"Band {band}." + (" PRIORITY band (micro, >3.5%)." if priority else ""),
-        f"Median views over last {metrics.sample_size} posts: {metrics.median_views}."
-        if metrics else "",
-        f"Engagement {rate:.2%} "
-        f"({'per view' if platform == criteria.PLATFORM_TIKTOK else 'per follower'}), "
-        f"floor {criteria.engagement_floor(platform, followers):.2%}."
-        if rate is not None else "",
-        f"Posts/week {metrics.posts_per_week}, last post {metrics.days_since_last_post}d ago."
-        if metrics else "",
-        "STILL NEEDS A HUMAN: usable subject, photo quality, fake-follower risk"
-        + (", audience age." if platform == criteria.PLATFORM_TIKTOK else "."),
-    ]
-    if metrics and metrics.media_urls:
-        notes.append("Sample media: " + " ".join(metrics.media_urls[:3]))
-
-    return {
-        "Creator Name": candidate.get("channel_title") or handle,
-        "Handle": handle,
-        "Primary Profile URL": profile_url(platform, handle),
-        "Account ID": candidate.get("influencers_user_id") or "",
-        "Primary Platform": "TikTok" if platform == criteria.PLATFORM_TIKTOK else "Instagram",
-        "Outreach Platform": "TikTok" if platform == criteria.PLATFORM_TIKTOK else "Instagram",
-        # NOT "Qualified". The reviewer decides; see the module docstring.
-        "Review Decision": "Pending",
-        "Fit Score": 0,
-        "Date Added": today_iso(),
-        "Notes": "\n".join(n for n in notes if n),
-    }
-
-
-def _account_table_for(platform: str) -> str | None:
-    """The per-platform account table, or None when it is not configured."""
+def prospect_table_for(platform: str) -> str | None:
+    """The platform's prospect table, or None when it is not configured."""
     if platform == criteria.PLATFORM_TIKTOK:
-        return config.AIRTABLE_TABLE_SOCIAL_TIKTOK
+        return config.AIRTABLE_TABLE_TIKTOK_PROSPECTS
     if platform == criteria.PLATFORM_INSTAGRAM:
-        return config.AIRTABLE_TABLE_SOCIAL_INSTAGRAM
+        return config.AIRTABLE_TABLE_INSTAGRAM_PROSPECTS
     return None
 
 
-def _account_record(platform, handle, followers, metrics, creator_record_id) -> dict:
+def _prospect_record(platform, candidate, followers, metrics, lane_key="") -> dict:
     """
-    The account-table row: the measured numbers, in correctly-labelled columns.
+    The prospect row: one per creator, everything a reviewer needs in one place.
 
     TWO COLUMNS FOR REACH, ON PURPOSE. "Median Views (last 10)" is the figure
-    the gates use, per the draft's "judge on the median... not the average".
-    "Avg Views per Video" / "Avg Reel Plays" is the genuine mean. Both are
-    written because they answer different questions and because collapsing them
-    into one column would mean one of the two labels was lying — on a creator
-    with a single viral post they differ by orders of magnitude.
+    the gates used, per the draft's "judge on the median... not the average".
+    "Avg Views per Post" / "Avg Reel Plays" is the genuine mean. Both are
+    written because on a creator with one viral post they differ by orders of
+    magnitude, and collapsing them would make one of the two labels a lie.
 
-    FIELDS DELIBERATELY LEFT BLANK rather than filled with the nearest number to
-    hand:
-      - TikTok "Total Likes" and Instagram "Posts Count" are LIFETIME account
-        totals. Writing this window's sums there would turn a 10-post figure
-        into an account-lifetime claim.
-      - "Verified", "Region", "Language", "Bio", "Account Type", "Following":
-        not in the posts response. A blank cell reads as unknown; a zero or a
-        guess reads as measured.
+    QUALIFICATION IS SET, STATUS IS NOT DECIDED. Qualification records the
+    verdict of the auto-reject rules this pipeline CAN check; Status starts at
+    "New". The two human gates land as "Not checked" rather than blank, so an
+    unreviewed row is visibly unreviewed instead of merely empty — the draft
+    calls photo quality "a gate", and a blank cell in a gate column reads as
+    passed.
+
+    LEFT OUT rather than filled with the nearest number to hand: Email (contact
+    enrichment is deferred until a human approves) and anything the posts
+    response does not carry. A blank cell reads as unknown; a zero reads as
+    measured.
     """
+    handle = candidate["handle"]
     engagement = metrics.engagement_rate(platform, followers)
-    common = {
+    points, _out_of = criteria.auto_score(platform, followers=followers, metrics=metrics)
+    is_tiktok = platform == criteria.PLATFORM_TIKTOK
+    band = criteria.follower_band(int(followers or 0))
+
+    record = {
+        "Creator Name": candidate.get("channel_title") or handle,
         "Handle": handle,
         "Profile URL": profile_url(platform, handle),
+        "Account ID": candidate.get("influencers_user_id") or "",
+        "Qualification": "Qualified",
+        "Status": "New",
+        "Subject Check": "Not checked",
+        "Photo Quality": "Not checked",
         "Followers": int(followers or 0),
-        "Posts per Week": metrics.posts_per_week,
         "Median Views (last 10)": metrics.median_views,
+        "Avg Likes per Post": metrics.avg_likes,
+        "Avg Comments per Post": metrics.avg_comments,
+        "Posts per Week": metrics.posts_per_week,
+        "Days Since Last Post": metrics.days_since_last_post,
         "Posts Sampled": metrics.sample_size,
-        # Always set: the screen ran and was PAID FOR whether or not any post
-        # carried a readable timestamp. Gating this on last_post_at (an earlier
-        # version did) left the column blank on exactly the creators whose data
-        # was thinnest, which is when knowing the screen happened matters most.
-        "Screened At": _iso_minutes(datetime.now(timezone.utc)),
+        "Follower Band": band,
+        "Priority Band": criteria.is_priority(
+            platform, followers=followers, metrics=metrics
+        ),
+        "Auto Score (of 35)": points,
+        "Lane": lane_key or None,
         "Source": "influencers.club discovery",
+        # Always set: the screen ran and was PAID FOR whether or not any post
+        # carried a readable timestamp.
+        "Screened At": _iso_minutes(datetime.now(timezone.utc)),
+        "Date Added": today_iso(),
         "Notes": (
-            f"Auto-screened from the {metrics.sample_size}-post window. "
-            f"Engagement is measured per "
-            f"{'VIEW' if platform == criteria.PLATFORM_TIKTOK else 'FOLLOWER'} on this "
-            f"platform. Median and mean are both recorded and differ on creators "
-            f"with a viral post — the median is the one the gates used."
+            f"Auto-screened over {metrics.sample_size} posts. Engagement measured "
+            f"per {'VIEW' if is_tiktok else 'FOLLOWER'} on this platform, floor "
+            f"{criteria.engagement_floor(platform, followers):.2%} for the {band} "
+            f"band. Median and mean reach are both recorded and diverge on creators "
+            f"with a viral post - the median is the one the gates used.\n"
+            f"STILL NEEDS A HUMAN: subject check, photo quality, fake-follower risk"
+            + (", audience age (no TikTok source)." if is_tiktok else ".")
         ),
     }
     if metrics.last_post_at is not None:
-        common["Last Posted"] = metrics.last_post_at.date().isoformat()
-    # An Airtable link field takes an ARRAY of record ids. A bare string is
-    # accepted by typecast as a NAME to match, which would create a junk
-    # Creators row instead of linking to the one just written.
-    if creator_record_id:
-        common["Creators"] = [creator_record_id]
-
-    if platform == criteria.PLATFORM_TIKTOK:
-        common.update({
-            "Avg Views per Video": metrics.avg_views,
-            "Avg Likes per Video": metrics.avg_likes,
-            "Avg Comments per Video": metrics.avg_comments,
-            "Avg Shares per Video": metrics.avg_shares,
-            "Engagement Rate per View": engagement,
-        })
+        record["Last Posted"] = metrics.last_post_at.date().isoformat()
+    if engagement is not None:
+        key = "Engagement Rate (per view)" if is_tiktok else "Engagement Rate (per follower)"
+        record[key] = engagement
+    if is_tiktok:
+        record["Avg Views per Post"] = metrics.avg_views
+        record["Avg Shares per Post"] = metrics.avg_shares
     else:
-        common.update({
-            # Instagram's "views" ARE Reel plays — the platform reports plays for
-            # Reels and nothing for static posts, which is also why the median
-            # drops unmeasured posts instead of scoring them zero.
-            "Avg Reel Plays": metrics.avg_views,
-            "Avg Likes per Post": metrics.avg_likes,
-            "Avg Comments per Post": metrics.avg_comments,
-            "Engagement Rate per Follower": engagement,
-        })
+        # Instagram's views ARE Reel plays; static posts report none, which is
+        # also why the median drops unmeasured posts instead of scoring zero.
+        record["Avg Reel Plays"] = metrics.avg_views
+    if metrics.media_urls:
+        record["Sample Media"] = "\n".join(metrics.media_urls)
 
-    # Airtable rejects a null in a number field on some configurations, and a
-    # None in a percent field is meaningless either way. Drop unset keys so a
-    # blank cell means "not measured" rather than zero.
-    return {k: v for k, v in common.items() if v is not None}
+    return {k: v for k, v in record.items() if v is not None}
+
 
 
 def _create_row(table_name: str, fields: dict) -> str | None:
@@ -309,9 +265,12 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
     result = PlatformResult(platform=platform)
     target = target or config.SOCIAL_TARGET_PER_PLATFORM
 
-    creators_table = config.AIRTABLE_TABLE_SOCIAL_CREATORS
-    if not creators_table:
-        result.aborted = "AIRTABLE_TABLE_SOCIAL_CREATORS is not configured"
+    table = prospect_table_for(platform)
+    if not table:
+        env = ("AIRTABLE_TABLE_TIKTOK_PROSPECTS"
+               if platform == criteria.PLATFORM_TIKTOK
+               else "AIRTABLE_TABLE_INSTAGRAM_PROSPECTS")
+        result.aborted = f"{env} is not configured"
         return result
 
     # THE QUALITY FLOOR, checked before a single credit is spent.
@@ -326,8 +285,31 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
         logger.error("%s", result.summary())
         return result
 
+    # THE DAILY ROW CAP, same logic and the same env knob as the YouTube niches:
+    # counted from the destination table's own "Date Added", so a second run the
+    # same day tops up to the cap instead of doubling it. Reusing
+    # DAILY_QUALIFIED_CAP rather than inventing a social-specific one keeps one
+    # number to tune, and it is a THROUGHPUT knob only — a row admitted at the
+    # cap is one that would have been admitted earlier in the day.
     try:
-        tracked = get_tracked_handles(creators_table)
+        already_today = airtable.count_added_today(table, "Qualified")
+    except Exception as exc:
+        # A cap we cannot read must not be assumed empty — that is how a run
+        # spends a full day's budget twice.
+        result.aborted = f"could not read today's row count for {table}: {exc}"
+        return result
+    headroom = max(config.DAILY_QUALIFIED_CAP - already_today, 0)
+    if headroom <= 0:
+        result.aborted = (
+            f"daily cap reached: {already_today}/{config.DAILY_QUALIFIED_CAP} rows "
+            f"already added to {table} today"
+        )
+        logger.info("%s", result.summary())
+        return result
+    target = min(target, headroom)
+
+    try:
+        tracked = get_tracked_handles(table)
     except Exception as exc:
         result.aborted = f"could not read tracked handles: {exc}"
         return result
@@ -389,37 +371,13 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
                 result.admitted += 1
                 continue
 
-            creator_id = _create_row(
-                creators_table, _social_record(platform, candidate, followers, metrics)
-            )
-            if creator_id is None:
+            if _create_row(
+                table, _prospect_record(platform, candidate, followers, metrics,
+                                        lane.get("key", ""))
+            ) is None:
                 result.write_failures += 1
-                continue
-            result.admitted += 1
-
-            # THE ACCOUNT ROW IS WRITTEN SECOND, AND ITS FAILURE DOES NOT UNDO
-            # THE CREATOR ROW. Ordering matters the same way the outreach
-            # claim's does: the creator row is the prospect, the account row is
-            # its measurements. A creator row with no account row is a reviewer
-            # reading numbers from Notes — degraded but correct. An account row
-            # with no creator row would be orphaned measurements nobody sees.
-            #
-            # `creator_id == ""` means the row was created but the response was
-            # unreadable, so the account row is written UNLINKED rather than
-            # skipped — the measurements are still worth having, and
-            # _account_record omits the link field when the id is falsy.
-            account_table = _account_table_for(platform)
-            if not account_table:
-                result.accounts_skipped += 1
-                continue
-            account_id = _create_row(
-                account_table,
-                _account_record(platform, handle, followers, metrics, creator_id),
-            )
-            if account_id is None:
-                result.account_failures += 1
             else:
-                result.accounts_written += 1
+                result.admitted += 1
 
     logger.info("%s", result.summary())
     return result

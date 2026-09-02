@@ -192,14 +192,34 @@ def test_stale_account_is_rejected_on_recency():
     )
 
 
-# --- 5. the budget floor -------------------------------------------------
+# --- 5. the budget floor and the daily cap -------------------------------
+
+def _configure(monkeypatch, *, tiktok="TikTok – Prospects", instagram="Instagram – Prospects"):
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_TIKTOK_PROSPECTS", tiktok)
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_INSTAGRAM_PROSPECTS", instagram)
+    monkeypatch.setattr(pipeline.airtable, "count_added_today", lambda *a, **k: 0)
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
+
+
+def _one_candidate(handle="corgi.daily", followers=50_000):
+    return lambda platform, *, lane, target, exclude_handles, client: (
+        [{"handle": handle, "channel_title": "Corgi Daily",
+          "influencers_user_id": "u1", "vendor_followers": followers}]
+        if lane["priority"] == 1 else []
+    )
+
+
+def _healthy_metrics(*a, **k):
+    return posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
+
 
 def test_platform_aborts_rather_than_screening_too_few(monkeypatch):
     """
     THE QUALITY FLOOR. Under-funding must abort, not quietly admit creators
     judged on follower count alone — a reviewer cannot tell those apart.
     """
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
+    _configure(monkeypatch)
     monkeypatch.setattr(config, "SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 0.06)  # 2 screens
     monkeypatch.setattr(config, "SOCIAL_MIN_POSTS_SCREENS_PER_RUN", 10)
 
@@ -207,91 +227,219 @@ def test_platform_aborts_rather_than_screening_too_few(monkeypatch):
 
     assert result.aborted
     assert "below the SOCIAL_MIN_POSTS_SCREENS_PER_RUN floor" in result.aborted
-    assert result.screened == 0
-    assert result.admitted == 0
-    # And nothing was bought on the way to finding out.
-    assert credit_tracker.credits_today() == 0
+    assert result.screened == 0 and result.admitted == 0
+    assert credit_tracker.credits_today() == 0, "nothing bought on the way to finding out"
 
 
 def test_missing_destination_table_aborts_before_spending(monkeypatch):
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", None)
-    result = pipeline.run_platform("instagram")
-    assert "AIRTABLE_TABLE_SOCIAL_CREATORS" in result.aborted
+    _configure(monkeypatch, tiktok=None)
+    result = pipeline.run_platform("tiktok")
+    assert "AIRTABLE_TABLE_TIKTOK_PROSPECTS" in result.aborted
     assert credit_tracker.credits_today() == 0
 
 
-# --- 6. end to end, with the network mocked out --------------------------
+def test_daily_cap_is_counted_from_the_destination_table(monkeypatch):
+    """Same knob and same accounting as the YouTube niches."""
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "DAILY_QUALIFIED_CAP", 5)
+    monkeypatch.setattr(pipeline.airtable, "count_added_today", lambda *a, **k: 5)
 
-def test_run_platform_admits_screened_creators_and_charges_the_shared_ledger(monkeypatch):
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
+    result = pipeline.run_platform("tiktok")
+
+    assert "daily cap reached: 5/5" in result.aborted
+    assert credit_tracker.credits_today() == 0
+
+
+def test_unreadable_cap_aborts_rather_than_assuming_empty(monkeypatch):
+    """A cap we cannot read must never be assumed empty."""
+    _configure(monkeypatch)
+
+    def boom(*a, **k):
+        raise RuntimeError("airtable down")
+
+    monkeypatch.setattr(pipeline.airtable, "count_added_today", boom)
+    result = pipeline.run_platform("tiktok")
+    assert "could not read today's row count" in result.aborted
+    assert credit_tracker.credits_today() == 0
+
+
+def test_cap_headroom_limits_the_target(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "DAILY_QUALIFIED_CAP", 60)
+    monkeypatch.setattr(pipeline.airtable, "count_added_today", lambda *a, **k: 59)
+    monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate())
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+    writes = []
+    monkeypatch.setattr(pipeline, "_create_row",
+                        lambda table, fields: writes.append((table, fields)) or "recX")
+
+    result = pipeline.run_platform("tiktok", target=10)
+
+    assert result.admitted == 1, "one row of headroom left, so one row admitted"
+
+
+# --- 6. the prospect row -------------------------------------------------
+
+def test_prospect_row_records_median_and_mean_in_separate_columns():
+    """
+    Both, never one. On a creator with a viral post they differ by orders of
+    magnitude, so collapsing them would make one column label a lie — and the
+    median is the figure the gates actually used.
+    """
+    flat = [_post(d, views=10_000) for d in range(2, 20, 2)]
+    metrics = posts.metrics_from_items(flat[:-1] + [_post(0, views=5_000_000)], now=NOW)
+    candidate = {"handle": "corgi.daily", "channel_title": "Corgi Daily"}
+
+    row = pipeline._prospect_record("tiktok", candidate, 50_000, metrics, "pet_breed")
+
+    assert row["Median Views (last 10)"] == 10_000
+    assert row["Avg Views per Post"] > 500_000
+    assert row["Posts Sampled"] == metrics.sample_size
+    assert row["Lane"] == "pet_breed"
+
+
+def test_prospect_row_uses_each_platforms_own_engagement_column():
+    metrics = _healthy_metrics()
+    candidate = {"handle": "h", "channel_title": "H"}
+
+    tiktok = pipeline._prospect_record("tiktok", candidate, 50_000, metrics)
+    instagram = pipeline._prospect_record("instagram", candidate, 50_000, metrics)
+
+    assert "Engagement Rate (per view)" in tiktok
+    assert "Engagement Rate (per follower)" not in tiktok
+    assert "Engagement Rate (per follower)" in instagram
+    assert "Engagement Rate (per view)" not in instagram
+    assert (tiktok["Engagement Rate (per view)"]
+            != instagram["Engagement Rate (per follower)"])
+    # Instagram's views are Reel plays, and it has no shares column.
+    assert "Avg Reel Plays" in instagram and "Avg Shares per Post" not in instagram
+    assert "Avg Views per Post" in tiktok and "Avg Shares per Post" in tiktok
+
+
+def test_prospect_row_marks_the_human_gates_as_unchecked_not_blank():
+    """
+    A blank cell in a GATE column reads as passed. The draft calls photo
+    quality "a gate", so an unreviewed row must look unreviewed.
+    """
+    row = pipeline._prospect_record(
+        "tiktok", {"handle": "h", "channel_title": "H"}, 50_000, _healthy_metrics()
+    )
+    assert row["Subject Check"] == "Not checked"
+    assert row["Photo Quality"] == "Not checked"
+    assert row["Status"] == "New"
+    assert "STILL NEEDS A HUMAN" in row["Notes"]
+
+
+def test_prospect_row_leaves_email_and_unmeasured_fields_out():
+    """
+    Contact enrichment is 0.2 credits and deferred until a human approves. A
+    blank cell reads as unknown; a zero reads as measured.
+    """
+    metrics = posts.PostMetrics(
+        measured=True, sample_size=4, median_views=9_000, total_views=36_000,
+        views_sample_size=4, total_likes=200, total_comments=20, total_shares=10,
+        total_interactions=230,
+    )
+    row = pipeline._prospect_record("tiktok", {"handle": "h", "channel_title": "H"},
+                                    20_000, metrics)
+    assert "Email" not in row
+    assert "Last Posted" not in row      # genuinely unknown
+    assert "Posts per Week" not in row   # genuinely unknown
+    assert "Screened At" in row, "the screen ran and was paid for regardless"
+
+
+def test_auto_score_column_is_labelled_out_of_35_not_100():
+    row = pipeline._prospect_record(
+        "tiktok", {"handle": "h", "channel_title": "H"}, 50_000, _healthy_metrics()
+    )
+    assert "Auto Score (of 35)" in row
+    assert row["Auto Score (of 35)"] <= criteria.AUTO_SCORE_MAX == 35
+
+
+# --- 7. end to end, with the network mocked out --------------------------
+
+def test_run_platform_writes_one_prospect_row_per_creator(monkeypatch):
+    _configure(monkeypatch)
     monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 2)
-    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
-    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
-
     candidates = [
         {"handle": "goodpet", "channel_title": "Good Pet", "influencers_user_id": "u1",
-         "vendor_followers": 50_000, "matched_keywords": ["lane"]},
+         "vendor_followers": 50_000},
         {"handle": "tinypet", "channel_title": "Tiny Pet", "influencers_user_id": "u2",
-         "vendor_followers": 40, "matched_keywords": ["lane"]},
+         "vendor_followers": 40},
     ]
-    calls = {"discover": 0, "posts": 0, "writes": []}
+    calls = {"n": 0, "posts": 0}
 
     def fake_discover(platform, *, lane, target, exclude_handles, client):
-        calls["discover"] += 1
-        return candidates if calls["discover"] == 1 else []
+        calls["n"] += 1
+        return candidates if calls["n"] == 1 else []
 
-    def fake_fetch_metrics(platform, handle, **kw):
+    def fake_metrics(platform, handle, **kw):
         calls["posts"] += 1
         credit_tracker.record_spend(
             config.SOCIAL_POSTS_CREDITS_PER_REQUEST,
             kind=credit_tracker.KIND_DISCOVERY, detail="test posts",
         )
-        return posts.metrics_from_items([_post(d) for d in range(0, 21, 2)], now=NOW)
+        return _healthy_metrics()
 
+    writes = []
     monkeypatch.setattr(pipeline.discovery, "discover", fake_discover)
-    monkeypatch.setattr(pipeline.posts, "fetch_metrics", fake_fetch_metrics)
-    monkeypatch.setattr(
-        pipeline, "_create_row",
-        lambda table, fields: calls["writes"].append(fields) or True,
-    )
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", fake_metrics)
+    monkeypatch.setattr(pipeline, "_create_row",
+                        lambda table, fields: writes.append((table, fields)) or "recX")
 
     result = pipeline.run_platform("tiktok")
 
     assert result.admitted == 1
     assert result.rejections.get(criteria.REASON_FOLLOWERS) == 1
-    written = calls["writes"][0]
-    assert written["Handle"] == "goodpet"
-    assert written["Primary Platform"] == "TikTok"
-    # Never pre-approved: four auto-reject rules have no purchasable answer.
-    assert written["Review Decision"] == "Pending"
-    assert "STILL NEEDS A HUMAN" in written["Notes"]
-    # The shared ledger recorded the screens, so the daily/monthly ceilings see them.
+    assert len(writes) == 1, "one row per creator, not two"
+    table, fields = writes[0]
+    assert table == "TikTok – Prospects"
+    assert fields["Handle"] == "goodpet"
+    assert fields["Qualification"] == "Qualified"
+    # The shared ledger recorded the screens, so the daily/monthly caps see them.
     assert credit_tracker.credits_today() == pytest.approx(
         calls["posts"] * config.SOCIAL_POSTS_CREDITS_PER_REQUEST
     )
 
 
+def test_instagram_rows_go_to_the_instagram_table(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate())
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+    writes = []
+    monkeypatch.setattr(pipeline, "_create_row",
+                        lambda table, fields: writes.append((table, fields)) or "recX")
+
+    pipeline.run_platform("instagram")
+
+    assert writes[0][0] == "Instagram – Prospects"
+    assert "Engagement Rate (per follower)" in writes[0][1]
+
+
+def test_write_failure_is_counted_not_admitted(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate())
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+    monkeypatch.setattr(pipeline, "_create_row", lambda table, fields: None)
+
+    result = pipeline.run_platform("tiktok")
+
+    assert result.admitted == 0
+    assert result.write_failures == 1
+
+
 def test_do_not_contact_blocks_before_any_screen_is_bought(monkeypatch):
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
-    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    _configure(monkeypatch)
 
     class Blocked:
         def match(self, handle="", email="", name=""):
             return "handle @blockedpet" if handle == "blockedpet" else ""
 
     monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: Blocked())
-    monkeypatch.setattr(
-        pipeline.discovery, "discover",
-        lambda platform, *, lane, target, exclude_handles, client: (
-            [{"handle": "blockedpet", "channel_title": "B", "vendor_followers": 50_000}]
-            if lane["priority"] == 1 else []
-        ),
-    )
+    monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate("blockedpet"))
     spent = {"posts": 0}
-    monkeypatch.setattr(
-        pipeline.posts, "fetch_metrics",
-        lambda *a, **k: spent.__setitem__("posts", spent["posts"] + 1),
-    )
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics",
+                        lambda *a, **k: spent.__setitem__("posts", spent["posts"] + 1))
 
     result = pipeline.run_platform("tiktok")
 
@@ -300,179 +448,15 @@ def test_do_not_contact_blocks_before_any_screen_is_bought(monkeypatch):
     assert spent["posts"] == 0, "a suppressed creator must not cost a screen"
 
 
-# --- 7. the account tables ----------------------------------------------
-
-def test_account_row_records_median_and_mean_in_separate_columns():
-    """
-    Both, never one. On a creator with a viral post they differ by orders of
-    magnitude, so collapsing them would make one column label a lie — and the
-    median is the figure the gates actually used.
-    """
-    flat = [_post(d, views=10_000) for d in range(2, 20, 2)]
-    viral = flat[:-1] + [_post(0, views=5_000_000)]
-    metrics = posts.metrics_from_items(viral, now=NOW)
-
-    row = pipeline._account_record("tiktok", "corgi.daily", 50_000, metrics, "recABC")
-
-    assert row["Median Views (last 10)"] == 10_000
-    assert row["Avg Views per Video"] > 500_000
-    assert row["Median Views (last 10)"] != row["Avg Views per Video"]
-    assert row["Posts Sampled"] == metrics.sample_size
-
-
-def test_account_row_uses_each_platforms_own_engagement_column():
-    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
-
-    tiktok = pipeline._account_record("tiktok", "h", 50_000, metrics, "recA")
-    instagram = pipeline._account_record("instagram", "h", 50_000, metrics, "recA")
-
-    assert "Engagement Rate per View" in tiktok
-    assert "Engagement Rate per Follower" not in tiktok
-    assert "Engagement Rate per Follower" in instagram
-    assert "Engagement Rate per View" not in instagram
-    # Different denominators, so the two rates must not be equal.
-    assert tiktok["Engagement Rate per View"] != instagram["Engagement Rate per Follower"]
-    # Instagram's views are Reel plays, and it has no per-video share column.
-    assert "Avg Reel Plays" in instagram
-    assert "Avg Shares per Video" not in instagram
-
-
-def test_account_link_is_an_array_of_record_ids():
-    """
-    A bare string in a link field is typecast as a NAME to match, which would
-    create a junk Creators row instead of linking to the one just written.
-    """
-    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
-    row = pipeline._account_record("tiktok", "h", 50_000, metrics, "recABC123")
-    assert row["Creators"] == ["recABC123"]
-
-
-def test_account_row_omits_the_link_when_the_creator_id_is_unknown():
-    """Unlinked measurements still beat no measurements."""
-    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
-    row = pipeline._account_record("tiktok", "h", 50_000, metrics, "")
-    assert "Creators" not in row
-
-
-def test_account_row_leaves_lifetime_and_unmeasured_fields_blank():
-    """
-    A blank cell reads as unknown; a zero or a nearest-guess reads as measured.
-    "Total Likes" and "Posts Count" are LIFETIME account figures, and this
-    window is 10 posts.
-    """
-    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
-    tiktok = pipeline._account_record("tiktok", "h", 50_000, metrics, "recA")
-    instagram = pipeline._account_record("instagram", "h", 50_000, metrics, "recA")
-
-    for absent in ("Total Likes", "Verified", "Region", "Language", "Bio"):
-        assert absent not in tiktok
-    for absent in ("Posts Count", "Following", "Account Type", "Verified"):
-        assert absent not in instagram
-
-
-def test_screened_at_is_set_even_when_no_post_carried_a_timestamp():
-    metrics = posts.PostMetrics(
-        measured=True, sample_size=4, median_views=9_000, total_views=36_000,
-        views_sample_size=4, total_likes=200, total_comments=20, total_shares=10,
-        total_interactions=230,
-    )
-    row = pipeline._account_record("tiktok", "h", 20_000, metrics, "recA")
-    assert "Screened At" in row
-    assert "Last Posted" not in row      # genuinely unknown
-    assert "Posts per Week" not in row   # genuinely unknown
-
-
-def test_run_platform_writes_a_creator_row_and_a_linked_account_row(monkeypatch):
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_TIKTOK", "TikTok Accounts")
-    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 1)
-    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
-    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
-    monkeypatch.setattr(
-        pipeline.discovery, "discover",
-        lambda platform, *, lane, target, exclude_handles, client: (
-            [{"handle": "corgi.daily", "channel_title": "Corgi Daily",
-              "influencers_user_id": "u1", "vendor_followers": 50_000}]
-            if lane["priority"] == 1 else []
-        ),
-    )
-    monkeypatch.setattr(
-        pipeline.posts, "fetch_metrics",
-        lambda *a, **k: posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW),
-    )
+def test_dry_run_screens_but_writes_nothing(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate())
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
     writes = []
+    monkeypatch.setattr(pipeline, "_create_row",
+                        lambda table, fields: writes.append(fields) or "recX")
 
-    def fake_create(table, fields):
-        writes.append((table, fields))
-        return "recCREATOR" if table == "Creators" else "recACCOUNT"
-
-    monkeypatch.setattr(pipeline, "_create_row", fake_create)
-
-    result = pipeline.run_platform("tiktok")
+    result = pipeline.run_platform("tiktok", dry_run=True)
 
     assert result.admitted == 1
-    assert result.accounts_written == 1
-    assert [t for t, _ in writes] == ["Creators", "TikTok Accounts"]
-    account_fields = writes[1][1]
-    assert account_fields["Creators"] == ["recCREATOR"], "must link to the row just written"
-    assert account_fields["Handle"] == "corgi.daily"
-
-
-def test_account_write_failure_does_not_undo_the_creator_row(monkeypatch):
-    """
-    A creator row with no account row is degraded but correct — the reviewer
-    reads the numbers from Notes. It must not be counted as a lost prospect.
-    """
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_TIKTOK", "TikTok Accounts")
-    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 1)
-    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
-    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
-    monkeypatch.setattr(
-        pipeline.discovery, "discover",
-        lambda platform, *, lane, target, exclude_handles, client: (
-            [{"handle": "corgi.daily", "channel_title": "C", "vendor_followers": 50_000}]
-            if lane["priority"] == 1 else []
-        ),
-    )
-    monkeypatch.setattr(
-        pipeline.posts, "fetch_metrics",
-        lambda *a, **k: posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW),
-    )
-    monkeypatch.setattr(
-        pipeline, "_create_row",
-        lambda table, fields: "recCREATOR" if table == "Creators" else None,
-    )
-
-    result = pipeline.run_platform("tiktok")
-
-    assert result.admitted == 1
-    assert result.account_failures == 1
-    assert result.accounts_written == 0
-
-
-def test_unconfigured_account_table_is_skipped_not_failed(monkeypatch):
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
-    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_TIKTOK", None)
-    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 1)
-    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
-    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
-    monkeypatch.setattr(
-        pipeline.discovery, "discover",
-        lambda platform, *, lane, target, exclude_handles, client: (
-            [{"handle": "corgi.daily", "channel_title": "C", "vendor_followers": 50_000}]
-            if lane["priority"] == 1 else []
-        ),
-    )
-    monkeypatch.setattr(
-        pipeline.posts, "fetch_metrics",
-        lambda *a, **k: posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW),
-    )
-    monkeypatch.setattr(pipeline, "_create_row", lambda table, fields: "recX")
-
-    result = pipeline.run_platform("tiktok")
-
-    assert result.admitted == 1
-    assert result.accounts_skipped == 1
-    assert result.account_failures == 0
-    assert "table not configured" in result.summary()
+    assert writes == [], "dry run must not write"

@@ -693,15 +693,23 @@ creators judged on followers alone. That degradation is invisible in a review
 queue — an under-screened row looks identical to a screened one — so it fails
 loudly on purpose. Under-spending is treated as a bug, not a saving.
 
-**Two rows per admitted creator.** The prospect lands in the Creators table and
-its measurements in the per-platform account table, linked by record id. Reach
-is recorded **twice, in separate columns**: `Median Views (last 10)` is the
-figure the gates used, and `Avg Views per Video` / `Avg Reel Plays` is the
-genuine mean. On a creator with one viral post those differ by orders of
-magnitude, so collapsing them would make one label a lie. Lifetime fields
-(`Total Likes`, `Posts Count`) and anything the posts response does not carry
-(`Verified`, `Region`, `Bio`) are left **blank** rather than filled with the
-nearest number — a blank cell reads as unknown, a zero reads as measured.
+**One prospect row per creator**, in that platform's own table — `TikTok –
+Prospects` or `Instagram – Prospects`, set via
+`AIRTABLE_TABLE_TIKTOK_PROSPECTS` / `AIRTABLE_TABLE_INSTAGRAM_PROSPECTS`. Same
+shape as the Valencia niche tables, including a `DAILY_QUALIFIED_CAP` counted
+from the table's own "Date Added", so a second run the same day tops up rather
+than doubling.
+
+Reach is recorded **twice, in separate columns**: `Median Views (last 10)` is
+the figure the gates used, and `Avg Views per Post` / `Avg Reel Plays` is the
+genuine mean. On a creator with one viral post they differ by orders of
+magnitude, so collapsing them would make one label a lie. The engagement column
+is named for its denominator on each table — per **view** on TikTok, per
+**follower** on Instagram — because the two numbers are not comparable.
+
+The two human gates are columns, not prose: `Subject Check` and `Photo Quality`
+land as **"Not checked"** rather than blank, because a blank cell in a gate
+column reads as passed.
 
 **Nothing is auto-qualified.** Four of the draft's auto-reject rules have no
 purchasable answer: usable subject, photo quality, fake-follower risk, and

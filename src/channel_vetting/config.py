@@ -1193,10 +1193,11 @@ SOCIAL_LOCATION_VALUES = tuple(
     if v.strip()
 )
 
-# Destination tables for the social path, in whichever base AIRTABLE_BASE_ID
-# points at. Separate from the two YouTube niche tables because the record
-# shape is different — a TikTok creator has no Channel ID, no subscriber count
-# and no long-form catalogue.
-AIRTABLE_TABLE_SOCIAL_CREATORS = os.getenv("AIRTABLE_TABLE_SOCIAL_CREATORS")
-AIRTABLE_TABLE_SOCIAL_TIKTOK = os.getenv("AIRTABLE_TABLE_SOCIAL_TIKTOK")
-AIRTABLE_TABLE_SOCIAL_INSTAGRAM = os.getenv("AIRTABLE_TABLE_SOCIAL_INSTAGRAM")
+
+# The prospect tables the social run writes to — one per platform, mirroring
+# the Valencia niche tables. These SUPERSEDE the Creators + account-table split
+# the first version wrote: the operator asked for a single prospect row per
+# creator, which also matches how the daily row caps count ("Date Added" per
+# table per day) and how the review pages are laid out.
+AIRTABLE_TABLE_TIKTOK_PROSPECTS = os.getenv("AIRTABLE_TABLE_TIKTOK_PROSPECTS")
+AIRTABLE_TABLE_INSTAGRAM_PROSPECTS = os.getenv("AIRTABLE_TABLE_INSTAGRAM_PROSPECTS")

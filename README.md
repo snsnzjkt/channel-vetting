@@ -653,6 +653,74 @@ Setup:
 5. To change the schedule, edit the `cron` line in the workflow file
    (cron is UTC; see https://crontab.guru to build a new expression).
 
+### The Mythumi destination (`mythumi-search`)
+
+`.github/workflows/mythumi-search.yml` runs **the same pipeline** against a
+**different Airtable base**. There is no second copy of any pipeline code and no
+Mythumi-specific Python: the Airtable destination was already env-driven, so the
+workflow simply maps Mythumi secrets onto the `AIRTABLE_*` names `config.py`
+reads. Discovery, filtering, qualification, enrichment, scoring, dedupe, the
+record schema, retries and every cap are shared byte-for-byte.
+
+`mythumi-search` runs **`channel_vetting.social.pipeline`**, which sources
+**TikTok and Instagram** creators — not the YouTube pipeline. What is shared is
+shared as the same code rather than a copy: the credit ledger and every spend
+ceiling, the DO NOT CONTACT screen, the Airtable client, and the discovery
+client's pagination, server-side exclusion and fail-soft behaviour. The social
+path injects a `platform` and a handle normaliser into that shared client
+instead of forking it.
+
+**Cost per creator, from the vendor's published prices:**
+
+| Step | Credits | Used? |
+| --- | --- | --- |
+| Discovery | 0.01 per creator returned | yes |
+| Creator posts (the screen) | 0.03 per creator | yes |
+| Enrich profile (email) | 0.2 | off by default |
+| Enrich analytics | 0.8 | **no** |
+
+Screening a creator is **0.04 credits**. The 0.8 analytics call is deliberately
+unused: the 0.03 posts endpoint returns timestamps plus per-post views, likes,
+comments and shares, which answers every numeric rule in the criteria draft —
+median reach over the last 10 posts, recency, cadence, and engagement computed
+per **view** on TikTok and per **follower** on Instagram. Defaults spend ~1.5
+credits per platform per run.
+
+**The quality floor.** Every gate that separates a real prospect from a follower
+count lives behind the posts call, so `SOCIAL_MIN_POSTS_SCREENS_PER_RUN`
+(default 10) makes an under-funded run **abort the platform** rather than admit
+creators judged on followers alone. That degradation is invisible in a review
+queue — an under-screened row looks identical to a screened one — so it fails
+loudly on purpose. Under-spending is treated as a bug, not a saving.
+
+**Two rows per admitted creator.** The prospect lands in the Creators table and
+its measurements in the per-platform account table, linked by record id. Reach
+is recorded **twice, in separate columns**: `Median Views (last 10)` is the
+figure the gates used, and `Avg Views per Video` / `Avg Reel Plays` is the
+genuine mean. On a creator with one viral post those differ by orders of
+magnitude, so collapsing them would make one label a lie. Lifetime fields
+(`Total Likes`, `Posts Count`) and anything the posts response does not carry
+(`Verified`, `Region`, `Bio`) are left **blank** rather than filled with the
+nearest number — a blank cell reads as unknown, a zero reads as measured.
+
+**Nothing is auto-qualified.** Four of the draft's auto-reject rules have no
+purchasable answer: usable subject, photo quality, fake-follower risk, and
+audience age on TikTok. Every admitted row lands as `Review Decision = Pending`
+with the measured numbers and sample media URLs attached. `auto_score()` returns
+its own maximum (35) alongside its subtotal so it can never be mistaken for the
+draft's rubric out of 100.
+
+Run it manually:
+
+```bash
+python -m channel_vetting.social.pipeline --dry-run
+```
+
+`--dry-run` screens and gates but writes no rows. It still spends, because the
+numbers being calibrated are the ones that have to be bought. Do the draft's own
+first step before trusting it: *"hand-vet 20-30 pet creators against this → then
+automate."*
+
 ## Running the tests
 
 ```bash

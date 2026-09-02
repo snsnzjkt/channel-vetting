@@ -1046,3 +1046,157 @@ GEMINI_STAGE2_MODE = os.getenv("GEMINI_STAGE2_MODE", "transcript")
 # throughout" or "no identifiable host" are precisely what frames answer and text
 # cannot.
 GEMINI_VIDEO_FALLBACK = env_flag("GEMINI_VIDEO_FALLBACK", default=True)
+
+
+# ==========================================================================
+# Mythumi social discovery (TikTok + Instagram)
+# ==========================================================================
+#
+# A SECOND discovery path, for the Mythumi figurine business. It sources
+# TikTok and Instagram creators instead of YouTube channels, and it shares
+# this module's credit ledger and every ceiling above rather than getting its
+# own — see budget/credit_tracker.py. Nothing here loosens a YouTube gate.
+#
+# WHY IT NEEDS ITS OWN BUDGET KNOBS AT ALL. On the YouTube path every
+# statistic is FREE: get_channel_stats() and get_recent_video_performance()
+# spend YouTube Data API quota, not money, so the only credit cost is
+# discovery (0.01/creator) plus the email lookup (~0.2). TikTok and Instagram
+# have no free statistics source, so the numbers that decide whether a creator
+# qualifies must be BOUGHT. That inverts where the money goes, and a ceiling
+# sized for the YouTube shape would be the wrong shape here.
+#
+# MEASURED VENDOR PRICES, read from docs.influencers.club on 2026-09-03:
+#
+#   discovery                  0.01 credits per creator RETURNED
+#   creator posts              0.03 credits per request
+#   enrich by handle profile   0.2  credits per request  (identity + email)
+#   enrich by handle analytics 0.8  credits per request  (audience, income)
+#   enrich by handle full      1.0  credits per request
+#
+# No credits are charged when a request returns no data.
+#
+# THE DESIGN THAT KEEPS THIS CHEAP, and the reason the 0.8 call is absent:
+# creator posts (0.03) returns "URL, caption, media URLs, timestamps, and
+# engagement metrics (likes, comments, views, shares)". That is every numeric
+# gate the criteria draft asks for — median reach over the last 10 posts, days
+# since last post, posts per week, and engagement computed the RIGHT way per
+# platform (per VIEW on TikTok, per FOLLOWER on Instagram). The 0.8 analytics
+# call adds only audience demographics and income estimates, and Instagram
+# creators over 10k already carry audience data in the discovery response. So
+# screening a creator costs 0.01 + 0.03 = 0.04, not 1.04.
+SOCIAL_DISCOVERY_CREDITS_PER_CREATOR = 0.01
+SOCIAL_POSTS_CREDITS_PER_REQUEST = float(
+    os.getenv("SOCIAL_POSTS_CREDITS_PER_REQUEST", 0.03)
+)
+SOCIAL_PROFILE_CREDITS_PER_REQUEST = float(
+    os.getenv("SOCIAL_PROFILE_CREDITS_PER_REQUEST", 0.2)
+)
+
+# Per-run discovery ceiling, PER PLATFORM. 0.6 credits buys ~60 creators
+# returned, which is one full page plus a little slack.
+SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN = float(
+    os.getenv("SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN", 0.6)
+)
+
+# Per-run posts-screening ceiling, PER PLATFORM. 0.9 credits is 30 screens.
+#
+# THIS IS THE QUALITY BUDGET, not an overspend guard, and it is the one number
+# here that must not be cut to save money. Every gate that separates a real
+# prospect from a follower count lives behind this call. Starve it and the
+# pipeline does not get slower or smaller — it gets WORSE, because the only
+# thing left to judge on is the vendor's follower count and its single blended
+# engagement figure, which is the exact "a hashtag is not a niche" mistake the
+# criteria draft warns about. See SOCIAL_MIN_POSTS_SCREENS_PER_RUN for the
+# floor that makes under-funding fail loudly instead of quietly.
+SOCIAL_MAX_POSTS_CREDITS_PER_RUN = float(
+    os.getenv("SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 0.9)
+)
+
+# THE QUALITY FLOOR. A run that cannot afford at least this many posts screens
+# per platform ABORTS that platform instead of admitting creators screened on
+# follower count alone.
+#
+# Without this the failure mode is silent and one-directional: the posts budget
+# runs dry mid-run, the remaining candidates skip the gates that need post
+# data, and rows reach the review queue looking identical to properly screened
+# ones. A reviewer cannot tell the difference by looking. Ten is the smallest
+# number that still produces a batch worth a reviewer's attention.
+SOCIAL_MIN_POSTS_SCREENS_PER_RUN = int(
+    os.getenv("SOCIAL_MIN_POSTS_SCREENS_PER_RUN", 10)
+)
+
+# Contact enrichment is OFF by default and that is deliberate, not timid.
+#
+# At 0.2 credits it is 5x the cost of screening a creator, and it buys nothing
+# that helps decide whether to CONTACT them — the criteria draft puts two
+# irreducibly human gates (is there a subject we can model, are the photos good
+# enough) before that decision. Paying for an address on a creator a reviewer is
+# about to reject on a photo is the single easiest way to waste this budget.
+# Pull addresses for APPROVED creators instead, which is what the Mythumi
+# review pages exist to gate.
+SOCIAL_PROFILE_ENRICH_ENABLED = env_flag("SOCIAL_PROFILE_ENRICH_ENABLED", default=False)
+SOCIAL_MAX_PROFILE_CREDITS_PER_RUN = float(
+    os.getenv("SOCIAL_MAX_PROFILE_CREDITS_PER_RUN", 2.0)
+)
+
+# Target admitted creators per platform per run. A batch sizing hint: it decides
+# how many candidates are worth screening, not a cap on what qualifies.
+SOCIAL_TARGET_PER_PLATFORM = int(os.getenv("SOCIAL_TARGET_PER_PLATFORM", 10))
+
+# --- Criteria thresholds (from the creator criteria draft, 2026-09-03) ---
+#
+# ALL OVERRIDABLE, because the draft says so in as many words: "write the
+# thresholds somewhere editable", "Starting points, not settled", and
+# "hand-vet 20-30 pet creators against this -> then automate". Expect to
+# retune these after the first real batch.
+SOCIAL_MIN_FOLLOWERS = int(os.getenv("SOCIAL_MIN_FOLLOWERS", 1_000))
+# Median, NOT mean, and the draft is explicit about why: "Judge on the median
+# of the last 10 posts, not the average - one viral video shouldn't carry
+# someone through."
+SOCIAL_TIKTOK_MIN_MEDIAN_VIEWS = int(
+    os.getenv("SOCIAL_TIKTOK_MIN_MEDIAN_VIEWS", 5_000)
+)
+SOCIAL_INSTAGRAM_MIN_MEDIAN_VIEWS = int(
+    os.getenv("SOCIAL_INSTAGRAM_MIN_MEDIAN_VIEWS", 3_000)
+)
+SOCIAL_MAX_DAYS_SINCE_POST = int(os.getenv("SOCIAL_MAX_DAYS_SINCE_POST", 30))
+SOCIAL_MIN_POSTS_PER_WEEK = float(os.getenv("SOCIAL_MIN_POSTS_PER_WEEK", 1.0))
+# How many recent posts the median and cadence are computed over. The draft
+# says the last 10 for reach; Instagram's page size is a fixed 12 and TikTok's
+# default is 30, so one request covers this on both.
+SOCIAL_POSTS_SAMPLE_SIZE = int(os.getenv("SOCIAL_POSTS_SAMPLE_SIZE", 10))
+# Countries the draft scopes to: "Sourcing US and Canada."
+SOCIAL_ALLOWED_COUNTRIES = tuple(
+    c.strip()
+    for c in os.getenv("SOCIAL_ALLOWED_COUNTRIES", "US,CA").split(",")
+    if c.strip()
+)
+
+# Whether to send the vendor's `location` filter on social discovery.
+#
+# OFF BY DEFAULT, matching the same deliberate gap the YouTube path documents:
+# "location is supported by the vendor and is NOT sent yet... Wiring it needs a
+# live probe of the field name and country format first." The docs say to read
+# valid values from the Dictionary endpoints, and sending a wrongly-formatted
+# country is the kind of filter that returns ZERO creators without erroring —
+# an empty run that looks like a dry pool.
+#
+# THE COST OF LEAVING IT OFF, stated plainly so it is a decision and not an
+# oversight: out-of-zone creators are still returned and still billed at 0.01
+# each, and the US/CA rule then has to be applied by a reviewer. Turn this on
+# once the format is confirmed against a live probe, and the same run gets
+# cheaper because the vendor stops returning creators we cannot use.
+SOCIAL_SEND_LOCATION_FILTER = env_flag("SOCIAL_SEND_LOCATION_FILTER", default=False)
+SOCIAL_LOCATION_VALUES = tuple(
+    v.strip()
+    for v in os.getenv("SOCIAL_LOCATION_VALUES", "United States,Canada").split(",")
+    if v.strip()
+)
+
+# Destination tables for the social path, in whichever base AIRTABLE_BASE_ID
+# points at. Separate from the two YouTube niche tables because the record
+# shape is different — a TikTok creator has no Channel ID, no subscriber count
+# and no long-form catalogue.
+AIRTABLE_TABLE_SOCIAL_CREATORS = os.getenv("AIRTABLE_TABLE_SOCIAL_CREATORS")
+AIRTABLE_TABLE_SOCIAL_TIKTOK = os.getenv("AIRTABLE_TABLE_SOCIAL_TIKTOK")
+AIRTABLE_TABLE_SOCIAL_INSTAGRAM = os.getenv("AIRTABLE_TABLE_SOCIAL_INSTAGRAM")

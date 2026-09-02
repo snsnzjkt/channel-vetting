@@ -662,63 +662,54 @@ workflow simply maps Mythumi secrets onto the `AIRTABLE_*` names `config.py`
 reads. Discovery, filtering, qualification, enrichment, scoring, dedupe, the
 record schema, retries and every cap are shared byte-for-byte.
 
-> **Dormant, and deliberately so. Do not add the secrets yet.**
-> Mythumi sources **TikTok and Instagram** creators only. This pipeline searches
-> **YouTube** only — `PLATFORM_YOUTUBE` is the sole platform requested, and every
-> gate after discovery (view floors, long-form/Shorts count, channel age,
-> transcripts, the Gemini check) is bound to the YouTube Data API. Enabling this
-> workflow today would spend influencers.club credits and YouTube quota
-> discovering channels Mythumi cannot use, drawn from the *same* 200-credit
-> monthly allowance the Valencia run uses. That is wasted spend, not doubled
-> spend, and it is worse.
->
-> The workflow therefore has **no `schedule:`** — manual dispatch only — and its
-> preflight step skips cleanly while the `MYTHUMI_*` secrets are unset, so it is
-> currently incapable of spending anything. What it does provide is the
-> destination plumbing, proven end to end. The remaining work is a
-> TikTok/Instagram discovery source (the vendor call already takes a `platform`
-> argument, so that part is a parameter away) plus TikTok/IG enrichment and
-> gates, which have no equivalent in this repo today.
+`mythumi-search` runs **`channel_vetting.social.pipeline`**, which sources
+**TikTok and Instagram** creators — not the YouTube pipeline. What is shared is
+shared as the same code rather than a copy: the credit ledger and every spend
+ceiling, the DO NOT CONTACT screen, the Airtable client, and the discovery
+client's pagination, server-side exclusion and fail-soft behaviour. The social
+path injects a `platform` and a handle normaliser into that shared client
+instead of forking it.
 
-Add four more repository secrets:
+**Cost per creator, from the vendor's published prices:**
 
-| Secret | Maps to |
-| --- | --- |
-| `MYTHUMI_AIRTABLE_TOKEN` | `AIRTABLE_TOKEN` |
-| `MYTHUMI_AIRTABLE_BASE_ID` | `AIRTABLE_BASE_ID` |
-| `MYTHUMI_AIRTABLE_TABLE_HOME_THEATER` | `AIRTABLE_TABLE_HOME_THEATER` |
-| `MYTHUMI_AIRTABLE_TABLE_LIFESTYLE_SOFA` | `AIRTABLE_TABLE_LIFESTYLE_SOFA` |
+| Step | Credits | Used? |
+| --- | --- | --- |
+| Discovery | 0.01 per creator returned | yes |
+| Creator posts (the screen) | 0.03 per creator | yes |
+| Enrich profile (email) | 0.2 | off by default |
+| Enrich analytics | 0.8 | **no** |
 
-Two table secrets, not one, because the pipeline writes one destination table
-**per niche** (`NICHES` in `discovery/niches.py`). Scope
-`MYTHUMI_AIRTABLE_TOKEN` to the Mythumi base only.
+Screening a creator is **0.04 credits**. The 0.8 analytics call is deliberately
+unused: the 0.03 posts endpoint returns timestamps plus per-post views, likes,
+comments and shares, which answers every numeric rule in the criteria draft —
+median reach over the last 10 posts, recency, cadence, and engagement computed
+per **view** on TikTok and per **follower** on Instagram. Defaults spend ~1.5
+credits per platform per run.
 
-`YOUTUBE_API_KEY`, `INFLUENCERS_API_KEY` and the `GEMINI_*` secrets are
-**shared, deliberately** — they are what the spend caps are denominated in. Do
-not create Mythumi copies of them.
+**The quality floor.** Every gate that separates a real prospect from a follower
+count lives behind the posts call, so `SOCIAL_MIN_POSTS_SCREENS_PER_RUN`
+(default 10) makes an under-funded run **abort the platform** rather than admit
+creators judged on followers alone. That degradation is invisible in a review
+queue — an under-screened row looks identical to a screened one — so it fails
+loudly on purpose. Under-spending is treated as a bug, not a saving.
 
-Three properties worth knowing before you enable it:
+**Nothing is auto-qualified.** Four of the draft's auto-reject rules have no
+purchasable answer: usable subject, photo quality, fake-follower risk, and
+audience age on TikTok. Every admitted row lands as `Review Decision = Pending`
+with the measured numbers and sample media URLs attached. `auto_score()` returns
+its own maximum (35) alongside its subtotal so it can never be mistaken for the
+draft's rubric out of 100.
 
-- **The spend caps are shared, not duplicated.** The workflow uses the same
-  `channel-vetting-state-` cache key prefix as the Valencia run, so both read
-  and write the same `quota_log.json`, `credit_log.json`, `gemini_log.json` and
-  `rejected_handles.json`. A separate prefix would give each workflow its own
-  empty ledger and silently authorise a second full daily quota and monthly
-  credit allowance.
-- **The two runs cannot overlap.** It joins the `channel-vetting` concurrency
-  group, because every spend guard is per-process or read-then-write; two
-  concurrent runners would each see a clean ledger.
-- **The daily *row* caps are per destination table.** `count_added_today()`
-  counts by "Date Added" in the table it is writing to, so the Mythumi tables
-  get their own `DAILY_QUALIFIED_CAP`/`DAILY_FLAGGED_CAP` headroom. That is the
-  existing per-niche behaviour applied to another table, not a new cap — but it
-  does mean total rows per day across both bases can be up to double. Lower the
-  env override if that is not wanted.
+Run it manually:
 
-If `MYTHUMI_AIRTABLE_BASE_ID` is unset the scheduled run **skips cleanly**
-rather than failing, so the cron does not go red before the secrets exist. If it
-is set to the same value as `AIRTABLE_BASE_ID` the run **fails loudly** — that
-copy-paste would otherwise silently double the Valencia queue.
+```bash
+python -m channel_vetting.social.pipeline --dry-run
+```
+
+`--dry-run` screens and gates but writes no rows. It still spends, because the
+numbers being calibrated are the ones that have to be bought. Do the draft's own
+first step before trusting it: *"hand-vet 20-30 pet creators against this → then
+automate."*
 
 ## Running the tests
 

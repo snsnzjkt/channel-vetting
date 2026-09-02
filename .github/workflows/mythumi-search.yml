@@ -1,69 +1,60 @@
 name: Mythumi Search
 
-# The Mythumi destination for the SAME pipeline channel-vetting.yml runs.
+# TikTok + Instagram creator sourcing for the Mythumi figurine business.
 #
-# THERE IS NO MYTHUMI PIPELINE CODE, AND THAT IS THE WHOLE DESIGN. Discovery,
-# filtering, qualification, enrichment, scoring, dedupe, the record schema,
-# retry behaviour and every cap live in `channel_vetting` and are shared
-# byte-for-byte. The Airtable destination was ALREADY fully env-driven
-# (`config.AIRTABLE_BASE_ID` / `AIRTABLE_TABLE_*`, read from the job env), so
-# pointing a run at another base needs no refactor and no second copy of
-# anything — only a different secret mapping in the `env:` block below. If you
-# ever find yourself adding pipeline logic to this file, that is the bug.
+# NOT the same pipeline channel-vetting.yml runs. That one searches YouTube;
+# this runs `channel_vetting.social.pipeline`. What IS shared, and shared as the
+# same code rather than a copy: the credit ledger and every spend ceiling, the
+# DO NOT CONTACT screen, the Airtable client, and the discovery client's
+# pagination / exclusion / fail-soft behaviour. The social path injects a
+# platform and a handle normaliser into that shared client instead of forking it.
 #
-# *** DORMANT ON PURPOSE: NO SCHEDULE, AND DO NOT ADD ONE YET. ***
+# *** NO SCHEDULE YET — manual dispatch only. See "BEFORE ADDING A CRON". ***
 #
-# Mythumi sources TikTok and Instagram creators ONLY (confirmed 2026-09-03).
-# This pipeline searches YOUTUBE and nothing else: PLATFORM_YOUTUBE is the only
-# platform `discovery/influencers_club.py` ever requests, and every gate after
-# discovery — the view floors, the long-form/Shorts count, channel age,
-# transcripts, the Gemini video check — is bound to the YouTube Data API.
+# This runs `channel_vetting.social.pipeline`, which sources TIKTOK AND
+# INSTAGRAM creators — not the YouTube pipeline channel-vetting.yml runs. The
+# two share the credit ledger, the DO NOT CONTACT screen, the Airtable client
+# and every spend ceiling; what differs is the discovery platform and the gates,
+# because TikTok and Instagram have no free statistics source.
 #
-# So a scheduled run of THIS workflow would spend real influencers.club credits
-# and real YouTube quota discovering YouTube channels that Mythumi cannot use,
-# and write them into the Mythumi base. That is not a doubled cost, it is a
-# WASTED one: the shared ledger (see the cache step) means the spend comes
-# straight out of the Valencia run's 200-credit monthly allowance.
+# WHAT IT COSTS, from the vendor's published prices (docs.influencers.club,
+# 2026-09-03): 0.01 credits per creator discovered plus 0.03 per creator
+# screened = 0.04 to screen one creator. The 0.8 analytics call is NOT used —
+# see social/posts.py for why the 0.03 posts endpoint answers every numeric
+# rule the criteria draft asks for. Contact enrichment (0.2) is OFF by default
+# and belongs after a human approves, not before.
 #
-# A `schedule:` block was written and then deliberately removed for that reason.
-# `workflow_dispatch` is kept so the plumbing can be exercised on demand — and
-# the preflight step below still skips cleanly while the MYTHUMI_* secrets are
-# unset, so this workflow is currently incapable of spending anything.
+# THE SPEND IS SHARED, NOT DOUBLED. Same `channel-vetting-state-` cache prefix
+# and same concurrency group as the Valencia run, so both read and write the
+# same quota/credit ledgers and cannot overlap. A separate prefix would hand
+# each workflow its own empty ledger and silently authorise a second full
+# allowance.
 #
-# TO MAKE THIS USEFUL, in order:
-#   1. A TikTok/Instagram discovery source. There IS a seam — the vendor call
-#      already takes `platform` (`InfluencerDiscovery.discover(platform=...)`),
-#      so discovery itself is a parameter away.
-#   2. TikTok/Instagram ENRICHMENT AND GATES, which is the real work: the
-#      YouTube Data API calls have no TikTok/IG equivalent here, so every
-#      threshold downstream of discovery would return nothing for a TikTok
-#      handle. Per the criteria draft these also differ by platform —
-#      engagement per VIEW on TikTok, per FOLLOWER on Instagram, judged on the
-#      MEDIAN of the last 10 posts.
-#   3. Destination tables in the Mythumi base carrying this record schema.
-#   4. Only then, restore a cron — offset from 18:00 UTC, still Mon-Fri so rows
-#      stamp Mon-Fri in America/Toronto.
+# BEFORE ADDING A CRON, three things:
+#   1. Set the MYTHUMI_* and social table secrets (the preflight skips without
+#      them, so a schedule would be a green no-op until then).
+#   2. Do the draft's own first step: "hand-vet 20-30 pet creators against this
+#      -> then automate. Automating before testing the numbers on real people is
+#      how this usually goes wrong." `--dry-run` screens without writing rows.
+#   3. Confirm the real credit entitlement. INFLUENCERS_MAX_CREDITS_PER_MONTH
+#      (200) is a guess derived from measured usage, and the ledger currently
+#      records the vendor reporting 378.63 left — so the guess is not the plan.
 #
-# WHAT DIFFERS FROM channel-vetting.yml, exhaustively:
-#   1. The four AIRTABLE_* env values come from MYTHUMI_* secrets.
-#   2. A preflight step that refuses to run against the wrong base.
-#   3. No `schedule:` — manual dispatch only, per the note above.
-#   4. The name and this comment.
-# Nothing else. Diff the two files before changing either.
+# WHAT DIFFERS FROM channel-vetting.yml:
+#   1. AIRTABLE_* env comes from MYTHUMI_* secrets, plus three social table vars.
+#   2. It runs channel_vetting.social.pipeline, not channel_vetting.pipeline.
+#   3. A preflight that refuses to run against the wrong base.
+#   4. No schedule.
 
 on:
   workflow_dispatch:
     inputs:
-      test_mode:
-        description: "Run in --test mode (1 keyword, 5 results)"
-        type: boolean
-        default: false
-      use_playwright_stealth:
-        description: "Enable the Playwright link-list email lookup (uncheck for a faster run)"
+      dry_run:
+        description: "Screen and gate but write NO Airtable rows. Still spends credits — the numbers being calibrated have to be bought."
         type: boolean
         default: true
-      days_back:
-        description: "How far back to search, in days. Use 90 for a one-off backlog sweep against emptied tables; leave blank for the usual 7."
+      target:
+        description: "Admitted creators per platform. Blank uses SOCIAL_TARGET_PER_PLATFORM (10)."
         type: string
         required: false
         default: ""
@@ -119,33 +110,31 @@ jobs:
       # reading each other's destination: this job is never handed
       # secrets.AIRTABLE_BASE_ID at all.
       #
-      # WHY THERE ARE TWO TABLE SECRETS AND NOT ONE. The pipeline runs one
-      # destination table PER NICHE (see NICHES in discovery/niches.py), so a
-      # single MYTHUMI_AIRTABLE_TABLE_NAME could not express the destination.
-      # The niche keys ("Home Theater", "Lifestyle Sofa") are shared code and
-      # live in that registry; these env names follow them rather than the
-      # business they point at. Point both secrets at whichever Mythumi tables
-      # should receive each niche's rows.
       AIRTABLE_TOKEN: ${{ secrets.MYTHUMI_AIRTABLE_TOKEN }}
       AIRTABLE_BASE_ID: ${{ secrets.MYTHUMI_AIRTABLE_BASE_ID }}
-      AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_HOME_THEATER }}
-      AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_LIFESTYLE_SOFA }}
+      # The social path's destination. AIRTABLE_TABLE_SOCIAL_CREATORS is the one
+      # that must be set — the pipeline aborts without it rather than guessing.
+      AIRTABLE_TABLE_SOCIAL_CREATORS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_CREATORS }}
+      AIRTABLE_TABLE_SOCIAL_TIKTOK: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_TIKTOK }}
+      AIRTABLE_TABLE_SOCIAL_INSTAGRAM: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_INSTAGRAM }}
 
       # --- SHARED WITH THE VALENCIA RUN, INTENTIONALLY ---
-      # These are the same upstream accounts, and they are what the shared caps
-      # are denominated in. Do NOT introduce Mythumi-specific copies of these:
-      # a second YouTube key would double the effective daily quota and a second
-      # influencers.club key would double the monthly credit allowance, which is
-      # exactly the "second independent cap" this workflow exists to avoid.
-      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      #
+      # INFLUENCERS_API_KEY is the SAME key, and that is what makes the credit
+      # caps shared rather than duplicated. A Mythumi-specific key would double
+      # the monthly allowance the ledger is enforcing — the exact "second
+      # independent cap" this whole design avoids. Do not add one.
       INFLUENCERS_API_KEY: ${{ secrets.INFLUENCERS_API_KEY }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GEMINI_ENABLED: ${{ secrets.GEMINI_ENABLED }}
 
-      # Identical to the sibling: `github.event.inputs` is NULL on a schedule
-      # event, so the event name has to be checked first or scheduled runs get
-      # `false` regardless of the input default.
-      USE_PLAYWRIGHT_STEALTH: ${{ github.event_name != 'workflow_dispatch' || inputs.use_playwright_stealth }}
+      # DELIBERATELY ABSENT: YOUTUBE_API_KEY and the GEMINI_* secrets.
+      #
+      # The social path touches neither — no YouTube Data API call, no Gemini
+      # relevance check — so handing them to this job would put two more live
+      # credentials in the environment of a public-repo runner for no benefit.
+      # Least privilege, and it also makes the coupling honest: if something
+      # here ever needs YouTube quota, that is a design change worth noticing
+      # rather than a secret that happened to be in scope.
+
       # Pinned so the runner (UTC) agrees with head office on the day, and so
       # the daily row caps are counted against the same day boundary as the
       # Valencia run.
@@ -184,8 +173,7 @@ jobs:
           MYTHUMI_BASE: ${{ secrets.MYTHUMI_AIRTABLE_BASE_ID }}
           VALENCIA_BASE: ${{ secrets.AIRTABLE_BASE_ID }}
           MYTHUMI_TOKEN: ${{ secrets.MYTHUMI_AIRTABLE_TOKEN }}
-          MYTHUMI_TABLE_HT: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_HOME_THEATER }}
-          MYTHUMI_TABLE_LS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_LIFESTYLE_SOFA }}
+          MYTHUMI_TABLE_CREATORS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_CREATORS }}
         run: |
           set -euo pipefail
 
@@ -207,9 +195,8 @@ jobs:
           # A base id without a token or tables cannot write anything useful,
           # and failing here is cheaper than failing after discovery has spent.
           missing=""
-          [ -z "$MYTHUMI_TOKEN" ]    && missing="$missing MYTHUMI_AIRTABLE_TOKEN"
-          [ -z "$MYTHUMI_TABLE_HT" ] && missing="$missing MYTHUMI_AIRTABLE_TABLE_HOME_THEATER"
-          [ -z "$MYTHUMI_TABLE_LS" ] && missing="$missing MYTHUMI_AIRTABLE_TABLE_LIFESTYLE_SOFA"
+          [ -z "$MYTHUMI_TOKEN" ]          && missing="$missing MYTHUMI_AIRTABLE_TOKEN"
+          [ -z "$MYTHUMI_TABLE_CREATORS" ] && missing="$missing MYTHUMI_AIRTABLE_TABLE_CREATORS"
           if [ -n "$missing" ]; then
             echo "::error::MYTHUMI_AIRTABLE_BASE_ID is set but these are missing:$missing"
             exit 1
@@ -281,50 +268,41 @@ jobs:
           restore-keys: |
             channel-vetting-state-
 
-      # Same soft-failure note as the sibling: missing Chromium makes
-      # BrowserEmailScraper.launch() return an inert scraper, so the symptom
-      # would be zero browser-sourced emails and no error at all.
-      - name: Install Chromium for Playwright
-        if: steps.preflight.outputs.configured == 'true' && env.USE_PLAYWRIGHT_STEALTH == 'true'
-        run: python -m playwright install --with-deps chromium
+      # NO Chromium step. The Playwright link-list email lookup is part of the
+      # YouTube email chain (enrichment/email_browser.py) and has no role here:
+      # contact enrichment on the social path is a separate 0.2-credit vendor
+      # call that is off by default and belongs after human approval.
 
-      # DAYS_BACK reaches the shell through `env:` and never through a ${{ }}
-      # interpolation inside `run:`, and is validated as digits-only before
-      # pipeline.py is invoked. Both matter, and the second is the non-obvious
-      # one: the value is UNQUOTED in the ${:+...} expansion, so bash would
-      # word-split `7 --daily-cap 9999` into three argv entries and quietly
-      # override both daily caps. That is argument injection, not shell
-      # injection. Kept identical to the sibling workflow — do not "simplify".
-      - name: Run pipeline (full)
-        if: steps.preflight.outputs.configured == 'true' && (github.event_name == 'schedule' || github.event.inputs.test_mode != 'true')
+      # TARGET reaches the shell through `env:` and NEVER through a ${{ }}
+      # interpolation inside `run:`, and is validated as digits-only before the
+      # pipeline is invoked. Both matter, and the second is the non-obvious one:
+      # the value is UNQUOTED in the ${:+...} expansion, so bash would
+      # word-split "10 --dry-run" into separate argv entries. That is argument
+      # injection, not shell injection. Same guard as the sibling workflow's
+      # days_back — do not "simplify" it.
+      - name: Run social pipeline (TikTok + Instagram)
+        if: steps.preflight.outputs.configured == 'true'
         env:
-          DAYS_BACK: ${{ inputs.days_back }}
+          TARGET: ${{ inputs.target }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: |
-          case "$DAYS_BACK" in
+          case "$TARGET" in
             "") ;;
             *[!0-9]*)
-              echo "::error::days_back must be digits only (got: '$DAYS_BACK')"
+              echo "::error::target must be digits only (got: '$TARGET')"
               exit 1
               ;;
           esac
-          python -m channel_vetting.pipeline ${DAYS_BACK:+--days-back "$DAYS_BACK"}
-
-      # Validation duplicated rather than factored into an earlier step, so
-      # neither run path can be reached without it. A shared step could be
-      # skipped by an `if:` and the guard would vanish silently.
-      - name: Run pipeline (test mode)
-        if: steps.preflight.outputs.configured == 'true' && github.event.inputs.test_mode == 'true'
-        env:
-          DAYS_BACK: ${{ inputs.days_back }}
-        run: |
-          case "$DAYS_BACK" in
-            "") ;;
-            *[!0-9]*)
-              echo "::error::days_back must be digits only (got: '$DAYS_BACK')"
-              exit 1
-              ;;
-          esac
-          python -m channel_vetting.pipeline --test ${DAYS_BACK:+--days-back "$DAYS_BACK"}
+          # Default to --dry-run on a SCHEDULE too, if a cron is ever added:
+          # writing rows should be an explicit choice, not what happens because
+          # nobody set an input.
+          if [ "$DRY_RUN" = "false" ]; then
+            echo "Writing rows to Airtable."
+            python -m channel_vetting.social.pipeline ${TARGET:+--target "$TARGET"}
+          else
+            echo "Dry run — screening and gating, writing nothing."
+            python -m channel_vetting.social.pipeline --dry-run ${TARGET:+--target "$TARGET"}
+          fi
 
       # `if: always()` within the configured branch — a failed run has usually
       # already spent quota and credits, and that is precisely the case where

@@ -80,6 +80,13 @@ from channel_vetting.core.http_client import INFLUENCERS as HTTP, safe_body
 logger = logging.getLogger(__name__)
 
 PLATFORM_YOUTUBE = "youtube"
+# The vendor's discovery endpoint takes `platform` as a required discriminator
+# and supports Instagram, YouTube, TikTok, Twitch, Twitter and OnlyFans
+# (docs.influencers.club, read 2026-09-03). The FILTER FIELDS CHANGE PER
+# PLATFORM, which is why social/discovery.py builds its own filter dicts rather
+# than reusing the YouTube ones wired into NICHES.
+PLATFORM_TIKTOK = "tiktok"
+PLATFORM_INSTAGRAM = "instagram"
 REQUEST_TIMEOUT_SECONDS = 45
 # The API caps a page at 50 results; asking for more is rejected.
 PAGE_LIMIT = 50
@@ -123,11 +130,40 @@ class InfluencerDiscovery:
     decides only whether a key exists at all.
     """
 
-    def __init__(self, enabled=True, max_credits=None, sleep=None):
+    def __init__(self, enabled=True, max_credits=None, sleep=None, handle_normalizer=None,
+                 carry_vendor_stats=False):
         self._active = enabled
         self._max_credits = (
             INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN if max_credits is None else max_credits
         )
+        # How `profile.username` becomes the candidate's handle.
+        #
+        # DEFAULTS TO THE YOUTUBE NORMALISER, so every existing caller behaves
+        # exactly as before. It is injectable because normalize_handle() requires
+        # a literal "@" and returns "" for a bare username — measured — and
+        # `_to_candidate()` drops any candidate whose handle is empty. The vendor
+        # returns usernames BARE, which is harmless for YouTube (its handles
+        # arrive as customUrl "@foo") but would silently discard every Instagram
+        # creator on the social path. social/handles.normalize_social_handle is
+        # passed in there. Widening the YouTube normaliser instead was rejected:
+        # its "" for legacy /c/ and /user/ channels is load-bearing for the
+        # YouTube dedupe and DO NOT CONTACT indexes.
+        self._normalize_handle = handle_normalizer or normalize_handle
+        # Whether the vendor's `followers` / `engagement_percent` ride along on
+        # the candidate.
+        #
+        # FALSE FOR YOUTUBE, AND THE REASONING INVERTS FOR SOCIAL. On YouTube the
+        # vendor's statistics are dropped on purpose (see _to_candidate): the
+        # YouTube Data API is the only source the gates, the scores and the
+        # Airtable columns are allowed to reflect, so a purchased number sitting
+        # in a field labelled with a YouTube-verified figure is a trap.
+        #
+        # On TikTok and Instagram there IS no second source — no free API
+        # reports a follower count — so the vendor IS the source of truth for
+        # followers, and dropping it does not protect anything. It breaks the
+        # run instead: every creator would arrive with followers=0 and be
+        # rejected as below_follower_minimum. Social callers pass True.
+        self._carry_vendor_stats = bool(carry_vendor_stats)
         # Credits as the vendor reports them in each response's credits_cost —
         # the authoritative spend figure, accumulated so a run can print what
         # discovery actually cost.
@@ -369,7 +405,8 @@ class InfluencerDiscovery:
         )
         return result
 
-    def probe(self, filters: dict, limit: int = 1, *, source_label="pool probe"):
+    def probe(self, filters: dict, limit: int = 1, *, source_label="pool probe",
+              platform: str = PLATFORM_YOUTUBE):
         """
         One measurement request, billed THROUGH THE LEDGER.
 
@@ -422,7 +459,10 @@ class InfluencerDiscovery:
             return None, None
 
         resp = self._post({
-            "platform": "youtube",
+            # Was hardcoded "youtube" while discover() took a platform
+            # parameter, so a probe on the social path would have silently
+            # priced the YouTube pool instead of the requested one.
+            "platform": platform,
             "paging": {"limit": limit, "page": 0},
             "sort": DEFAULT_SORT,
             "filters": dict(filters),
@@ -556,17 +596,23 @@ class InfluencerDiscovery:
         profile = account.get("profile")
         if not isinstance(profile, dict):
             return None
-        handle = normalize_handle(profile.get("username", ""))
+        handle = self._normalize_handle(profile.get("username", ""))
         if not handle:
             # No @handle means we can neither dedupe nor resolve it to a
             # channel ID — drop it rather than carry an unusable candidate.
             return None
-        return {
+        candidate = {
             "handle": handle,
             "channel_title": profile.get("full_name") or "",
             "influencers_user_id": account.get("user_id"),
             "matched_keywords": [source_label],
         }
+        if self._carry_vendor_stats:
+            # Namespaced `vendor_` so nothing can mistake these for a
+            # platform-verified figure the way a bare `subscriber_count` would.
+            candidate["vendor_followers"] = profile.get("followers")
+            candidate["vendor_engagement_percent"] = profile.get("engagement_percent")
+        return candidate
 
 
 def null_discovery() -> InfluencerDiscovery:

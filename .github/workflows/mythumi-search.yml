@@ -1,0 +1,346 @@
+name: Mythumi Search
+
+# The Mythumi destination for the SAME pipeline channel-vetting.yml runs.
+#
+# THERE IS NO MYTHUMI PIPELINE CODE, AND THAT IS THE WHOLE DESIGN. Discovery,
+# filtering, qualification, enrichment, scoring, dedupe, the record schema,
+# retry behaviour and every cap live in `channel_vetting` and are shared
+# byte-for-byte. The Airtable destination was ALREADY fully env-driven
+# (`config.AIRTABLE_BASE_ID` / `AIRTABLE_TABLE_*`, read from the job env), so
+# pointing a run at another base needs no refactor and no second copy of
+# anything — only a different secret mapping in the `env:` block below. If you
+# ever find yourself adding pipeline logic to this file, that is the bug.
+#
+# *** DORMANT ON PURPOSE: NO SCHEDULE, AND DO NOT ADD ONE YET. ***
+#
+# Mythumi sources TikTok and Instagram creators ONLY (confirmed 2026-09-03).
+# This pipeline searches YOUTUBE and nothing else: PLATFORM_YOUTUBE is the only
+# platform `discovery/influencers_club.py` ever requests, and every gate after
+# discovery — the view floors, the long-form/Shorts count, channel age,
+# transcripts, the Gemini video check — is bound to the YouTube Data API.
+#
+# So a scheduled run of THIS workflow would spend real influencers.club credits
+# and real YouTube quota discovering YouTube channels that Mythumi cannot use,
+# and write them into the Mythumi base. That is not a doubled cost, it is a
+# WASTED one: the shared ledger (see the cache step) means the spend comes
+# straight out of the Valencia run's 200-credit monthly allowance.
+#
+# A `schedule:` block was written and then deliberately removed for that reason.
+# `workflow_dispatch` is kept so the plumbing can be exercised on demand — and
+# the preflight step below still skips cleanly while the MYTHUMI_* secrets are
+# unset, so this workflow is currently incapable of spending anything.
+#
+# TO MAKE THIS USEFUL, in order:
+#   1. A TikTok/Instagram discovery source. There IS a seam — the vendor call
+#      already takes `platform` (`InfluencerDiscovery.discover(platform=...)`),
+#      so discovery itself is a parameter away.
+#   2. TikTok/Instagram ENRICHMENT AND GATES, which is the real work: the
+#      YouTube Data API calls have no TikTok/IG equivalent here, so every
+#      threshold downstream of discovery would return nothing for a TikTok
+#      handle. Per the criteria draft these also differ by platform —
+#      engagement per VIEW on TikTok, per FOLLOWER on Instagram, judged on the
+#      MEDIAN of the last 10 posts.
+#   3. Destination tables in the Mythumi base carrying this record schema.
+#   4. Only then, restore a cron — offset from 18:00 UTC, still Mon-Fri so rows
+#      stamp Mon-Fri in America/Toronto.
+#
+# WHAT DIFFERS FROM channel-vetting.yml, exhaustively:
+#   1. The four AIRTABLE_* env values come from MYTHUMI_* secrets.
+#   2. A preflight step that refuses to run against the wrong base.
+#   3. No `schedule:` — manual dispatch only, per the note above.
+#   4. The name and this comment.
+# Nothing else. Diff the two files before changing either.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: "Run in --test mode (1 keyword, 5 results)"
+        type: boolean
+        default: false
+      use_playwright_stealth:
+        description: "Enable the Playwright link-list email lookup (uncheck for a faster run)"
+        type: boolean
+        default: true
+      days_back:
+        description: "How far back to search, in days. Use 90 for a one-off backlog sweep against emptied tables; leave blank for the usual 7."
+        type: string
+        required: false
+        default: ""
+
+# SHARED WITH channel-vetting.yml ON PURPOSE — the group name is deliberately
+# NOT "mythumi-search".
+#
+# This is the single most important line in the file for cost control. Every
+# spend guard in this pipeline is per-process or read-then-write:
+# budget/quota_tracker.py and budget/credit_tracker.py keep their ledgers in
+# local JSON under data/, and count_added_today() reads Airtable BEFORE either
+# run has pushed anything. Two runners therefore do not see each other's spend.
+# Giving this workflow its own concurrency group would let a Mythumi run and a
+# Valencia run overlap, both read a clean quota ledger, and both spend a full
+# day's YouTube quota and a full day's vendor credits — the exact scenario the
+# sibling workflow's concurrency comment describes, except now it can be
+# triggered by the schedule rather than only by a human dispatch.
+#
+# The cost of sharing: a Mythumi run queues behind a Valencia run instead of
+# running alongside it, so wall-clock time is worse. That is the correct trade —
+# queueing costs minutes, overlapping costs money and can exceed the caps.
+#
+# cancel-in-progress stays FALSE for the same reason as the sibling: a SIGKILL
+# between spending quota and writing the ledger, or between pushing rows and
+# counting them, strands state that has no independent record.
+concurrency:
+  group: channel-vetting
+  cancel-in-progress: false
+
+# Same reasoning as the sibling workflow: this job checks out public code,
+# installs deps, and talks to Airtable + YouTube over HTTPS. It never pushes a
+# commit or reads another repo, and it holds live API tokens in env for the
+# whole run, so the token it gets is spelled out rather than inherited.
+permissions: {}
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    # Matches the sibling workflow. See its note: the real ceiling is set by
+    # GEMINI_MAX_SECONDS_PER_RUN (900s) plus Playwright page settles, and a
+    # killed run prints no summary at all, which is the least legible failure
+    # this pipeline can produce.
+    timeout-minutes: 90
+
+    env:
+      # --- THE ONLY INTENTIONAL DIFFERENCE FROM channel-vetting.yml ---
+      #
+      # The env var NAMES on the left are the ones config.py reads and MUST NOT
+      # be renamed — `channel_vetting.config` is shared code and renaming these
+      # would be a pipeline change affecting the Valencia run too. The SECRETS
+      # on the right are Mythumi-specific, so the two workflows are incapable of
+      # reading each other's destination: this job is never handed
+      # secrets.AIRTABLE_BASE_ID at all.
+      #
+      # WHY THERE ARE TWO TABLE SECRETS AND NOT ONE. The pipeline runs one
+      # destination table PER NICHE (see NICHES in discovery/niches.py), so a
+      # single MYTHUMI_AIRTABLE_TABLE_NAME could not express the destination.
+      # The niche keys ("Home Theater", "Lifestyle Sofa") are shared code and
+      # live in that registry; these env names follow them rather than the
+      # business they point at. Point both secrets at whichever Mythumi tables
+      # should receive each niche's rows.
+      AIRTABLE_TOKEN: ${{ secrets.MYTHUMI_AIRTABLE_TOKEN }}
+      AIRTABLE_BASE_ID: ${{ secrets.MYTHUMI_AIRTABLE_BASE_ID }}
+      AIRTABLE_TABLE_HOME_THEATER: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_HOME_THEATER }}
+      AIRTABLE_TABLE_LIFESTYLE_SOFA: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_LIFESTYLE_SOFA }}
+
+      # --- SHARED WITH THE VALENCIA RUN, INTENTIONALLY ---
+      # These are the same upstream accounts, and they are what the shared caps
+      # are denominated in. Do NOT introduce Mythumi-specific copies of these:
+      # a second YouTube key would double the effective daily quota and a second
+      # influencers.club key would double the monthly credit allowance, which is
+      # exactly the "second independent cap" this workflow exists to avoid.
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+      INFLUENCERS_API_KEY: ${{ secrets.INFLUENCERS_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_ENABLED: ${{ secrets.GEMINI_ENABLED }}
+
+      # Identical to the sibling: `github.event.inputs` is NULL on a schedule
+      # event, so the event name has to be checked first or scheduled runs get
+      # `false` regardless of the input default.
+      USE_PLAYWRIGHT_STEALTH: ${{ github.event_name != 'workflow_dispatch' || inputs.use_playwright_stealth }}
+      # Pinned so the runner (UTC) agrees with head office on the day, and so
+      # the daily row caps are counted against the same day boundary as the
+      # Valencia run.
+      PROSPECT_DAY_TZ: America/Toronto
+
+    steps:
+      # Actions pinned to full commit SHAs, matching all three sibling
+      # workflows. A tag is a mutable ref and this job holds live tokens in env.
+      - name: Check out repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # THE CROSS-WRITE GUARD. Runs before anything is installed or spent.
+      #
+      # Two failure modes it exists to catch, both of which write real rows to
+      # the wrong place and neither of which the pipeline itself can detect —
+      # `config.AIRTABLE_BASE_ID` is just a string, and a valid token for the
+      # Valencia base will happily accept writes:
+      #
+      #   1. MYTHUMI_AIRTABLE_BASE_ID never configured. Unset secrets expand to
+      #      the EMPTY STRING, so the run would build request URLs like
+      #      `.../v0//Table` and fail deep inside pagination with an opaque
+      #      Airtable error, after discovery has already spent quota and credits.
+      #   2. MYTHUMI_AIRTABLE_BASE_ID accidentally set to the Valencia base —
+      #      a copy-paste when configuring secrets. That one does NOT error at
+      #      all: it silently doubles the Valencia run, writing a second day's
+      #      rows into the live review queue against a second independent row
+      #      cap. This is the specific accident worth a preflight step.
+      #
+      # An UNCONFIGURED destination is treated as "skip", not "fail", so the
+      # weekday schedule does not post a red run every morning until the
+      # secrets exist. A MISCONFIGURED one is a hard failure, because that is a
+      # mistake rather than a not-yet.
+      - name: Preflight — verify the Mythumi destination
+        id: preflight
+        env:
+          MYTHUMI_BASE: ${{ secrets.MYTHUMI_AIRTABLE_BASE_ID }}
+          VALENCIA_BASE: ${{ secrets.AIRTABLE_BASE_ID }}
+          MYTHUMI_TOKEN: ${{ secrets.MYTHUMI_AIRTABLE_TOKEN }}
+          MYTHUMI_TABLE_HT: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_HOME_THEATER }}
+          MYTHUMI_TABLE_LS: ${{ secrets.MYTHUMI_AIRTABLE_TABLE_LIFESTYLE_SOFA }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$MYTHUMI_BASE" ]; then
+            echo "::notice::MYTHUMI_AIRTABLE_BASE_ID is not configured — skipping the run."
+            echo "Add the MYTHUMI_AIRTABLE_* repository secrets to enable this workflow."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Hard stop: pointing at the Valencia base would silently double the
+          # existing workflow's output instead of failing.
+          if [ -n "$VALENCIA_BASE" ] && [ "$MYTHUMI_BASE" = "$VALENCIA_BASE" ]; then
+            echo "::error::MYTHUMI_AIRTABLE_BASE_ID equals AIRTABLE_BASE_ID. Refusing to run:"
+            echo "::error::this would write Mythumi rows into the existing Valencia base."
+            exit 1
+          fi
+
+          # A base id without a token or tables cannot write anything useful,
+          # and failing here is cheaper than failing after discovery has spent.
+          missing=""
+          [ -z "$MYTHUMI_TOKEN" ]    && missing="$missing MYTHUMI_AIRTABLE_TOKEN"
+          [ -z "$MYTHUMI_TABLE_HT" ] && missing="$missing MYTHUMI_AIRTABLE_TABLE_HOME_THEATER"
+          [ -z "$MYTHUMI_TABLE_LS" ] && missing="$missing MYTHUMI_AIRTABLE_TABLE_LIFESTYLE_SOFA"
+          if [ -n "$missing" ]; then
+            echo "::error::MYTHUMI_AIRTABLE_BASE_ID is set but these are missing:$missing"
+            exit 1
+          fi
+
+          echo "Destination verified: base ${MYTHUMI_BASE:0:6}… (distinct from the Valencia base)."
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      # Identical install to the sibling workflow, including --require-hashes:
+      # a hijacked PyPI account or substituted mirror artifact fails the install
+      # instead of running arbitrary code next to the tokens in env.
+      - name: Install dependencies
+        if: steps.preflight.outputs.configured == 'true'
+        run: |
+          pip install --require-hashes -r requirements.txt
+          pip install -e . --no-deps
+
+      # THE SHARED LEDGER, AND THE REASON THE CAPS ARE NOT DOUBLED.
+      #
+      # The cache key prefix is `channel-vetting-state-`, THE SAME PREFIX the
+      # Valencia workflow uses, and that is load-bearing rather than lazy reuse.
+      # The money caps in this pipeline are not enforced against Airtable; they
+      # are enforced against these local JSON ledgers:
+      #
+      #   data/quota_log.json      -> QUOTA_CEILING (8,000 YouTube units/day)
+      #   data/credit_log.json     -> INFLUENCERS_MAX_CREDITS_PER_DAY (10)
+      #                               INFLUENCERS_MAX_CREDITS_PER_MONTH (200)
+      #   data/gemini_log.json     -> GEMINI_MAX_REQUESTS_PER_RUN / _PER_DAY
+      #   data/rejected_handles.json -> stops re-paying 0.01/handle for creators
+      #                               already examined and rejected
+      #
+      # A distinct prefix here would give this workflow its OWN empty ledgers,
+      # and both workflows would then authorise a full daily quota and a full
+      # monthly credit allowance each — silently doubling spend against caps
+      # that would each still report themselves as unbreached. Sharing the
+      # prefix means the second run of the day starts from the first run's
+      # ledger and stops when the SHARED cap is reached, which is the existing
+      # behaviour applied to two destinations rather than a new cap.
+      #
+      # Restore/save are split for the same reason as the sibling: the combined
+      # step only saves on success, and the runs whose spend you least want to
+      # forget are the failures.
+      #
+      # Note the same caveat the sibling documents: a GitHub cache is
+      # best-effort (7-day idle eviction, 10GB LRU cap), so a miss is fail-OPEN
+      # on the credit ledger specifically. That is a pre-existing property of
+      # the design, not something this workflow introduces — but it now applies
+      # to two workflows sharing one allowance, so check the vendor dashboard
+      # for the authoritative figure.
+      - name: Restore quota + search + external-handles + credit + reject cache
+        if: steps.preflight.outputs.configured == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            data/quota_log.json
+            data/search_cache.json
+            data/external_handles_cache.json
+            data/credit_log.json
+            data/rejected_handles.json
+            data/gemini_log.json
+            data/gemini_cache.json
+          key: channel-vetting-state-${{ github.run_id }}
+          restore-keys: |
+            channel-vetting-state-
+
+      # Same soft-failure note as the sibling: missing Chromium makes
+      # BrowserEmailScraper.launch() return an inert scraper, so the symptom
+      # would be zero browser-sourced emails and no error at all.
+      - name: Install Chromium for Playwright
+        if: steps.preflight.outputs.configured == 'true' && env.USE_PLAYWRIGHT_STEALTH == 'true'
+        run: python -m playwright install --with-deps chromium
+
+      # DAYS_BACK reaches the shell through `env:` and never through a ${{ }}
+      # interpolation inside `run:`, and is validated as digits-only before
+      # pipeline.py is invoked. Both matter, and the second is the non-obvious
+      # one: the value is UNQUOTED in the ${:+...} expansion, so bash would
+      # word-split `7 --daily-cap 9999` into three argv entries and quietly
+      # override both daily caps. That is argument injection, not shell
+      # injection. Kept identical to the sibling workflow — do not "simplify".
+      - name: Run pipeline (full)
+        if: steps.preflight.outputs.configured == 'true' && (github.event_name == 'schedule' || github.event.inputs.test_mode != 'true')
+        env:
+          DAYS_BACK: ${{ inputs.days_back }}
+        run: |
+          case "$DAYS_BACK" in
+            "") ;;
+            *[!0-9]*)
+              echo "::error::days_back must be digits only (got: '$DAYS_BACK')"
+              exit 1
+              ;;
+          esac
+          python -m channel_vetting.pipeline ${DAYS_BACK:+--days-back "$DAYS_BACK"}
+
+      # Validation duplicated rather than factored into an earlier step, so
+      # neither run path can be reached without it. A shared step could be
+      # skipped by an `if:` and the guard would vanish silently.
+      - name: Run pipeline (test mode)
+        if: steps.preflight.outputs.configured == 'true' && github.event.inputs.test_mode == 'true'
+        env:
+          DAYS_BACK: ${{ inputs.days_back }}
+        run: |
+          case "$DAYS_BACK" in
+            "") ;;
+            *[!0-9]*)
+              echo "::error::days_back must be digits only (got: '$DAYS_BACK')"
+              exit 1
+              ;;
+          esac
+          python -m channel_vetting.pipeline --test ${DAYS_BACK:+--days-back "$DAYS_BACK"}
+
+      # `if: always()` within the configured branch — a failed run has usually
+      # already spent quota and credits, and that is precisely the case where
+      # dropping the ledger lets the next run re-spend from an apparently clean
+      # slate. Writes to the SHARED prefix so the Valencia run sees this run's
+      # spend too.
+      - name: Save quota + search + external-handles + credit + reject cache
+        if: always() && steps.preflight.outputs.configured == 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            data/quota_log.json
+            data/search_cache.json
+            data/external_handles_cache.json
+            data/credit_log.json
+            data/rejected_handles.json
+            data/gemini_log.json
+            data/gemini_cache.json
+          key: channel-vetting-state-${{ github.run_id }}

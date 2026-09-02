@@ -693,6 +693,16 @@ creators judged on followers alone. That degradation is invisible in a review
 queue — an under-screened row looks identical to a screened one — so it fails
 loudly on purpose. Under-spending is treated as a bug, not a saving.
 
+**Two rows per admitted creator.** The prospect lands in the Creators table and
+its measurements in the per-platform account table, linked by record id. Reach
+is recorded **twice, in separate columns**: `Median Views (last 10)` is the
+figure the gates used, and `Avg Views per Video` / `Avg Reel Plays` is the
+genuine mean. On a creator with one viral post those differ by orders of
+magnitude, so collapsing them would make one label a lie. Lifetime fields
+(`Total Likes`, `Posts Count`) and anything the posts response does not carry
+(`Verified`, `Region`, `Bio`) are left **blank** rather than filled with the
+nearest number — a blank cell reads as unknown, a zero reads as measured.
+
 **Nothing is auto-qualified.** Four of the draft's auto-reject rules have no
 purchasable answer: usable subject, photo quality, fake-follower risk, and
 audience age on TikTok. Every admitted row lands as `Review Decision = Pending`

@@ -74,12 +74,42 @@ class PostMetrics:
     sample_size: int = 0
     median_views: int | None = None
     days_since_last_post: int | None = None
+    last_post_at: object = None
     posts_per_week: float | None = None
     total_interactions: int = 0
+    total_likes: int = 0
+    total_comments: int = 0
     total_shares: int = 0
     total_views: int = 0
+    views_sample_size: int = 0
     reason: str = ""
     media_urls: tuple = field(default_factory=tuple)
+
+    # Per-post MEANS, for the account tables' "Avg ..." columns.
+    #
+    # Kept strictly separate from `median_views`, which is what the gates
+    # actually use. Both are written, to differently-named columns, because
+    # putting a median in a column labelled "Avg" is the same mislabelling trap
+    # the vendor statistics avoid — a later reader would compare it against
+    # genuine averages elsewhere in the base and draw the wrong conclusion.
+    @property
+    def avg_views(self) -> int | None:
+        """Mean views over the posts that REPORTED a view count."""
+        if not self.measured or not self.views_sample_size:
+            return None
+        return round(self.total_views / self.views_sample_size)
+
+    @property
+    def avg_likes(self) -> int | None:
+        return round(self.total_likes / self.sample_size) if self.measured and self.sample_size else None
+
+    @property
+    def avg_comments(self) -> int | None:
+        return round(self.total_comments / self.sample_size) if self.measured and self.sample_size else None
+
+    @property
+    def avg_shares(self) -> int | None:
+        return round(self.total_shares / self.sample_size) if self.measured and self.sample_size else None
 
     def engagement_rate(self, platform: str, followers) -> float | None:
         """
@@ -186,7 +216,8 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
     dated.sort(key=lambda pair: (pair[0] is not None, pair[0]), reverse=True)
 
     window = dated[:limit]
-    views, interactions, shares, total_views, media = [], 0, 0, 0, []
+    views, interactions, total_views, media = [], 0, 0, []
+    likes_total = comments_total = shares_total = 0
     for stamp, item in window:
         v = _first_present(item, "views", "view_count", "play_count", "plays")
         if v is not None:
@@ -196,7 +227,9 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
         comments = _as_int(_first_present(item, "comments", "comment_count"))
         share_count = _as_int(_first_present(item, "shares", "share_count"))
         interactions += likes + comments + share_count
-        shares += share_count
+        likes_total += likes
+        comments_total += comments
+        shares_total += share_count
         url = _first_present(item, "media_url", "media_urls", "thumbnail_url", "url", "post_url")
         if isinstance(url, str) and url:
             media.append(url)
@@ -206,6 +239,7 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
     stamps = [s for s, _ in window if s is not None]
     days_since = None
     per_week = None
+    newest = None
     if stamps:
         newest, oldest = max(stamps), min(stamps)
         days_since = max((now - newest).days, 0)
@@ -224,10 +258,14 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
         sample_size=len(window),
         median_views=_median_views(views),
         days_since_last_post=days_since,
+        last_post_at=newest,
         posts_per_week=per_week,
         total_interactions=interactions,
-        total_shares=shares,
+        total_likes=likes_total,
+        total_comments=comments_total,
+        total_shares=shares_total,
         total_views=total_views,
+        views_sample_size=len(views),
         reason="",
         media_urls=tuple(media[:6]),
     )

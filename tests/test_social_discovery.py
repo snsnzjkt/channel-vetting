@@ -298,3 +298,181 @@ def test_do_not_contact_blocks_before_any_screen_is_bought(monkeypatch):
     assert result.blocked == 1
     assert result.screened == 0
     assert spent["posts"] == 0, "a suppressed creator must not cost a screen"
+
+
+# --- 7. the account tables ----------------------------------------------
+
+def test_account_row_records_median_and_mean_in_separate_columns():
+    """
+    Both, never one. On a creator with a viral post they differ by orders of
+    magnitude, so collapsing them would make one column label a lie — and the
+    median is the figure the gates actually used.
+    """
+    flat = [_post(d, views=10_000) for d in range(2, 20, 2)]
+    viral = flat[:-1] + [_post(0, views=5_000_000)]
+    metrics = posts.metrics_from_items(viral, now=NOW)
+
+    row = pipeline._account_record("tiktok", "corgi.daily", 50_000, metrics, "recABC")
+
+    assert row["Median Views (last 10)"] == 10_000
+    assert row["Avg Views per Video"] > 500_000
+    assert row["Median Views (last 10)"] != row["Avg Views per Video"]
+    assert row["Posts Sampled"] == metrics.sample_size
+
+
+def test_account_row_uses_each_platforms_own_engagement_column():
+    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
+
+    tiktok = pipeline._account_record("tiktok", "h", 50_000, metrics, "recA")
+    instagram = pipeline._account_record("instagram", "h", 50_000, metrics, "recA")
+
+    assert "Engagement Rate per View" in tiktok
+    assert "Engagement Rate per Follower" not in tiktok
+    assert "Engagement Rate per Follower" in instagram
+    assert "Engagement Rate per View" not in instagram
+    # Different denominators, so the two rates must not be equal.
+    assert tiktok["Engagement Rate per View"] != instagram["Engagement Rate per Follower"]
+    # Instagram's views are Reel plays, and it has no per-video share column.
+    assert "Avg Reel Plays" in instagram
+    assert "Avg Shares per Video" not in instagram
+
+
+def test_account_link_is_an_array_of_record_ids():
+    """
+    A bare string in a link field is typecast as a NAME to match, which would
+    create a junk Creators row instead of linking to the one just written.
+    """
+    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
+    row = pipeline._account_record("tiktok", "h", 50_000, metrics, "recABC123")
+    assert row["Creators"] == ["recABC123"]
+
+
+def test_account_row_omits_the_link_when_the_creator_id_is_unknown():
+    """Unlinked measurements still beat no measurements."""
+    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
+    row = pipeline._account_record("tiktok", "h", 50_000, metrics, "")
+    assert "Creators" not in row
+
+
+def test_account_row_leaves_lifetime_and_unmeasured_fields_blank():
+    """
+    A blank cell reads as unknown; a zero or a nearest-guess reads as measured.
+    "Total Likes" and "Posts Count" are LIFETIME account figures, and this
+    window is 10 posts.
+    """
+    metrics = posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW)
+    tiktok = pipeline._account_record("tiktok", "h", 50_000, metrics, "recA")
+    instagram = pipeline._account_record("instagram", "h", 50_000, metrics, "recA")
+
+    for absent in ("Total Likes", "Verified", "Region", "Language", "Bio"):
+        assert absent not in tiktok
+    for absent in ("Posts Count", "Following", "Account Type", "Verified"):
+        assert absent not in instagram
+
+
+def test_screened_at_is_set_even_when_no_post_carried_a_timestamp():
+    metrics = posts.PostMetrics(
+        measured=True, sample_size=4, median_views=9_000, total_views=36_000,
+        views_sample_size=4, total_likes=200, total_comments=20, total_shares=10,
+        total_interactions=230,
+    )
+    row = pipeline._account_record("tiktok", "h", 20_000, metrics, "recA")
+    assert "Screened At" in row
+    assert "Last Posted" not in row      # genuinely unknown
+    assert "Posts per Week" not in row   # genuinely unknown
+
+
+def test_run_platform_writes_a_creator_row_and_a_linked_account_row(monkeypatch):
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_TIKTOK", "TikTok Accounts")
+    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 1)
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
+    monkeypatch.setattr(
+        pipeline.discovery, "discover",
+        lambda platform, *, lane, target, exclude_handles, client: (
+            [{"handle": "corgi.daily", "channel_title": "Corgi Daily",
+              "influencers_user_id": "u1", "vendor_followers": 50_000}]
+            if lane["priority"] == 1 else []
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.posts, "fetch_metrics",
+        lambda *a, **k: posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW),
+    )
+    writes = []
+
+    def fake_create(table, fields):
+        writes.append((table, fields))
+        return "recCREATOR" if table == "Creators" else "recACCOUNT"
+
+    monkeypatch.setattr(pipeline, "_create_row", fake_create)
+
+    result = pipeline.run_platform("tiktok")
+
+    assert result.admitted == 1
+    assert result.accounts_written == 1
+    assert [t for t, _ in writes] == ["Creators", "TikTok Accounts"]
+    account_fields = writes[1][1]
+    assert account_fields["Creators"] == ["recCREATOR"], "must link to the row just written"
+    assert account_fields["Handle"] == "corgi.daily"
+
+
+def test_account_write_failure_does_not_undo_the_creator_row(monkeypatch):
+    """
+    A creator row with no account row is degraded but correct — the reviewer
+    reads the numbers from Notes. It must not be counted as a lost prospect.
+    """
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_TIKTOK", "TikTok Accounts")
+    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 1)
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
+    monkeypatch.setattr(
+        pipeline.discovery, "discover",
+        lambda platform, *, lane, target, exclude_handles, client: (
+            [{"handle": "corgi.daily", "channel_title": "C", "vendor_followers": 50_000}]
+            if lane["priority"] == 1 else []
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.posts, "fetch_metrics",
+        lambda *a, **k: posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW),
+    )
+    monkeypatch.setattr(
+        pipeline, "_create_row",
+        lambda table, fields: "recCREATOR" if table == "Creators" else None,
+    )
+
+    result = pipeline.run_platform("tiktok")
+
+    assert result.admitted == 1
+    assert result.account_failures == 1
+    assert result.accounts_written == 0
+
+
+def test_unconfigured_account_table_is_skipped_not_failed(monkeypatch):
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_CREATORS", "Creators")
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_TIKTOK", None)
+    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 1)
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
+    monkeypatch.setattr(
+        pipeline.discovery, "discover",
+        lambda platform, *, lane, target, exclude_handles, client: (
+            [{"handle": "corgi.daily", "channel_title": "C", "vendor_followers": 50_000}]
+            if lane["priority"] == 1 else []
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.posts, "fetch_metrics",
+        lambda *a, **k: posts.metrics_from_items([_post(d) for d in range(0, 20, 2)], now=NOW),
+    )
+    monkeypatch.setattr(pipeline, "_create_row", lambda table, fields: "recX")
+
+    result = pipeline.run_platform("tiktok")
+
+    assert result.admitted == 1
+    assert result.accounts_skipped == 1
+    assert result.account_failures == 0
+    assert "table not configured" in result.summary()

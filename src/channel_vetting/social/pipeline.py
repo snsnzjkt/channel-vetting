@@ -27,6 +27,7 @@ not to pretend it finished the rubric.
 """
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import requests
 
@@ -41,20 +42,26 @@ from channel_vetting.airtable.do_not_contact import fetch_blocklist
 from channel_vetting.budget import credit_tracker
 from channel_vetting.core.http_client import post_with_rate_limit_retry, safe_body
 from channel_vetting.core.prospect_day import today_iso
+
+
+def _iso_minutes(moment) -> str:
+    """An Airtable-friendly UTC timestamp, to the minute."""
+    return moment.strftime("%Y-%m-%dT%H:%M:00.000Z")
 from channel_vetting.social import criteria, discovery, posts
 from channel_vetting.social.handles import normalize_social_handle, profile_url
 from channel_vetting.social.lanes import lanes_in_order
 
 logger = logging.getLogger(__name__)
 
-# ONE ROW PER CREATOR, in the Creators table. The per-platform account tables
-# (AIRTABLE_TABLE_SOCIAL_TIKTOK / _INSTAGRAM) are NOT written by this version —
-# a creator's measured numbers go into the Creators row's Notes instead. Wiring
-# the account tables needs a linked-record write, and a half-populated account
-# row that looks like a full one is worse than no row: a reviewer would read the
-# blanks as measured zeroes. The env vars exist so the destination is already
-# configurable when that lands.
-
+# TWO ROWS PER ADMITTED CREATOR: the prospect in the Creators table, then its
+# measurements in the per-platform account table, linked back by record id.
+#
+# The order is the safety property, small as it is. The creator row is what a
+# reviewer works from; the account row is detail. A creator row with no account
+# row is degraded but usable (the numbers are also summarised in its Notes), so
+# an account-write failure is recorded and moved past rather than treated as a
+# lost prospect. The reverse — an account row with no creator — would be
+# orphaned measurements on no review page.
 
 @dataclass
 class PlatformResult:
@@ -68,6 +75,9 @@ class PlatformResult:
     already_tracked: int = 0
     blocked: int = 0
     write_failures: int = 0
+    accounts_written: int = 0
+    account_failures: int = 0
+    accounts_skipped: int = 0
     rejections: dict = field(default_factory=dict)
 
     def note_rejection(self, reason: str) -> None:
@@ -80,10 +90,16 @@ class PlatformResult:
             f"{reason}={count}"
             for reason, count in sorted(self.rejections.items(), key=lambda kv: -kv[1])
         )
+        accounts = f"accounts {self.accounts_written}"
+        if self.account_failures:
+            accounts += f" (+{self.account_failures} failed)"
+        if self.accounts_skipped:
+            accounts += f" (+{self.accounts_skipped} skipped, table not configured)"
         return (
             f"{self.platform}: discovered {self.discovered}, screened {self.screened}, "
-            f"admitted {self.admitted} (already tracked {self.already_tracked}, "
-            f"DNC {self.blocked}, write failures {self.write_failures})"
+            f"admitted {self.admitted}, {accounts} (already tracked "
+            f"{self.already_tracked}, DNC {self.blocked}, write failures "
+            f"{self.write_failures})"
             + (f" | rejected: {top}" if top else "")
         )
 
@@ -157,15 +173,107 @@ def _social_record(platform, candidate, followers, metrics, country=None) -> dic
     }
 
 
-def _create_row(table_name: str, fields: dict) -> bool:
+def _account_table_for(platform: str) -> str | None:
+    """The per-platform account table, or None when it is not configured."""
+    if platform == criteria.PLATFORM_TIKTOK:
+        return config.AIRTABLE_TABLE_SOCIAL_TIKTOK
+    if platform == criteria.PLATFORM_INSTAGRAM:
+        return config.AIRTABLE_TABLE_SOCIAL_INSTAGRAM
+    return None
+
+
+def _account_record(platform, handle, followers, metrics, creator_record_id) -> dict:
     """
-    Create one Airtable row.
+    The account-table row: the measured numbers, in correctly-labelled columns.
+
+    TWO COLUMNS FOR REACH, ON PURPOSE. "Median Views (last 10)" is the figure
+    the gates use, per the draft's "judge on the median... not the average".
+    "Avg Views per Video" / "Avg Reel Plays" is the genuine mean. Both are
+    written because they answer different questions and because collapsing them
+    into one column would mean one of the two labels was lying — on a creator
+    with a single viral post they differ by orders of magnitude.
+
+    FIELDS DELIBERATELY LEFT BLANK rather than filled with the nearest number to
+    hand:
+      - TikTok "Total Likes" and Instagram "Posts Count" are LIFETIME account
+        totals. Writing this window's sums there would turn a 10-post figure
+        into an account-lifetime claim.
+      - "Verified", "Region", "Language", "Bio", "Account Type", "Following":
+        not in the posts response. A blank cell reads as unknown; a zero or a
+        guess reads as measured.
+    """
+    engagement = metrics.engagement_rate(platform, followers)
+    common = {
+        "Handle": handle,
+        "Profile URL": profile_url(platform, handle),
+        "Followers": int(followers or 0),
+        "Posts per Week": metrics.posts_per_week,
+        "Median Views (last 10)": metrics.median_views,
+        "Posts Sampled": metrics.sample_size,
+        # Always set: the screen ran and was PAID FOR whether or not any post
+        # carried a readable timestamp. Gating this on last_post_at (an earlier
+        # version did) left the column blank on exactly the creators whose data
+        # was thinnest, which is when knowing the screen happened matters most.
+        "Screened At": _iso_minutes(datetime.now(timezone.utc)),
+        "Source": "influencers.club discovery",
+        "Notes": (
+            f"Auto-screened from the {metrics.sample_size}-post window. "
+            f"Engagement is measured per "
+            f"{'VIEW' if platform == criteria.PLATFORM_TIKTOK else 'FOLLOWER'} on this "
+            f"platform. Median and mean are both recorded and differ on creators "
+            f"with a viral post — the median is the one the gates used."
+        ),
+    }
+    if metrics.last_post_at is not None:
+        common["Last Posted"] = metrics.last_post_at.date().isoformat()
+    # An Airtable link field takes an ARRAY of record ids. A bare string is
+    # accepted by typecast as a NAME to match, which would create a junk
+    # Creators row instead of linking to the one just written.
+    if creator_record_id:
+        common["Creators"] = [creator_record_id]
+
+    if platform == criteria.PLATFORM_TIKTOK:
+        common.update({
+            "Avg Views per Video": metrics.avg_views,
+            "Avg Likes per Video": metrics.avg_likes,
+            "Avg Comments per Video": metrics.avg_comments,
+            "Avg Shares per Video": metrics.avg_shares,
+            "Engagement Rate per View": engagement,
+        })
+    else:
+        common.update({
+            # Instagram's "views" ARE Reel plays — the platform reports plays for
+            # Reels and nothing for static posts, which is also why the median
+            # drops unmeasured posts instead of scoring them zero.
+            "Avg Reel Plays": metrics.avg_views,
+            "Avg Likes per Post": metrics.avg_likes,
+            "Avg Comments per Post": metrics.avg_comments,
+            "Engagement Rate per Follower": engagement,
+        })
+
+    # Airtable rejects a null in a number field on some configurations, and a
+    # None in a percent field is meaningless either way. Drop unset keys so a
+    # blank cell means "not measured" rather than zero.
+    return {k: v for k, v in common.items() if v is not None}
+
+
+def _create_row(table_name: str, fields: dict) -> str | None:
+    """
+    Create one Airtable row. Returns its record id, or None on failure.
+
+    THE RECORD ID IS THE RETURN VALUE, not a bool, because the account row has
+    to LINK to the creator row and an Airtable link field takes record ids. A
+    bool would have forced a second lookup by handle to find the row we just
+    wrote.
 
     Uses the airtable client's own `_base_url`/`_headers` and its
     rate-limit-retrying POST helper rather than a second HTTP path, so the token,
     the base id, the URL encoding and the 429 handling are all the ones the rest
     of the project is tested against. push_record() is not reusable here: it
     dedupes on "Channel ID", which a TikTok or Instagram creator does not have.
+
+    typecast=True so a Source or Language option we have not seen before is
+    created rather than rejecting the write, matching push_record.
     """
     payload = {"fields": fields, "typecast": True}
     try:
@@ -174,14 +282,25 @@ def _create_row(table_name: str, fields: dict) -> bool:
         )
     except requests.RequestException as exc:
         logger.error("social row create failed for %s: %s", fields.get("Handle"), exc)
-        return False
+        return None
     if resp.status_code not in (200, 201):
         logger.error(
             "social row create rejected for %s in %s: %s %s",
             fields.get("Handle"), table_name, resp.status_code, safe_body(resp),
         )
-        return False
-    return True
+        return None
+    try:
+        return resp.json().get("id")
+    except ValueError:
+        # A 200/201 with an unreadable body means the row probably EXISTS but we
+        # cannot link to it. Say so rather than returning None, which the caller
+        # would read as "nothing was written" and might retry into a duplicate.
+        logger.error(
+            "social row created in %s but the response was not JSON — cannot link "
+            "the account row to it; the creator row exists and is unlinked",
+            table_name,
+        )
+        return ""
 
 
 def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -> PlatformResult:
@@ -270,11 +389,37 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
                 result.admitted += 1
                 continue
 
-            fields = _social_record(platform, candidate, followers, metrics)
-            if _create_row(creators_table, fields):
-                result.admitted += 1
-            else:
+            creator_id = _create_row(
+                creators_table, _social_record(platform, candidate, followers, metrics)
+            )
+            if creator_id is None:
                 result.write_failures += 1
+                continue
+            result.admitted += 1
+
+            # THE ACCOUNT ROW IS WRITTEN SECOND, AND ITS FAILURE DOES NOT UNDO
+            # THE CREATOR ROW. Ordering matters the same way the outreach
+            # claim's does: the creator row is the prospect, the account row is
+            # its measurements. A creator row with no account row is a reviewer
+            # reading numbers from Notes — degraded but correct. An account row
+            # with no creator row would be orphaned measurements nobody sees.
+            #
+            # `creator_id == ""` means the row was created but the response was
+            # unreadable, so the account row is written UNLINKED rather than
+            # skipped — the measurements are still worth having, and
+            # _account_record omits the link field when the id is falsy.
+            account_table = _account_table_for(platform)
+            if not account_table:
+                result.accounts_skipped += 1
+                continue
+            account_id = _create_row(
+                account_table,
+                _account_record(platform, handle, followers, metrics, creator_id),
+            )
+            if account_id is None:
+                result.account_failures += 1
+            else:
+                result.accounts_written += 1
 
     logger.info("%s", result.summary())
     return result

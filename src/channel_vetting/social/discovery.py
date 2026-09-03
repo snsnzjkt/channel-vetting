@@ -27,6 +27,7 @@ prospects permanently, and this only costs a few 0.01s.
 import logging
 
 from channel_vetting import config
+from channel_vetting.discovery.search_zones import ZONE_CORE, vendor_locations_for
 from channel_vetting.discovery.influencers_club import (
     DEFAULT_SORT,
     InfluencerDiscovery,
@@ -68,8 +69,29 @@ def build_filters(platform: str, lane: dict | None = None) -> dict:
         "number_of_followers": {"min": int(config.SOCIAL_MIN_FOLLOWERS)},
         "engagement_percent": {"min": most_permissive_engagement_percent(platform)},
     }
-    if config.SOCIAL_SEND_LOCATION_FILTER and config.SOCIAL_LOCATION_VALUES:
-        filters["location"] = list(config.SOCIAL_LOCATION_VALUES)
+
+    # The SAME zone the Valencia niches send, via the same all-or-nothing
+    # helper: [] rather than a lossy subset, so a missing country name leaves
+    # the filter off instead of silently excluding creators the zone allows.
+    locations = vendor_locations_for(ZONE_CORE)
+    if locations:
+        filters["location"] = locations
+    else:
+        logger.warning(
+            "no verified vendor location names for the social zone — running "
+            "WITHOUT a location filter, so out-of-zone creators will be billed "
+            "and must be rejected by a reviewer"
+        )
+
+    # RELEVANCE. `ai_search` is a documented FILTER field and measured highly
+    # selective (11.1M -> 39k on its own). Deliberately NOT
+    # `keywords_not_in_description`, which both platforms ACCEPT and silently
+    # ignore — probed 2026-09-03, identical result totals with and without it.
+    # Artist exclusion therefore happens locally, in social/relevance.py.
+    query = (lane or {}).get("ai_search")
+    if query:
+        filters["ai_search"] = query
+
     return filters
 
 
@@ -126,7 +148,6 @@ def discover(
 
     filters = build_filters(platform, lane)
     label = f"social discovery {platform}/{lane.get('key', 'unlabelled')}"
-    nlp = lane.get("nlp_search")
 
     try:
         return disc.discover(
@@ -136,10 +157,6 @@ def discover(
             platform=platform,
             sort=DEFAULT_SORT,
             source_label=label,
-            # A SIBLING of filters in the request body, not a filter. Sending it
-            # inside `filters` returns 400 invalid_input — see the note in
-            # InfluencerDiscovery.discover().
-            nlp_search=nlp,
         )
     except Exception as exc:  # fail-soft, matching the YouTube contract
         logger.warning("social discovery failed for %s: %s", label, exc)

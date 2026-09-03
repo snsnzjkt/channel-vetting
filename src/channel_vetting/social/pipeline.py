@@ -47,7 +47,7 @@ from channel_vetting.core.prospect_day import today_iso
 def _iso_minutes(moment) -> str:
     """An Airtable-friendly UTC timestamp, to the minute."""
     return moment.strftime("%Y-%m-%dT%H:%M:00.000Z")
-from channel_vetting.social import criteria, discovery, posts
+from channel_vetting.social import criteria, discovery, posts, relevance
 from channel_vetting.social.handles import normalize_social_handle, profile_url
 from channel_vetting.social.lanes import lanes_in_order
 
@@ -153,7 +153,11 @@ def _prospect_record(platform, candidate, followers, metrics, lane_key="") -> di
     """
     handle = candidate["handle"]
     engagement = metrics.engagement_rate(platform, followers)
-    points, _out_of = criteria.auto_score(platform, followers=followers, metrics=metrics)
+    # in_zone=True: the discovery filter enforces the location zone server-side,
+    # so every returned creator is in zone by construction.
+    points, _out_of = criteria.auto_score(
+        platform, followers=followers, metrics=metrics, in_zone=True
+    )
     is_tiktok = platform == criteria.PLATFORM_TIKTOK
     band = criteria.follower_band(int(followers or 0))
 
@@ -367,6 +371,15 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
             reason = criteria.auto_reject_reason(
                 platform, followers=followers, metrics=metrics
             )
+            # THE PET REQUIREMENT, checked after the numeric gates because it
+            # reads captions the same posts response already paid for, so the
+            # order costs nothing either way — but a numeric rejection is the
+            # cheaper thing to report first. Lanes with pet_required=False (the
+            # people and TRPG verticals, both off by default) skip it.
+            if not reason and lane.get("pet_required", True):
+                reason = relevance.pet_content_reason(
+                    metrics, name=candidate.get("channel_title") or ""
+                )
             if reason:
                 result.note_rejection(reason)
                 continue

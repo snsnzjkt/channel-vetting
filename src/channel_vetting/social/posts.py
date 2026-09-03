@@ -35,7 +35,7 @@ import requests
 
 from channel_vetting import config
 from channel_vetting.budget.credit_tracker import (
-    KIND_DISCOVERY,
+    KIND_SOCIAL,
     can_afford,
     record_spend,
 )
@@ -384,7 +384,7 @@ def fetch_metrics(platform: str, handle: str, *, source_label="social posts scre
     billed = body.get("credits_cost") if isinstance(body, dict) else None
     billed = float(billed) if isinstance(billed, (int, float)) and not isinstance(billed, bool) else (cost if items else 0.0)
     if billed:
-        record_spend(billed, kind=KIND_DISCOVERY, detail=f"{source_label} ({platform})")
+        record_spend(billed, kind=KIND_SOCIAL, detail=f"{source_label} ({platform})")
 
     if not items:
         return PostMetrics(measured=False, reason="no_posts_returned")

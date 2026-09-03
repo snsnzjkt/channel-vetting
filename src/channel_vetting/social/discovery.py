@@ -27,6 +27,7 @@ prospects permanently, and this only costs a few 0.01s.
 import logging
 
 from channel_vetting import config
+from channel_vetting.budget import credit_tracker
 from channel_vetting.discovery.search_zones import ZONE_CORE, vendor_locations_for
 from channel_vetting.discovery.influencers_club import (
     DEFAULT_SORT,
@@ -115,6 +116,9 @@ def client_for_run(*, max_credits=None, enabled=True) -> InfluencerDiscovery:
         # there is no free platform API to verify it against — so unlike the
         # YouTube path its statistics must be carried, not dropped.
         carry_vendor_stats=True,
+        # Buckets this run's discovery spend under KIND_SOCIAL so Mythumi holds
+        # its own daily slice of the shared ledger.
+        spend_kind=credit_tracker.KIND_SOCIAL,
     )
 
 

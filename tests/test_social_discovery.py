@@ -1049,3 +1049,64 @@ def test_engagement_denominator_follows_the_registry_not_a_hardcoded_name():
     tt = criteria.engagement_rate("tiktok", interactions=500, views=10_000, followers=100_000)
     ig = criteria.engagement_rate("instagram", interactions=500, views=10_000, followers=100_000)
     assert tt != ig
+
+
+# --- 13. the per-business daily reservation ------------------------------
+
+def test_social_spend_lands_in_its_own_ledger_bucket():
+    """
+    One ledger, separate buckets. Two ledgers would each believe they held a
+    full allowance and the pair would double-spend one real subscription.
+    """
+    credit_tracker.record_spend(0.5, kind=credit_tracker.KIND_SOCIAL, detail="t")
+    credit_tracker.record_spend(0.3, kind=credit_tracker.KIND_DISCOVERY, detail="t")
+
+    assert credit_tracker.credits_today_for_kind(credit_tracker.KIND_SOCIAL) == pytest.approx(0.5)
+    assert credit_tracker.credits_today_for_kind(credit_tracker.KIND_DISCOVERY) == pytest.approx(0.3)
+    # The shared total still sees BOTH — that is the point.
+    assert credit_tracker.credits_today() == pytest.approx(0.8)
+
+
+def test_the_reservation_caps_social_without_touching_valencias_spend(monkeypatch):
+    monkeypatch.setattr(config, "SOCIAL_MAX_CREDITS_PER_DAY", 1.0)
+    monkeypatch.setattr(config, "SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 99.0)
+
+    assert pipeline.social_daily_headroom() == pytest.approx(1.0)
+    # 1.0 / 0.03 = 33 screens
+    assert pipeline.affordable_posts_screens() == 33
+
+    # Valencia spending does NOT eat the social slice.
+    credit_tracker.record_spend(0.9, kind=credit_tracker.KIND_DISCOVERY, detail="valencia")
+    assert pipeline.social_daily_headroom() == pytest.approx(1.0)
+
+    # Social spending does.
+    credit_tracker.record_spend(0.9, kind=credit_tracker.KIND_SOCIAL, detail="mythumi")
+    assert pipeline.social_daily_headroom() == pytest.approx(0.1)
+
+
+def test_an_exhausted_reservation_trips_the_quality_floor(monkeypatch):
+    """
+    Running out of reservation must ABORT the platform, not admit creators
+    screened on follower count alone.
+    """
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "SOCIAL_MAX_CREDITS_PER_DAY", 0.15)  # 5 screens
+    monkeypatch.setattr(config, "SOCIAL_MIN_POSTS_SCREENS_PER_RUN", 10)
+
+    result = pipeline.run_platform("tiktok")
+
+    assert "below the SOCIAL_MIN_POSTS_SCREENS_PER_RUN floor" in result.aborted
+    assert result.screened == 0
+
+
+def test_the_shared_ceiling_still_wins_over_the_reservation(monkeypatch, credit_ceilings):
+    """
+    The reservation decides how much of a shared day one business may take. It
+    does NOT let it past the shared ceiling — that would be the double-spend a
+    second ledger causes.
+    """
+    monkeypatch.setattr(config, "SOCIAL_MAX_CREDITS_PER_DAY", 99.0)
+    monkeypatch.setattr(config, "SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 99.0)
+    credit_ceilings(day=0.30, month=99.0)   # only 10 screens in the whole day
+
+    assert pipeline.affordable_posts_screens() == 10

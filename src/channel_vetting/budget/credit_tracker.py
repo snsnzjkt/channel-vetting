@@ -74,6 +74,18 @@ logger = logging.getLogger(__name__)
 # on one of the two, and an undifferentiated total cannot say which.
 KIND_DISCOVERY = "discovery"
 KIND_EMAIL = "email"
+# The Mythumi social path's spend, bucketed separately from the YouTube run's.
+#
+# WHY A THIRD KIND RATHER THAN A SECOND LEDGER. There is ONE subscription, one
+# real balance and one fair-use handle meter, so two ledgers would not create
+# credits — each would simply believe it had a full allowance and the pair would
+# spend double against a single pool, with nothing left to stop them. That fails
+# OPEN, silently, which is the one direction this module refuses to fail.
+#
+# Bucketing by kind inside ONE ledger gives the thing a second ledger was wanted
+# for — a daily slice each business can rely on, so neither starves the other —
+# while keeping a single real backstop. See credits_today_for_kind().
+KIND_SOCIAL = "social"
 
 # Daily detail is pruned to keep the file small; MONTHLY totals never are, since
 # they are the only long-run record of money spent and cost ~30 bytes a month.
@@ -217,6 +229,23 @@ def credits_today() -> float:
         return _totals(load_log())[0]
     except CreditLedgerUnavailable:
         return 0.0
+
+
+def credits_today_for_kind(kind: str) -> float:
+    """
+    Today's spend under ONE kind, for per-business daily reservations.
+
+    Reads the same `by_kind` bucket record_spend already maintains, so this adds
+    no new state to keep in sync. Returns 0.0 when the ledger cannot be read —
+    the CALLER must still consult can_afford(), which fails closed; this figure
+    only decides how much of a shared day one business may claim.
+    """
+    try:
+        log = load_log()
+    except Exception:
+        return 0.0
+    day = log.get("days", {}).get(today_iso()) or {}
+    return float((day.get("by_kind") or {}).get(kind, 0.0) or 0.0)
 
 
 def credits_this_month() -> float:

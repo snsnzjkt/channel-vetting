@@ -95,29 +95,50 @@ class PlatformResult:
         )
 
 
+def social_daily_headroom() -> float:
+    """
+    Credits Mythumi may still claim today from its RESERVED slice.
+
+    Its own bucket (`KIND_SOCIAL`), not the whole day's total — so the Valencia
+    run going first cannot starve it, and it cannot starve Valencia. The shared
+    ceiling in can_afford() still sits above this and still fails closed; this
+    only decides how much of a shared day one business may take.
+    """
+    spent = credit_tracker.credits_today_for_kind(credit_tracker.KIND_SOCIAL)
+    return max(config.SOCIAL_MAX_CREDITS_PER_DAY - spent, 0.0)
+
+
 def affordable_posts_screens() -> int:
     """
-    How many posts screens the SHARED ledger will currently authorise.
+    How many posts screens are actually authorised right now.
 
-    Asks the ledger rather than dividing the per-run ceiling, because the daily
-    and monthly caps sit above it: a run late in the month can be inside its own
-    per-run budget and still be refused by the month. Probing with can_afford
-    means the floor check below reflects what will actually be permitted.
+    Bounded by THREE things, and the smallest wins:
+      1. the per-run posts budget (SOCIAL_MAX_POSTS_CREDITS_PER_RUN),
+      2. Mythumi's remaining reserved slice for today, and
+      3. the SHARED ledger, probed with can_afford() — because the daily and
+         monthly ceilings sit above the reservation, so a run can be inside its
+         own budget and its own slice and still be refused by the month.
+
+    Probing rather than dividing matters: a run late in the month is inside its
+    per-run budget and its own slice yet may have almost nothing left overall,
+    and the quality floor must see the real figure or it cannot do its job.
     """
     cost = config.SOCIAL_POSTS_CREDITS_PER_REQUEST
     if cost <= 0:
         return 0
-    per_run_allowance = int(config.SOCIAL_MAX_POSTS_CREDITS_PER_RUN / cost)
-    if not credit_tracker.can_afford(cost * max(per_run_allowance, 1), "posts screen probe"):
-        # The full per-run allowance is not available; find what is, without
-        # spending anything.
-        affordable = 0
-        for n in range(per_run_allowance, 0, -1):
-            if credit_tracker.can_afford(cost * n, "posts screen probe"):
-                affordable = n
-                break
-        return affordable
-    return per_run_allowance
+
+    per_run = int(config.SOCIAL_MAX_POSTS_CREDITS_PER_RUN / cost)
+    reserved = int(social_daily_headroom() / cost)
+    ceiling = min(per_run, reserved)
+    if ceiling <= 0:
+        return 0
+
+    if credit_tracker.can_afford(cost * ceiling, "posts screen probe"):
+        return ceiling
+    for n in range(ceiling - 1, 0, -1):
+        if credit_tracker.can_afford(cost * n, "posts screen probe"):
+            return n
+    return 0
 
 
 def prospect_table_for(platform: str) -> str | None:

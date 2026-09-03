@@ -41,10 +41,8 @@ _RESERVED_PATHS = frozenset({
     "tag", "tags", "discover", "music", "search", "foryou", "video", "t",
 })
 
-_PROFILE_URL = {
-    "tiktok": "https://www.tiktok.com/@{handle}",
-    "instagram": "https://www.instagram.com/{handle}/",
-}
+# Templates live in social.platforms; imported lazily inside profile_url() to
+# keep this module free of an import cycle (platforms imports nothing).
 
 
 def normalize_social_handle(raw: str) -> str:
@@ -108,8 +106,13 @@ def profile_url(platform: str, handle: str) -> str:
     straight through to judge photo quality, so a wrong or tracking-laden URL
     costs review time.
     """
-    template = _PROFILE_URL.get((platform or "").lower())
+    from channel_vetting.social import platforms
+
     bare = normalize_social_handle(handle)
-    if not template or not bare:
+    if not bare:
+        return ""
+    try:
+        template = platforms.spec(platform)["profile_url"]
+    except ValueError:
         return ""
     return template.format(handle=bare)

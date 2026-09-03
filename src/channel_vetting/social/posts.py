@@ -55,7 +55,13 @@ REQUEST_TIMEOUT_SECONDS = 45
 # caps at 35. Asking for the draft's 10 would not be cheaper — the price is per
 # REQUEST, not per post — so ask for enough that the cadence figure has some
 # spine to it and then compute the median over the newest SOCIAL_POSTS_SAMPLE_SIZE.
-_PAGE_SIZE = {"instagram": 12, "tiktok": 30}
+def _page_size(platform: str) -> int:
+    """Requested posts per page, from the platform registry."""
+    from channel_vetting.social import platforms
+    try:
+        return int(platforms.spec(platform)["page_size"])
+    except ValueError:
+        return 12
 
 
 @dataclass(frozen=True)
@@ -350,7 +356,7 @@ def fetch_metrics(platform: str, handle: str, *, source_label="social posts scre
     payload = {
         "platform": (platform or "").lower(),
         "handle": handle,
-        "num_results": _PAGE_SIZE.get((platform or "").lower(), 12),
+        "num_results": _page_size(platform),
     }
     url = f"{INFLUENCERS_BASE_URL}{POSTS_PATH}"
     try:

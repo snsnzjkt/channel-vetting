@@ -32,12 +32,15 @@ import os
 import statistics
 
 from channel_vetting import config
+from channel_vetting.social import platforms
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_TIKTOK = "tiktok"
-PLATFORM_INSTAGRAM = "instagram"
-SOCIAL_PLATFORMS = (PLATFORM_TIKTOK, PLATFORM_INSTAGRAM)
+# Re-exported so existing callers and tests keep working; the registry in
+# social.platforms is the single source of truth.
+PLATFORM_TIKTOK = platforms.TIKTOK
+PLATFORM_INSTAGRAM = platforms.INSTAGRAM
+SOCIAL_PLATFORMS = platforms.SUPPORTED
 
 # Follower bands. THE BOUNDARIES ARE AN ASSUMPTION, NOT FROM THE DRAFT: it names
 # small / micro / mid / big tiers and gives a rate for each, but never says
@@ -75,19 +78,11 @@ def follower_band(followers: int) -> str:
 #
 # The draft's own note on why Instagram's lower-looking numbers are the harsher
 # test: "under 1% on Instagram almost always means bought followers."
+# Kept as a name because discovery.py derives its server-side filter from it.
+# The VALUES now live in social.platforms so a new platform cannot inherit
+# TikTok's floors by omission.
 _ENGAGEMENT_FLOORS = {
-    PLATFORM_TIKTOK: {
-        BAND_SMALL: 0.040,
-        BAND_MICRO: 0.030,
-        BAND_MID: 0.030,
-        BAND_BIG: 0.025,
-    },
-    PLATFORM_INSTAGRAM: {
-        BAND_SMALL: 0.030,
-        BAND_MICRO: 0.020,
-        BAND_MID: 0.015,
-        BAND_BIG: 0.010,
-    },
+    name: spec["engagement_floors"] for name, spec in platforms.PLATFORMS.items()
 }
 
 # "Who to actually go after: Micro, 10K-100K followers, above 3.5%
@@ -99,20 +94,12 @@ PRIORITY_MIN_ENGAGEMENT = 0.035
 
 def engagement_floor(platform: str, followers: int) -> float:
     """The minimum engagement fraction for this platform and follower band."""
-    table = _ENGAGEMENT_FLOORS.get((platform or "").lower())
-    if not table:
-        raise ValueError(f"no engagement floor table for platform {platform!r}")
-    return table[follower_band(followers)]
+    return platforms.spec(platform)["engagement_floors"][follower_band(followers)]
 
 
 def min_median_views(platform: str) -> int:
     """The median-reach floor. Separate per platform, per the draft."""
-    p = (platform or "").lower()
-    if p == PLATFORM_TIKTOK:
-        return config.SOCIAL_TIKTOK_MIN_MEDIAN_VIEWS
-    if p == PLATFORM_INSTAGRAM:
-        return config.SOCIAL_INSTAGRAM_MIN_MEDIAN_VIEWS
-    raise ValueError(f"no median-views floor for platform {platform!r}")
+    return int(getattr(config, platforms.spec(platform)["min_median_views_attr"]))
 
 
 def median_views(view_counts) -> int | None:
@@ -139,13 +126,9 @@ def engagement_rate(platform: str, *, interactions: int, views: int, followers: 
     zero rate, because zero fails every floor and would silently reject the
     account instead of flagging it as unmeasured.
     """
-    p = (platform or "").lower()
-    if p == PLATFORM_TIKTOK:
-        denominator = views
-    elif p == PLATFORM_INSTAGRAM:
-        denominator = followers
-    else:
-        raise ValueError(f"no engagement rule for platform {platform!r}")
+    denominator = (
+        views if platforms.denominator(platform) == platforms.DENOM_VIEWS else followers
+    )
     if not denominator or denominator <= 0:
         return None
     return (interactions or 0) / denominator

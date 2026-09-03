@@ -903,3 +903,149 @@ def test_zone_points_are_awarded_because_location_is_enforced_server_side():
     without = criteria.auto_score("tiktok", followers=50_000, metrics=metrics, in_zone=False)
     within = criteria.auto_score("tiktok", followers=50_000, metrics=metrics, in_zone=True)
     assert within[0] == without[0] + 12
+
+
+# --- 11. the Airtable schema contract ------------------------------------
+#
+# Airtable answers an unknown field name with 422 UNKNOWN_FIELD_NAME rather than
+# ignoring it, so ONE renamed or mistyped column makes the whole write fail —
+# and that is exactly how the second live run died (on "Channel ID"). These
+# names are transcribed from the live tables on 2026-09-03; if a column is
+# renamed in Airtable, this test is what tells you before a run does.
+
+_LIVE_COMMON = {
+    "Creator Name", "Handle", "Profile URL", "Account ID", "Qualification",
+    "Status", "Subject Check", "Photo Quality", "Followers",
+    "Median Views (last 10)", "Avg Likes per Post", "Avg Comments per Post",
+    "Posts per Week", "Last Posted", "Days Since Last Post", "Posts Sampled",
+    "Follower Band", "Priority Band", "Auto Score (of 35)", "Sample Media",
+    "Lane", "Email", "Do Not Contact", "Send email now", "Send Requested At",
+    "Source", "Screened At", "Date Added", "Notes", "Outreach Log",
+    "Last Send State", "Outreach Ineligible Reason",
+}
+LIVE_FIELDS = {
+    "tiktok": _LIVE_COMMON | {
+        "Avg Views per Post", "Engagement Rate (per view)", "Avg Shares per Post",
+    },
+    "instagram": _LIVE_COMMON | {
+        "Avg Reel Plays", "Engagement Rate (per follower)",
+    },
+}
+
+
+@pytest.mark.parametrize("platform", ["tiktok", "instagram"])
+def test_prospect_record_only_writes_fields_that_exist(platform):
+    metrics = _metrics_with(_PET_CAPTIONS)
+    candidate = {"handle": "h", "channel_title": "H", "influencers_user_id": "u1"}
+
+    row = pipeline._prospect_record(platform, candidate, 50_000, metrics, "pet_breed")
+
+    unknown = set(row) - LIVE_FIELDS[platform]
+    assert not unknown, (
+        f"{platform} row writes columns that do not exist on the table: "
+        f"{sorted(unknown)} — Airtable answers 422 UNKNOWN_FIELD_NAME and the "
+        f"whole write fails"
+    )
+
+
+@pytest.mark.parametrize("platform", ["tiktok", "instagram"])
+def test_prospect_record_never_writes_the_other_platforms_columns(platform):
+    """
+    The per-view and per-follower engagement columns are NOT interchangeable, and
+    writing one into the other's table would be both a 422 and a lie.
+    """
+    other = "instagram" if platform == "tiktok" else "tiktok"
+    only_other = LIVE_FIELDS[other] - LIVE_FIELDS[platform]
+
+    row = pipeline._prospect_record(
+        platform, {"handle": "h", "channel_title": "H"}, 50_000,
+        _metrics_with(_PET_CAPTIONS), "pet_breed",
+    )
+
+    assert not (set(row) & only_other)
+
+
+# --- 12. the platform registry -------------------------------------------
+#
+# Adding a platform used to mean editing per-platform branches in six modules,
+# and a forgotten one did not raise — it fell into the TikTok branch, so a new
+# platform would be judged on TikTok's floors and written to TikTok's columns.
+# These tests pin that the registry is now the only place that varies.
+
+from channel_vetting.social import platforms
+
+REQUIRED_KEYS = {
+    "label", "table_config_attr", "min_median_views_attr", "denominator",
+    "engagement_floors", "profile_url", "page_size", "asset_set",
+    "engagement_column", "reach_mean_column", "shares_column",
+    "audience_age_available",
+}
+
+
+@pytest.mark.parametrize("platform", platforms.SUPPORTED)
+def test_every_platform_entry_is_complete(platform):
+    """
+    A missing key is an AttributeError or a silent None at write time, deep in a
+    run that has already been paid for.
+    """
+    spec = platforms.PLATFORMS[platform]
+    assert set(spec) == REQUIRED_KEYS, (
+        f"{platform} registry entry differs from the contract: "
+        f"missing {sorted(REQUIRED_KEYS - set(spec))}, "
+        f"extra {sorted(set(spec) - REQUIRED_KEYS)}"
+    )
+    assert set(spec["engagement_floors"]) == {
+        criteria.BAND_SMALL, criteria.BAND_MICRO, criteria.BAND_MID, criteria.BAND_BIG,
+    }
+    assert spec["denominator"] in (platforms.DENOM_VIEWS, platforms.DENOM_FOLLOWERS)
+    assert "{handle}" in spec["profile_url"]
+    assert getattr(config, spec["min_median_views_attr"]) > 0
+
+
+def test_an_unknown_platform_raises_rather_than_defaulting():
+    """
+    A silent default is how a new platform inherits TikTok's floors and columns.
+    """
+    with pytest.raises(ValueError, match="unsupported social platform"):
+        platforms.spec("twitter")
+    for fn in (criteria.engagement_floor, criteria.min_median_views):
+        with pytest.raises(ValueError):
+            fn("twitter") if fn is criteria.min_median_views else fn("twitter", 5_000)
+
+
+def test_the_two_platforms_never_share_an_engagement_column():
+    """
+    Per-view and per-follower are not comparable, so the columns must differ —
+    that is what makes a mis-write a 422 rather than a silent lie.
+    """
+    columns = [platforms.PLATFORMS[p]["engagement_column"] for p in platforms.SUPPORTED]
+    assert len(set(columns)) == len(columns)
+    means = [platforms.PLATFORMS[p]["reach_mean_column"] for p in platforms.SUPPORTED]
+    assert len(set(means)) == len(means)
+
+
+def test_registry_drives_the_derived_lookups():
+    """One entry should reach every accessor, with no second place to edit."""
+    for platform in platforms.SUPPORTED:
+        spec = platforms.PLATFORMS[platform]
+        assert criteria.engagement_floor(platform, 5_000) == spec["engagement_floors"]["small"]
+        assert criteria.min_median_views(platform) == getattr(
+            config, spec["min_median_views_attr"]
+        )
+        assert profile_url(platform, "corgi.daily").startswith("https://")
+        assert posts._page_size(platform) == spec["page_size"]
+        assert platform in discovery.SUPPORTED
+        assert criteria._ENGAGEMENT_FLOORS[platform] is spec["engagement_floors"]
+
+
+def test_engagement_denominator_follows_the_registry_not_a_hardcoded_name():
+    per_view = [p for p in platforms.SUPPORTED
+                if platforms.denominator(p) == platforms.DENOM_VIEWS]
+    per_follower = [p for p in platforms.SUPPORTED
+                    if platforms.denominator(p) == platforms.DENOM_FOLLOWERS]
+    assert per_view == ["tiktok"]
+    assert per_follower == ["instagram"]
+    # Same interactions, same account, different denominators.
+    tt = criteria.engagement_rate("tiktok", interactions=500, views=10_000, followers=100_000)
+    ig = criteria.engagement_rate("instagram", interactions=500, views=10_000, followers=100_000)
+    assert tt != ig

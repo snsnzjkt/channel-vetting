@@ -31,15 +31,14 @@ from channel_vetting.discovery.search_zones import ZONE_CORE, vendor_locations_f
 from channel_vetting.discovery.influencers_club import (
     DEFAULT_SORT,
     InfluencerDiscovery,
-    PLATFORM_INSTAGRAM,
-    PLATFORM_TIKTOK,
 )
+from channel_vetting.social import platforms
 from channel_vetting.social.criteria import _ENGAGEMENT_FLOORS
 from channel_vetting.social.handles import normalize_social_handle
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED = (PLATFORM_TIKTOK, PLATFORM_INSTAGRAM)
+SUPPORTED = platforms.SUPPORTED
 
 
 def most_permissive_engagement_percent(platform: str) -> float:

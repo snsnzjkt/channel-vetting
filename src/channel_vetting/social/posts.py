@@ -90,6 +90,13 @@ class PostMetrics:
     views_sample_size: int = 0
     reason: str = ""
     media_urls: tuple = field(default_factory=tuple)
+    # Post captions from the sampled window. Carried because the pet-content
+    # requirement is judged on them, and because the draft insists the judgement
+    # be made over a RUN of posts rather than one tag: "a hashtag is not a
+    # niche. One use of #dogsofinstagram doesn't make someone a pet creator.
+    # Judge from the last 20 posts." These are already paid for by the same
+    # 0.03 request, so the gate costs nothing extra.
+    captions: tuple = field(default_factory=tuple)
 
     # Per-post MEANS, for the account tables' "Avg ..." columns.
     #
@@ -249,7 +256,7 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
     dated.sort(key=lambda pair: (pair[0] is not None, pair[0]), reverse=True)
 
     window = dated[:limit]
-    views, interactions, total_views, media = [], 0, 0, []
+    views, interactions, total_views, media, captions = [], 0, 0, [], []
     likes_total = comments_total = shares_total = 0
     shares_seen = False
     for stamp, item in window:
@@ -283,6 +290,9 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
             media.append(url)
         elif isinstance(url, (list, tuple)):
             media.extend(u for u in url if isinstance(u, str) and u)
+        caption = item.get("caption")
+        if isinstance(caption, str) and caption.strip():
+            captions.append(caption.strip())
 
     stamps = [s for s, _ in window if s is not None]
     days_since = None
@@ -317,6 +327,7 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
         views_sample_size=len(views),
         reason="",
         media_urls=tuple(media[:6]),
+        captions=tuple(captions),
     )
 
 

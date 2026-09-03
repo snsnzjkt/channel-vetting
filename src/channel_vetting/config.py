@@ -1217,33 +1217,41 @@ SOCIAL_MIN_POSTS_PER_WEEK = float(os.getenv("SOCIAL_MIN_POSTS_PER_WEEK", 1.0))
 # says the last 10 for reach; Instagram's page size is a fixed 12 and TikTok's
 # default is 30, so one request covers this on both.
 SOCIAL_POSTS_SAMPLE_SIZE = int(os.getenv("SOCIAL_POSTS_SAMPLE_SIZE", 10))
-# Countries the draft scopes to: "Sourcing US and Canada."
+# The zone, as ISO codes, for anything that needs to reason about it locally.
+#
+# MUST MATCH discovery/search_zones.ZONE_CORE — pinned by a test rather than
+# imported, to keep config.py free of a dependency on a module that reads it.
+# Changed from ("US","CA") to the Valencia zone on the operator's instruction
+# 2026-09-03; the criteria draft says US/CA only, and that divergence is
+# deliberate.
 SOCIAL_ALLOWED_COUNTRIES = tuple(
     c.strip()
-    for c in os.getenv("SOCIAL_ALLOWED_COUNTRIES", "US,CA").split(",")
+    for c in os.getenv("SOCIAL_ALLOWED_COUNTRIES", "US,CA,GB,AU").split(",")
     if c.strip()
 )
 
-# Whether to send the vendor's `location` filter on social discovery.
+# The social path uses THE SAME LOCATION ZONE AS VALENCIA, on the operator's
+# instruction (2026-09-03), and sends it server-side.
 #
-# OFF BY DEFAULT, matching the same deliberate gap the YouTube path documents:
-# "location is supported by the vendor and is NOT sent yet... Wiring it needs a
-# live probe of the field name and country format first." The docs say to read
-# valid values from the Dictionary endpoints, and sending a wrongly-formatted
-# country is the kind of filter that returns ZERO creators without erroring —
-# an empty run that looks like a dry pool.
+# This DIVERGES FROM THE CRITERIA DRAFT, which says "Sourcing US and Canada."
+# The zone is discovery/search_zones.ZONE_CORE — US, CA, GB, AU, with Ireland
+# deliberately excluded and the European codes not admitted. Raised with the
+# operator and reaffirmed; if the draft's owner disagrees, this is the line to
+# change.
 #
-# THE COST OF LEAVING IT OFF, stated plainly so it is a decision and not an
-# oversight: out-of-zone creators are still returned and still billed at 0.01
-# each, and the US/CA rule then has to be applied by a reviewer. Turn this on
-# once the format is confirmed against a live probe, and the same run gets
-# cheaper because the vendor stops returning creators we cannot use.
-SOCIAL_SEND_LOCATION_FILTER = env_flag("SOCIAL_SEND_LOCATION_FILTER", default=False)
-SOCIAL_LOCATION_VALUES = tuple(
-    v.strip()
-    for v in os.getenv("SOCIAL_LOCATION_VALUES", "United States,Canada").split(",")
-    if v.strip()
-)
+# NO LONGER A GUESS. An earlier version left the filter off because the country
+# FORMAT was unverified, and a wrongly-formatted value returns zero creators
+# without erroring. It turned out Valencia had already solved this:
+# search_zones.vendor_locations_for() maps codes to the vendor's own names
+# ("United States", "Canada", "United Kingdom", "Australia") and is
+# ALL-OR-NOTHING, returning [] rather than a lossy subset. Probed on both
+# platforms 2026-09-03: accepted, and it cuts the pool 11.1M -> 2.57M on TikTok
+# and 42.5M -> 8.49M on Instagram. So it is on by default now.
+#
+# THIS IS ALSO THE COUNTRY ENFORCEMENT. The candidate dict carries no country
+# (identifiers only), so a LOCAL country gate has nothing to read — the
+# server-side filter is what keeps out-of-zone creators out, and it also stops
+# us paying 0.01 a head for creators the zone excludes.
 
 
 # The prospect tables the social run writes to — one per platform, mirroring
@@ -1279,3 +1287,21 @@ AIRTABLE_TABLE_SOCIAL_DNC = os.getenv("AIRTABLE_TABLE_SOCIAL_DNC", "DO NOT CONTA
 # one failure in this pipeline that can reach a person who asked to be left
 # alone.
 SOCIAL_REQUIRE_NON_EMPTY_DNC = env_flag("SOCIAL_REQUIRE_NON_EMPTY_DNC", default=False)
+
+# --- The pet-content requirement (operator instruction, 2026-09-03) ---
+#
+# "the creators' content must focus on pet, people and trpg / But we might
+# mainly focus pets / So I think pet content is a must."
+#
+# Share of the sampled captions that must mention a pet. A SHARE rather than a
+# single match, per the draft: "a hashtag is not a niche. One use of
+# #dogsofinstagram doesn't make someone a pet creator. Judge from the last 20
+# posts." 0.3 over a 10-post window is "at least 3 of 10".
+SOCIAL_MIN_PET_CAPTION_SHARE = float(os.getenv("SOCIAL_MIN_PET_CAPTION_SHARE", 0.3))
+
+# Share of captions that may read as SELLING pet art before the creator is
+# treated as an artist rather than an owner. The first real run admitted four
+# pet-portrait artists; an artist is a competitor, not a customer. Set at 0.4 so
+# an owner who mentions a sticker once is not caught — the test is whether
+# selling is a THEME.
+SOCIAL_MAX_SELLER_CAPTION_SHARE = float(os.getenv("SOCIAL_MAX_SELLER_CAPTION_SHARE", 0.4))

@@ -252,7 +252,7 @@ RUBRIC_MAX = sum(w for _, w, _ in SCORE_COMPONENTS)
 RUBRIC_PASS_MARK = int(os.getenv("SOCIAL_RUBRIC_PASS_MARK", 65))
 
 
-def auto_score(platform: str, *, followers, metrics, country=None) -> tuple[int, int]:
+def auto_score(platform: str, *, followers, metrics, in_zone: bool = False) -> tuple[int, int]:
     """
     (points, max_points) for ONLY the rubric components we can compute.
 
@@ -260,6 +260,12 @@ def auto_score(platform: str, *, followers, metrics, country=None) -> tuple[int,
     it as the draft's score out of 100 by accident. AUTO_SCORE_MAX is 35 of
     RUBRIC_MAX 100; the pass mark of 65 is therefore unreachable from data
     alone, which is the honest state of affairs and not a bug to tune away.
+
+    `in_zone` replaced a `country` argument that was always None. The candidate
+    dict carries identifiers only, so there was never a country to read and the
+    12-point audience component could never fire. Location is now enforced
+    SERVER-SIDE by the discovery filter, so a returned creator is in zone by
+    construction and the caller says so.
     """
     points = 0
     if metrics is not None and metrics.measured:
@@ -267,12 +273,14 @@ def auto_score(platform: str, *, followers, metrics, country=None) -> tuple[int,
         floor = engagement_floor(platform, followers)
         if rate is not None and rate >= floor:
             points += 15
-            # A full-marks bonus is NOT awarded for clearing the floor by a
-            # wide margin: the draft gives the component 15 points for being
-            # "above the floor", full stop.
-        if metrics.total_shares:
+            # No bonus for clearing the floor by a wide margin: the draft gives
+            # the component 15 points for being "above the floor", full stop.
+        # Only when shares were actually REPORTED. Neither platform returns
+        # them today, so this normally does not fire — scoring 8 points off an
+        # absent field would be inventing evidence.
+        if getattr(metrics, "shares_reported", False) and metrics.total_shares:
             points += 8
-    if country and str(country).strip().upper() in (config.SOCIAL_ALLOWED_COUNTRIES or ()):
+    if in_zone:
         points += 12
     return points, AUTO_SCORE_MAX
 

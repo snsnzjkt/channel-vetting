@@ -39,7 +39,18 @@ def _account(username, full_name="Name", followers=50_000, engagement=4.5, user_
     }
 
 
-def _post(days_ago, views=10_000, likes=400, comments=50, shares=30):
+# Captions matter now: pet content is a hard requirement, so a fixture with no
+# caption is correctly rejected as pet_content_unknown_no_captions.
+_PET_CAPTIONS = (
+    "my corgi being dramatic again #dogsoftiktok",
+    "vet day for the pup",
+    "she found the zoomies",
+    "a very tired doggo",
+    "breakfast with my dog",
+)
+
+
+def _post(days_ago, views=10_000, likes=400, comments=50, shares=30, caption=None):
     return {
         "timestamp": (NOW - timedelta(days=days_ago)).isoformat(),
         "views": views,
@@ -47,6 +58,7 @@ def _post(days_ago, views=10_000, likes=400, comments=50, shares=30):
         "comments": comments,
         "shares": shares,
         "media_url": f"https://cdn.example/{days_ago}.jpg",
+        "caption": caption if caption is not None else _PET_CAPTIONS[days_ago % len(_PET_CAPTIONS)],
     }
 
 
@@ -743,3 +755,151 @@ def test_screening_budget_can_actually_reach_the_daily_target():
         "the posts budget must allow several screens per admitted row, or the "
         "target is unreachable however the floors are set"
     )
+
+
+# --- 10. the pet-content requirement -------------------------------------
+#
+# The first real run admitted four pet-portrait ARTISTS from the gift-intent
+# lane. An artist is a competitor, not a customer. Pet content is now a hard
+# requirement (operator instruction 2026-09-03) and sellers are excluded.
+
+from channel_vetting.social import relevance
+
+
+def _metrics_with(captions):
+    """
+    Metrics that clear every NUMERIC gate, so a test about content reaches the
+    content gate. Engagement is 8,000/200,000 = 4%, above the 3% micro-band
+    TikTok floor — an earlier version used 2.75% and every such test was
+    silently rejected on below_engagement_floor before the pet gate ever ran.
+    """
+    return posts.PostMetrics(
+        measured=True, sample_size=max(len(captions), 1), median_views=20_000,
+        total_views=200_000, views_sample_size=max(len(captions), 1),
+        total_likes=7_200, total_comments=800, total_interactions=8_000,
+        days_since_last_post=1, posts_per_week=3.0, captions=tuple(captions),
+    )
+
+
+def test_pet_owner_passes_the_requirement():
+    assert relevance.pet_content_reason(_metrics_with(_PET_CAPTIONS)) is None
+
+
+def test_pet_portrait_artist_is_excluded():
+    """The exact failure from run 33762468002 — four artists admitted."""
+    artist = _metrics_with([
+        "custom pet portrait commission for a client",
+        "new prints available in my etsy shop",
+        "dm to order yours",
+        "watercolour pet portrait of a dog",
+        "now taking orders, slots open",
+    ])
+    assert relevance.pet_content_reason(artist) == relevance.REASON_SELLS_PET_ART
+
+
+def test_non_pet_creator_is_excluded():
+    nonpet = _metrics_with(["gym day", "new recipe", "travel vlog", "outfit of the day"])
+    assert relevance.pet_content_reason(nonpet) == relevance.REASON_NO_PET_CONTENT
+
+
+def test_no_captions_is_its_own_reason_not_a_pass():
+    """
+    Given a distinct reason so its frequency is visible. If it turns out common,
+    loosen it deliberately rather than by accident.
+    """
+    assert relevance.pet_content_reason(_metrics_with([])) == (
+        relevance.REASON_PET_CONTENT_UNKNOWN
+    )
+
+
+def test_one_pet_hashtag_is_not_enough():
+    """
+    The draft: "a hashtag is not a niche. One use of #dogsofinstagram doesn't
+    make someone a pet creator. Judge from the last 20 posts."
+    """
+    mostly_other = _metrics_with([
+        "#dogsofinstagram", "gym day", "new recipe", "travel vlog",
+        "outfit of the day", "coffee run", "work from home", "book haul",
+        "concert night", "grocery run",
+    ])
+    assert relevance.pet_content_reason(mostly_other) == relevance.REASON_NO_PET_CONTENT
+
+
+def test_an_owner_who_mentions_a_sticker_once_is_not_treated_as_a_seller():
+    """The seller test is whether selling is a THEME, not whether a word appears."""
+    owner = _metrics_with([
+        "my corgi being dramatic #dogsoftiktok",
+        "vet day for the pup",
+        "got a sticker of my dog made, obsessed",
+        "she found the zoomies",
+        "breakfast with my dog",
+    ])
+    assert relevance.pet_content_reason(owner) is None
+
+
+def test_run_platform_rejects_an_artist_and_says_why(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate("petartist"))
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", lambda *a, **k: _metrics_with([
+        "custom pet portrait commission", "prints in my etsy shop",
+        "dm to order yours", "watercolour pet portrait", "slots open now",
+    ]))
+    monkeypatch.setattr(pipeline, "_create_row", lambda t, f: "recX")
+
+    result = pipeline.run_platform("tiktok")
+
+    assert result.admitted == 0
+    assert result.rejections.get(relevance.REASON_SELLS_PET_ART) == 1
+
+
+def test_lanes_target_owners_and_the_secondary_verticals_are_off():
+    """
+    Every enabled lane must require pet content, and none may reuse the
+    gift-intent phrasing that surfaced artists.
+    """
+    from channel_vetting.social.lanes import lanes_in_order, LANES
+
+    enabled = lanes_in_order()
+    assert enabled, "at least one lane must be enabled"
+    assert all(l["pet_required"] for l in enabled)
+    assert all(l["key"].startswith("pet_") for l in enabled)
+    assert {l["key"] for l in LANES if not l["enabled"]} == {"people", "trpg"}
+    # Each query must describe the POSTER, not a product.
+    for lane in enabled:
+        q = lane["ai_search"].lower()
+        assert "their own" in q or "owner" in q or "parent" in q or "adopted" in q
+        assert "commission" not in q and "portrait" not in q
+
+
+def test_social_zone_matches_valencia():
+    """
+    Operator instruction 2026-09-03: same location as Valencia. Pinned rather
+    than imported so config.py keeps no dependency on search_zones.
+    """
+    from channel_vetting.discovery.search_zones import ZONE_CORE
+    assert set(config.SOCIAL_ALLOWED_COUNTRIES) == set(ZONE_CORE)
+
+
+def test_discovery_sends_the_verified_location_names_and_ai_search():
+    from channel_vetting.discovery.search_zones import ZONE_CORE, vendor_locations_for
+    from channel_vetting.social.lanes import lanes_in_order
+
+    filters = discovery.build_filters("tiktok", lanes_in_order()[0])
+
+    assert filters["location"] == vendor_locations_for(ZONE_CORE)
+    assert filters["location"] == ["Australia", "Canada", "United Kingdom", "United States"]
+    assert filters["ai_search"] == lanes_in_order()[0]["ai_search"]
+    # keywords_not_in_description is ACCEPTED but inert on these platforms —
+    # probed 2026-09-03 — so it must not be sent as though it worked.
+    assert "keywords_not_in_description" not in filters
+
+
+def test_zone_points_are_awarded_because_location_is_enforced_server_side():
+    """
+    auto_score's audience component took a `country` that was always None, so
+    it could never fire. Location is filtered server-side now.
+    """
+    metrics = _metrics_with(_PET_CAPTIONS)
+    without = criteria.auto_score("tiktok", followers=50_000, metrics=metrics, in_zone=False)
+    within = criteria.auto_score("tiktok", followers=50_000, metrics=metrics, in_zone=True)
+    assert within[0] == without[0] + 12

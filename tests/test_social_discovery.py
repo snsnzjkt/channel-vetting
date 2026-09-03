@@ -620,3 +620,99 @@ def test_daily_cap_asks_for_a_field_the_prospect_table_actually_has(monkeypatch)
     # And the YouTube default is untouched.
     airtable_client.count_added_today("Home Theatre – Prospects", "Qualified")
     assert seen["fields"] == "Channel ID"
+
+
+# --- 9. the REAL posts payload -------------------------------------------
+#
+# Captured from live 0.03-credit calls on 2026-09-03, one per platform. This is
+# the shape that broke the first end-to-end run: engagement is NESTED, and an
+# earlier version read it from the item root, so every median came out None and
+# 30 of 30 creators on both platforms were rejected as "below_median_reach".
+
+def _live_item(taken_at, views, likes, comments, pk="7678009073421405471"):
+    """One item in the vendor's real shape."""
+    return {
+        "pk": pk,
+        "taken_at": taken_at,                      # unix epoch, not ISO
+        "url": f"https://www.tiktok.com/@khaby.lame/video/{pk}",
+        "device_timestamp": taken_at * 1_000_000,
+        "media_url": "https://v15m.tiktokcdn-eu.com/signed/expiring/link",
+        "media_id": pk,
+        "image_versions": None,
+        "media_type": 2,
+        "caption": "They were there yesterday, I promise",
+        "user": {"full_name": "Khabane lame", "pk": "1", "username": "khaby.lame",
+                 "profile_pic_url": "https://x/y.jpg"},
+        "engagement": {"likes": likes, "comments": comments, "views": views},
+    }
+
+
+def _live_body(items):
+    return {"result": {"items": items}, "credits_cost": 0.03}
+
+
+def test_metrics_read_the_nested_engagement_object():
+    """The bug that made the first live run reject everything."""
+    base = int(NOW.timestamp())
+    items = [_live_item(base - i * 86_400 * 2, views=60_000, likes=3_000, comments=40)
+             for i in range(10)]
+
+    metrics = posts.metrics_from_items(items, now=NOW)
+
+    assert metrics.measured
+    assert metrics.median_views == 60_000, "views come from item['engagement']"
+    assert metrics.avg_likes == 3_000
+    assert metrics.avg_comments == 40
+    assert metrics.days_since_last_post == 0
+    assert metrics.posts_per_week is not None
+
+
+def test_no_shares_field_means_zero_not_a_crash():
+    """Neither platform returns shares, so the column stays blank."""
+    base = int(NOW.timestamp())
+    metrics = posts.metrics_from_items(
+        [_live_item(base - i * 86_400, views=9_000, likes=100, comments=5) for i in range(5)],
+        now=NOW,
+    )
+    assert metrics.total_shares == 0
+    row = pipeline._prospect_record("tiktok", {"handle": "h", "channel_title": "H"},
+                                    50_000, metrics)
+    assert "Avg Shares per Post" not in row, "a false zero would read as measured"
+
+
+def test_sample_media_uses_the_permalink_not_the_expiring_cdn_url():
+    """
+    A reviewer judges photo quality by opening the post. `media_url` is a signed
+    CDN link that expires; `url` is the permalink.
+    """
+    base = int(NOW.timestamp())
+    metrics = posts.metrics_from_items([_live_item(base, 9_000, 100, 5)], now=NOW)
+    assert metrics.media_urls
+    assert all(u.startswith("https://www.tiktok.com/") for u in metrics.media_urls)
+
+
+def test_items_are_found_at_result_items():
+    body = _live_body([_live_item(int(NOW.timestamp()), 9_000, 100, 5)])
+    assert len(posts._items_from(body)) == 1
+
+
+def test_no_view_data_is_a_distinct_reason_from_below_the_floor():
+    """
+    The diagnosis fix. Both used to return below_median_reach, which is how a
+    parsing bug looked exactly like a genuinely low-reach creator.
+    """
+    base = int(NOW.timestamp())
+    # Engagement present but no views at all (e.g. Instagram static posts).
+    no_views = [{"taken_at": base - i * 86_400, "engagement": {"likes": 10, "comments": 1}}
+                for i in range(5)]
+    metrics = posts.metrics_from_items(no_views, now=NOW)
+    assert metrics.measured and metrics.median_views is None
+    assert criteria.auto_reject_reason("tiktok", followers=50_000, metrics=metrics) == (
+        criteria.REASON_NO_VIEW_DATA
+    )
+
+    # Measured, but genuinely under the floor.
+    low = [_live_item(base - i * 86_400, views=100, likes=5, comments=1) for i in range(5)]
+    assert criteria.auto_reject_reason(
+        "tiktok", followers=50_000, metrics=posts.metrics_from_items(low, now=NOW)
+    ) == criteria.REASON_MEDIAN_VIEWS

@@ -251,6 +251,7 @@ class InfluencerDiscovery:
         sort: dict | None = None,
         source_label: str = "influencers.club discovery",
         page_cap: int = 40,
+        nlp_search: str | None = None,
     ) -> list[dict]:
         """
         Return candidate creators matching `filters`, paginating the discovery
@@ -329,6 +330,16 @@ class InfluencerDiscovery:
                 "sort": sort,
                 "filters": body_filters,
             }
+            # TOP LEVEL, a SIBLING of "filters" — not a filter field.
+            #
+            # Putting it inside `filters` returns 400 invalid_input:
+            # "nlp_search: This is not a supported discovery filter field."
+            # That is how the first end-to-end run produced zero candidates —
+            # every page 400'd, which cost nothing but also found nothing.
+            # The vendor documents it as an optional brief that fills in fields
+            # you did not set, with explicit filters taking precedence.
+            if nlp_search:
+                payload["nlp_search"] = nlp_search
             resp = self._post(payload)
             if resp is None:
                 break  # fail-soft: keep what we have, let the caller move on

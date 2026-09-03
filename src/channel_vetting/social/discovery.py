@@ -128,21 +128,18 @@ def discover(
     label = f"social discovery {platform}/{lane.get('key', 'unlabelled')}"
     nlp = lane.get("nlp_search")
 
-    # `discover()` takes filters and platform; the nlp brief rides in the body
-    # alongside them, which is why it is merged in here rather than passed as a
-    # separate argument the shared client would have to learn about.
-    body_filters = dict(filters)
-    if nlp:
-        body_filters["nlp_search"] = nlp
-
     try:
         return disc.discover(
-            filters=body_filters,
+            filters=filters,
             target=target,
             exclude_handles=exclude_handles,
             platform=platform,
             sort=DEFAULT_SORT,
             source_label=label,
+            # A SIBLING of filters in the request body, not a filter. Sending it
+            # inside `filters` returns 400 invalid_input — see the note in
+            # InfluencerDiscovery.discover().
+            nlp_search=nlp,
         )
     except Exception as exc:  # fail-soft, matching the YouTube contract
         logger.warning("social discovery failed for %s: %s", label, exc)

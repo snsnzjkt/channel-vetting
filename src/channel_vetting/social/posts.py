@@ -80,6 +80,12 @@ class PostMetrics:
     total_likes: int = 0
     total_comments: int = 0
     total_shares: int = 0
+    # Whether ANY post carried a shares field at all. Neither TikTok nor
+    # Instagram returns one today, so this is normally False — and it is what
+    # keeps avg_shares returning None instead of a confident 0. A 0 in an "Avg
+    # Shares" column reads as "measured, and it is zero"; None leaves the cell
+    # blank, which reads as "not measured". Only the second is true.
+    shares_reported: bool = False
     total_views: int = 0
     views_sample_size: int = 0
     reason: str = ""
@@ -109,7 +115,9 @@ class PostMetrics:
 
     @property
     def avg_shares(self) -> int | None:
-        return round(self.total_shares / self.sample_size) if self.measured and self.sample_size else None
+        if not self.measured or not self.sample_size or not self.shares_reported:
+            return None
+        return round(self.total_shares / self.sample_size)
 
     def engagement_rate(self, platform: str, followers) -> float | None:
         """
@@ -144,6 +152,31 @@ def _first_present(item: dict, *names):
         if name in item and item[name] is not None:
             return item[name]
     return None
+
+
+def _metrics_of(item: dict) -> dict:
+    """
+    The per-post engagement numbers.
+
+    VERIFIED AGAINST LIVE RESPONSES 2026-09-03 (one 0.03-credit call per
+    platform). They arrive NESTED, not at the item's top level:
+
+        {"pk", "taken_at", "url", "media_url", "caption", "media_type",
+         "user": {...},
+         "engagement": {"likes": 3616927, "comments": 37962, "views": 60384331}}
+
+    An earlier version read likes/comments/views from the item root, so every
+    post yielded no view count, every median came out None, and every creator
+    was rejected as below_median_reach — 30 of 30 on both platforms in the first
+    end-to-end run. The top-level lookup is kept as a fallback because it costs
+    nothing and the vendor is free to flatten this later.
+
+    NO `shares` FIELD EXISTS on either platform's response. TikTok and Instagram
+    both return likes, comments and views only, so share counts stay 0 and the
+    "Avg Shares per Post" column stays blank rather than showing a false zero.
+    """
+    nested = item.get("engagement")
+    return nested if isinstance(nested, dict) else {}
 
 
 def _items_from(body) -> list:
@@ -218,19 +251,34 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
     window = dated[:limit]
     views, interactions, total_views, media = [], 0, 0, []
     likes_total = comments_total = shares_total = 0
+    shares_seen = False
     for stamp, item in window:
-        v = _first_present(item, "views", "view_count", "play_count", "plays")
+        eng = _metrics_of(item)
+        v = _first_present(eng, "views", "view_count", "play_count", "plays")
+        if v is None:
+            v = _first_present(item, "views", "view_count", "play_count", "plays")
         if v is not None:
             views.append(_as_int(v))
             total_views += _as_int(v)
-        likes = _as_int(_first_present(item, "likes", "like_count"))
-        comments = _as_int(_first_present(item, "comments", "comment_count"))
-        share_count = _as_int(_first_present(item, "shares", "share_count"))
+        likes = _as_int(_first_present(eng, "likes", "like_count")
+                        or _first_present(item, "likes", "like_count"))
+        comments = _as_int(_first_present(eng, "comments", "comment_count")
+                           or _first_present(item, "comments", "comment_count"))
+        # Neither platform returns shares; kept so a future field is picked up.
+        raw_shares = (_first_present(eng, "shares", "share_count")
+                      if _first_present(eng, "shares", "share_count") is not None
+                      else _first_present(item, "shares", "share_count"))
+        if raw_shares is not None:
+            shares_seen = True
+        share_count = _as_int(raw_shares)
         interactions += likes + comments + share_count
         likes_total += likes
         comments_total += comments
         shares_total += share_count
-        url = _first_present(item, "media_url", "media_urls", "thumbnail_url", "url", "post_url")
+        # `url` is the POST permalink and `media_url` a signed, expiring CDN
+        # link. The permalink is what a reviewer needs for the photo-quality
+        # gate, so it comes first.
+        url = _first_present(item, "url", "post_url", "media_url", "thumbnail_url")
         if isinstance(url, str) and url:
             media.append(url)
         elif isinstance(url, (list, tuple)):
@@ -264,6 +312,7 @@ def metrics_from_items(items, *, sample_size=None, now=None) -> PostMetrics:
         total_likes=likes_total,
         total_comments=comments_total,
         total_shares=shares_total,
+        shares_reported=shares_seen,
         total_views=total_views,
         views_sample_size=len(views),
         reason="",

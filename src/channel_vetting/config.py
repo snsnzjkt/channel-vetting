@@ -1094,8 +1094,15 @@ SOCIAL_PROFILE_CREDITS_PER_REQUEST = float(
 
 # Per-run discovery ceiling, PER PLATFORM. 0.6 credits buys ~60 creators
 # returned, which is one full page plus a little slack.
+#
+# RAISED 0.6 -> 1.0 on 2026-09-03, alongside the posts budget below, for the
+# >=10 records/day target. THIS ONE IS PURE THROUGHPUT: it buys a wider pool to
+# examine and changes no threshold, so every creator it admits would have been
+# admitted anyway had discovery reached them. Prefer raising this over lowering
+# a floor — a floor loses prospects permanently, a budget only defers them.
+# 1.0 credits is ~100 creators, i.e. two full pages.
 SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN = float(
-    os.getenv("SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN", 0.6)
+    os.getenv("SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN", 1.0)
 )
 
 # Per-run posts-screening ceiling, PER PLATFORM. 0.9 credits is 30 screens.
@@ -1108,8 +1115,20 @@ SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN = float(
 # engagement figure, which is the exact "a hashtag is not a niche" mistake the
 # criteria draft warns about. See SOCIAL_MIN_POSTS_SCREENS_PER_RUN for the
 # floor that makes under-funding fail loudly instead of quietly.
+#
+# RAISED 0.9 -> 1.5 on 2026-09-03: 30 screens per platform was the binding
+# constraint on the >=10/day target, not the gates. At the measured 13% admit
+# rate a 30-screen budget could yield at most ~4 rows however generous the
+# thresholds were. 1.5 credits is 50 screens.
+#
+# Per platform per run this now costs 1.0 discovery + 1.5 posts = 2.5, so ~5.0
+# for both platforms — against a 10/day ceiling shared with the Valencia run's
+# measured ~7.3, and ~110/month against the 200 ceiling (the vendor itself
+# reported 314 credits remaining on 2026-09-03, so the 200 is conservative).
+# If both runs ever fill their budgets on the same day the shared ledger stops
+# the second one, which is the cap working rather than a fault.
 SOCIAL_MAX_POSTS_CREDITS_PER_RUN = float(
-    os.getenv("SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 0.9)
+    os.getenv("SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 1.5)
 )
 
 # THE QUALITY FLOOR. A run that cannot afford at least this many posts screens
@@ -1153,11 +1172,44 @@ SOCIAL_MIN_FOLLOWERS = int(os.getenv("SOCIAL_MIN_FOLLOWERS", 1_000))
 # Median, NOT mean, and the draft is explicit about why: "Judge on the median
 # of the last 10 posts, not the average - one viral video shouldn't carry
 # someone through."
+#
+# LOWERED 5,000 -> 3,000 (TikTok) and 3,000 -> 1,500 (Instagram) on 2026-09-03
+# at the operator's direction, to reach a target of >=10 records per day.
+#
+# THESE ARE CRITERIA CHANGES, NOT THROUGHPUT KNOBS, and the distinction is the
+# same one MIN_AVG_VIEWS documents above: a creator admitted at 3,000 would
+# NEVER have been admitted at 5,000. Unlike the row caps, which only defer a
+# row to another day, this changes who is eligible at all. The draft's figures
+# came from its own 2026 benchmarks, so if the draft still governs, its owner
+# should agree to these.
+#
+# MEASURED against run 33761622844 (2026-09-03, dry), the first run whose
+# numbers were real — 30 creators screened per platform:
+#
+#                        cleared reach    admitted    died later on
+#   TikTok    @5,000            5/30          4        1 no_recent_post
+#   Instagram @3,000            5/30          0        3 cadence, 2 stale
+#
+# So the reach gate alone was removing 25 of 30 on BOTH platforms, and
+# Instagram admitted nobody at all. That is what prompted the change.
+#
+# WHY INSTAGRAM IS HALVED WHILE TIKTOK IS ONLY CUT BY 40%. Instagram reports
+# plays for REELS and nothing for static posts, and social/posts.py drops
+# unmeasured posts from the median rather than scoring them zero. A
+# static-heavy account therefore has its median taken over a handful of Reels,
+# which is both a smaller and a noisier sample than TikTok's 30 videos. Its
+# 3,000 floor was effectively stricter than the number suggested.
+#
+# EXPECT TO RETUNE AFTER ONE RUN, and retune THESE rather than reaching for a
+# gate further down: the next-largest rejection reasons were cadence and
+# recency, which are freshness signals rather than size ones and are much
+# worse to loosen. Both are env vars precisely so the next calibration is a
+# secret change and not a deploy.
 SOCIAL_TIKTOK_MIN_MEDIAN_VIEWS = int(
-    os.getenv("SOCIAL_TIKTOK_MIN_MEDIAN_VIEWS", 5_000)
+    os.getenv("SOCIAL_TIKTOK_MIN_MEDIAN_VIEWS", 3_000)
 )
 SOCIAL_INSTAGRAM_MIN_MEDIAN_VIEWS = int(
-    os.getenv("SOCIAL_INSTAGRAM_MIN_MEDIAN_VIEWS", 3_000)
+    os.getenv("SOCIAL_INSTAGRAM_MIN_MEDIAN_VIEWS", 1_500)
 )
 SOCIAL_MAX_DAYS_SINCE_POST = int(os.getenv("SOCIAL_MAX_DAYS_SINCE_POST", 30))
 SOCIAL_MIN_POSTS_PER_WEEK = float(os.getenv("SOCIAL_MIN_POSTS_PER_WEEK", 1.0))
@@ -1201,3 +1253,29 @@ SOCIAL_LOCATION_VALUES = tuple(
 # table per day) and how the review pages are laid out.
 AIRTABLE_TABLE_TIKTOK_PROSPECTS = os.getenv("AIRTABLE_TABLE_TIKTOK_PROSPECTS")
 AIRTABLE_TABLE_INSTAGRAM_PROSPECTS = os.getenv("AIRTABLE_TABLE_INSTAGRAM_PROSPECTS")
+
+# The social path's own DO NOT CONTACT table, in the same base as the prospect
+# tables. Defaults to the table name created in the Mythumi base.
+#
+# WHY THE SOCIAL PATH CANNOT REUSE airtable/do_not_contact.py: that module is
+# pinned to Valencia in three separate ways, each of which fails differently
+# against another base — a hardcoded table id (tblHO0kJw0cBqV8Mw), field IDs
+# rather than names (fldCExrqXONKfUxd5 and friends), and a rule that ZERO ROWS
+# is a failure. The first gives a 403, the second would silently index nothing,
+# and the third aborts a brand-new base where an empty suppression list is the
+# CORRECT state. None of those are bugs there; all three are wrong here.
+AIRTABLE_TABLE_SOCIAL_DNC = os.getenv("AIRTABLE_TABLE_SOCIAL_DNC", "DO NOT CONTACT")
+
+# Whether an EMPTY social suppression table aborts the run.
+#
+# FALSE while the list is genuinely empty, which it is on a new base: nobody has
+# asked Mythumi to stop contacting them yet, so "zero rows" is accurate rather
+# than broken. The Valencia reader hardcodes the opposite because its table has
+# ~1,330 rows and a zero there can only mean misconfiguration.
+#
+# FLIP THIS TO TRUE once the table has entries. From that point a zero-row read
+# means the table id, the token scope or the field names have drifted, and
+# proceeding would source creators with no suppression at all — which is the
+# one failure in this pipeline that can reach a person who asked to be left
+# alone.
+SOCIAL_REQUIRE_NON_EMPTY_DNC = env_flag("SOCIAL_REQUIRE_NON_EMPTY_DNC", default=False)

@@ -174,6 +174,13 @@ REASON_STALE = "no_recent_post"
 REASON_CADENCE = "posts_too_infrequently"
 REASON_COUNTRY = "outside_search_zone"
 REASON_UNMEASURED = "unmeasured_no_post_data"
+# SEPARATE from below_median_reach on purpose. Both used to return the latter,
+# and that is how a parsing bug looked identical to a genuinely low-reach
+# creator: the first end-to-end run rejected 30 of 30 on both platforms as
+# "below_median_reach" when in fact no view count was being read at all. A
+# reason that cannot distinguish "measured and too low" from "never measured"
+# hides exactly the failure worth catching.
+REASON_NO_VIEW_DATA = "no_view_data_returned"
 
 
 def auto_reject_reason(platform: str, *, followers, metrics, country=None) -> str | None:
@@ -198,7 +205,9 @@ def auto_reject_reason(platform: str, *, followers, metrics, country=None) -> st
     if metrics is None or not metrics.measured:
         return REASON_UNMEASURED
 
-    if metrics.median_views is None or metrics.median_views < min_median_views(platform):
+    if metrics.median_views is None:
+        return REASON_NO_VIEW_DATA
+    if metrics.median_views < min_median_views(platform):
         return REASON_MEDIAN_VIEWS
 
     rate = metrics.engagement_rate(platform, followers)

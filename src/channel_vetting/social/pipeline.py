@@ -38,7 +38,7 @@ from channel_vetting.airtable.client import (
     _headers,
     get_tracked_handles,
 )
-from channel_vetting.airtable.do_not_contact import fetch_blocklist
+from channel_vetting.social.suppression import fetch_social_blocklist as fetch_blocklist
 from channel_vetting.budget import credit_tracker
 from channel_vetting.core.http_client import post_with_rate_limit_retry, safe_body
 from channel_vetting.core.prospect_day import today_iso
@@ -292,7 +292,11 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
     # number to tune, and it is a THROUGHPUT knob only — a row admitted at the
     # cap is one that would have been admitted earlier in the day.
     try:
-        already_today = airtable.count_added_today(table, "Qualified")
+        # id_field="Handle": the prospect tables have no "Channel ID" (a TikTok
+        # creator has no channel id), and the default would return
+        # 422 UNKNOWN_FIELD_NAME. The field is only there to keep the response
+        # small; the count comes from the record count.
+        already_today = airtable.count_added_today(table, "Qualified", id_field="Handle")
     except Exception as exc:
         # A cap we cannot read must not be assumed empty — that is how a run
         # spends a full day's budget twice.

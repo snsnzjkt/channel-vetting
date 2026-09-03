@@ -460,3 +460,286 @@ def test_dry_run_screens_but_writes_nothing(monkeypatch):
 
     assert result.admitted == 1
     assert writes == [], "dry run must not write"
+
+
+# --- 8. social DO NOT CONTACT --------------------------------------------
+#
+# The first live run died here: fetch_blocklist() is pinned to Valencia by a
+# hardcoded table id, by field IDs, and by treating zero rows as a failure. Each
+# of those is pinned below so the social reader cannot regress into any of them.
+
+from channel_vetting.airtable.do_not_contact import Blocklist, BlocklistUnavailable
+from channel_vetting.social import suppression
+
+
+class _Resp:
+    def __init__(self, status=200, body=None):
+        self.status_code = status
+        self._body = {} if body is None else body
+
+    def json(self):
+        return self._body
+
+
+def _dnc_row(**fields):
+    return {"fields": fields}
+
+
+def test_social_dnc_reads_field_names_not_valencia_field_ids(monkeypatch):
+    """
+    The Valencia reader asks for `returnFieldsByFieldId` with Valencia field
+    IDs. Against another base those ids do not exist, so it would index ZERO
+    handles while reporting success — a silent failure, and the worse one.
+    """
+    seen = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen["params"] = params
+        return _Resp(body={"records": [
+            _dnc_row(**{"Handle": "@BlockedPet", "Email": "X@Example.com",
+                        "Creator Name": "Blocked Pet"}),
+        ]})
+
+    monkeypatch.setattr(suppression.HTTP, "get", fake_get)
+    blocklist = suppression.fetch_social_blocklist("DO NOT CONTACT")
+
+    assert "returnFieldsByFieldId" not in seen["params"]
+    assert seen["params"]["fields[]"] == [
+        "Creator Name", "Handle", "Profile URL", "Email",
+    ]
+    assert blocklist.handles == {"blockedpet"}
+    assert blocklist.emails == {"x@example.com"}
+    assert blocklist.names == {"blocked pet"}
+
+
+def test_social_dnc_indexes_handles_from_both_columns(monkeypatch):
+    """A row may carry only the bare handle, only a profile URL, or both."""
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": [
+        _dnc_row(**{"Handle": "barehandle"}),
+        _dnc_row(**{"Profile URL": "https://www.instagram.com/urlonly/"}),
+        _dnc_row(**{"Handle": "both", "Profile URL": "https://www.tiktok.com/@alsoboth"}),
+    ]}))
+    blocklist = suppression.fetch_social_blocklist("T")
+    assert blocklist.handles == {"barehandle", "urlonly", "both", "alsoboth"}
+
+
+def test_empty_social_dnc_is_accurate_on_a_new_base_by_default(monkeypatch):
+    """
+    Zero rows is the CORRECT state on a new base — nobody has asked Mythumi to
+    stop yet. The Valencia reader raises here because its table has ~1,330 rows.
+    """
+    monkeypatch.setattr(config, "SOCIAL_REQUIRE_NON_EMPTY_DNC", False)
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": []}))
+
+    blocklist = suppression.fetch_social_blocklist("T")
+
+    assert isinstance(blocklist, Blocklist)
+    assert len(blocklist) == 0
+    assert blocklist.match(handle="anyone") == ""
+
+
+def test_empty_social_dnc_aborts_once_the_list_is_seeded(monkeypatch):
+    """
+    Flip the flag and zero rows becomes a failure again — from that point it can
+    only mean the table name, token scope or field names have drifted.
+    """
+    monkeypatch.setattr(config, "SOCIAL_REQUIRE_NON_EMPTY_DNC", True)
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": []}))
+
+    with pytest.raises(BlocklistUnavailable, match="zero rows"):
+        suppression.fetch_social_blocklist("T")
+
+
+@pytest.mark.parametrize("resp,match", [
+    (_Resp(status=403, body={}), "403"),
+    (_Resp(body={"no_records_key": 1}), "no 'records' key"),
+    (_Resp(body={"records": "nope"}), "not a list"),
+])
+def test_social_dnc_fails_closed_on_a_real_failure(monkeypatch, resp, match):
+    """
+    A 403 is exactly how the first live run failed. Every genuine failure must
+    raise: sourcing creators with no suppression list is the one failure here
+    that can reach someone who asked to be left alone.
+    """
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: resp)
+    with pytest.raises(BlocklistUnavailable, match=match):
+        suppression.fetch_social_blocklist("T")
+
+
+def test_social_dnc_fails_closed_on_a_transport_error(monkeypatch):
+    import requests as _requests
+
+    def boom(*a, **k):
+        raise _requests.RequestException("connection reset")
+
+    monkeypatch.setattr(suppression.HTTP, "get", boom)
+    with pytest.raises(BlocklistUnavailable, match="connection reset"):
+        suppression.fetch_social_blocklist("T")
+
+
+def test_unconfigured_social_dnc_table_refuses_rather_than_defaulting(monkeypatch):
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_DNC", None)
+    with pytest.raises(BlocklistUnavailable, match="AIRTABLE_TABLE_SOCIAL_DNC"):
+        suppression.fetch_social_blocklist()
+
+
+def test_pipeline_uses_the_social_reader_not_the_valencia_one():
+    """
+    Regression guard on the exact bug that broke the first live run: the
+    pipeline must not be wired to the Valencia-pinned fetch_blocklist.
+    """
+    assert pipeline.fetch_blocklist is suppression.fetch_social_blocklist
+
+
+def test_daily_cap_asks_for_a_field_the_prospect_table_actually_has(monkeypatch):
+    """
+    The second live-run failure: count_added_today defaults to returning
+    "Channel ID", which the prospect tables do not have, and Airtable answers
+    422 UNKNOWN_FIELD_NAME rather than ignoring it.
+    """
+    from channel_vetting.airtable import client as airtable_client
+
+    seen = {}
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"records": []}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen["fields"] = params.get("fields[]")
+        return _R()
+
+    monkeypatch.setattr(airtable_client.HTTP, "get", fake_get)
+
+    airtable_client.count_added_today("TikTok – Prospects", "Qualified", id_field="Handle")
+    assert seen["fields"] == "Handle"
+
+    # And the YouTube default is untouched.
+    airtable_client.count_added_today("Home Theatre – Prospects", "Qualified")
+    assert seen["fields"] == "Channel ID"
+
+
+# --- 9. the REAL posts payload -------------------------------------------
+#
+# Captured from live 0.03-credit calls on 2026-09-03, one per platform. This is
+# the shape that broke the first end-to-end run: engagement is NESTED, and an
+# earlier version read it from the item root, so every median came out None and
+# 30 of 30 creators on both platforms were rejected as "below_median_reach".
+
+def _live_item(taken_at, views, likes, comments, pk="7678009073421405471"):
+    """One item in the vendor's real shape."""
+    return {
+        "pk": pk,
+        "taken_at": taken_at,                      # unix epoch, not ISO
+        "url": f"https://www.tiktok.com/@khaby.lame/video/{pk}",
+        "device_timestamp": taken_at * 1_000_000,
+        "media_url": "https://v15m.tiktokcdn-eu.com/signed/expiring/link",
+        "media_id": pk,
+        "image_versions": None,
+        "media_type": 2,
+        "caption": "They were there yesterday, I promise",
+        "user": {"full_name": "Khabane lame", "pk": "1", "username": "khaby.lame",
+                 "profile_pic_url": "https://x/y.jpg"},
+        "engagement": {"likes": likes, "comments": comments, "views": views},
+    }
+
+
+def _live_body(items):
+    return {"result": {"items": items}, "credits_cost": 0.03}
+
+
+def test_metrics_read_the_nested_engagement_object():
+    """The bug that made the first live run reject everything."""
+    base = int(NOW.timestamp())
+    items = [_live_item(base - i * 86_400 * 2, views=60_000, likes=3_000, comments=40)
+             for i in range(10)]
+
+    metrics = posts.metrics_from_items(items, now=NOW)
+
+    assert metrics.measured
+    assert metrics.median_views == 60_000, "views come from item['engagement']"
+    assert metrics.avg_likes == 3_000
+    assert metrics.avg_comments == 40
+    assert metrics.days_since_last_post == 0
+    assert metrics.posts_per_week is not None
+
+
+def test_no_shares_field_means_zero_not_a_crash():
+    """Neither platform returns shares, so the column stays blank."""
+    base = int(NOW.timestamp())
+    metrics = posts.metrics_from_items(
+        [_live_item(base - i * 86_400, views=9_000, likes=100, comments=5) for i in range(5)],
+        now=NOW,
+    )
+    assert metrics.total_shares == 0
+    row = pipeline._prospect_record("tiktok", {"handle": "h", "channel_title": "H"},
+                                    50_000, metrics)
+    assert "Avg Shares per Post" not in row, "a false zero would read as measured"
+
+
+def test_sample_media_uses_the_permalink_not_the_expiring_cdn_url():
+    """
+    A reviewer judges photo quality by opening the post. `media_url` is a signed
+    CDN link that expires; `url` is the permalink.
+    """
+    base = int(NOW.timestamp())
+    metrics = posts.metrics_from_items([_live_item(base, 9_000, 100, 5)], now=NOW)
+    assert metrics.media_urls
+    assert all(u.startswith("https://www.tiktok.com/") for u in metrics.media_urls)
+
+
+def test_items_are_found_at_result_items():
+    body = _live_body([_live_item(int(NOW.timestamp()), 9_000, 100, 5)])
+    assert len(posts._items_from(body)) == 1
+
+
+def test_no_view_data_is_a_distinct_reason_from_below_the_floor():
+    """
+    The diagnosis fix. Both used to return below_median_reach, which is how a
+    parsing bug looked exactly like a genuinely low-reach creator.
+    """
+    base = int(NOW.timestamp())
+    # Engagement present but no views at all (e.g. Instagram static posts).
+    no_views = [{"taken_at": base - i * 86_400, "engagement": {"likes": 10, "comments": 1}}
+                for i in range(5)]
+    metrics = posts.metrics_from_items(no_views, now=NOW)
+    assert metrics.measured and metrics.median_views is None
+    assert criteria.auto_reject_reason("tiktok", followers=50_000, metrics=metrics) == (
+        criteria.REASON_NO_VIEW_DATA
+    )
+
+    # Measured, but genuinely under the floor.
+    low = [_live_item(base - i * 86_400, views=100, likes=5, comments=1) for i in range(5)]
+    assert criteria.auto_reject_reason(
+        "tiktok", followers=50_000, metrics=posts.metrics_from_items(low, now=NOW)
+    ) == criteria.REASON_MEDIAN_VIEWS
+
+
+def test_median_reach_floors_are_the_retuned_ones():
+    """
+    Lowered 2026-09-03 for the >=10 records/day target, on measured evidence
+    that the reach gate alone removed 25 of 30 on both platforms. Pinned so the
+    next change is deliberate — these are CRITERIA, not throughput: a creator
+    admitted at 3,000 would never have been admitted at 5,000.
+    """
+    assert criteria.min_median_views("tiktok") == 3_000
+    assert criteria.min_median_views("instagram") == 1_500
+    # Instagram stays the lower of the two: it reports plays for Reels only, so
+    # its median is taken over a smaller, noisier sample than TikTok's.
+    assert criteria.min_median_views("instagram") < criteria.min_median_views("tiktok")
+
+
+def test_screening_budget_can_actually_reach_the_daily_target():
+    """
+    30 screens per platform was the binding constraint, not the gates: at the
+    measured 13% admit rate no threshold could have produced 10 rows from 30.
+    """
+    screens = int(config.SOCIAL_MAX_POSTS_CREDITS_PER_RUN
+                  / config.SOCIAL_POSTS_CREDITS_PER_REQUEST)
+    assert screens >= config.SOCIAL_TARGET_PER_PLATFORM * 3, (
+        "the posts budget must allow several screens per admitted row, or the "
+        "target is unreachable however the floors are set"
+    )

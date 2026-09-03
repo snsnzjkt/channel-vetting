@@ -460,3 +460,132 @@ def test_dry_run_screens_but_writes_nothing(monkeypatch):
 
     assert result.admitted == 1
     assert writes == [], "dry run must not write"
+
+
+# --- 8. social DO NOT CONTACT --------------------------------------------
+#
+# The first live run died here: fetch_blocklist() is pinned to Valencia by a
+# hardcoded table id, by field IDs, and by treating zero rows as a failure. Each
+# of those is pinned below so the social reader cannot regress into any of them.
+
+from channel_vetting.airtable.do_not_contact import Blocklist, BlocklistUnavailable
+from channel_vetting.social import suppression
+
+
+class _Resp:
+    def __init__(self, status=200, body=None):
+        self.status_code = status
+        self._body = {} if body is None else body
+
+    def json(self):
+        return self._body
+
+
+def _dnc_row(**fields):
+    return {"fields": fields}
+
+
+def test_social_dnc_reads_field_names_not_valencia_field_ids(monkeypatch):
+    """
+    The Valencia reader asks for `returnFieldsByFieldId` with Valencia field
+    IDs. Against another base those ids do not exist, so it would index ZERO
+    handles while reporting success — a silent failure, and the worse one.
+    """
+    seen = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen["params"] = params
+        return _Resp(body={"records": [
+            _dnc_row(**{"Handle": "@BlockedPet", "Email": "X@Example.com",
+                        "Creator Name": "Blocked Pet"}),
+        ]})
+
+    monkeypatch.setattr(suppression.HTTP, "get", fake_get)
+    blocklist = suppression.fetch_social_blocklist("DO NOT CONTACT")
+
+    assert "returnFieldsByFieldId" not in seen["params"]
+    assert seen["params"]["fields[]"] == [
+        "Creator Name", "Handle", "Profile URL", "Email",
+    ]
+    assert blocklist.handles == {"blockedpet"}
+    assert blocklist.emails == {"x@example.com"}
+    assert blocklist.names == {"blocked pet"}
+
+
+def test_social_dnc_indexes_handles_from_both_columns(monkeypatch):
+    """A row may carry only the bare handle, only a profile URL, or both."""
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": [
+        _dnc_row(**{"Handle": "barehandle"}),
+        _dnc_row(**{"Profile URL": "https://www.instagram.com/urlonly/"}),
+        _dnc_row(**{"Handle": "both", "Profile URL": "https://www.tiktok.com/@alsoboth"}),
+    ]}))
+    blocklist = suppression.fetch_social_blocklist("T")
+    assert blocklist.handles == {"barehandle", "urlonly", "both", "alsoboth"}
+
+
+def test_empty_social_dnc_is_accurate_on_a_new_base_by_default(monkeypatch):
+    """
+    Zero rows is the CORRECT state on a new base — nobody has asked Mythumi to
+    stop yet. The Valencia reader raises here because its table has ~1,330 rows.
+    """
+    monkeypatch.setattr(config, "SOCIAL_REQUIRE_NON_EMPTY_DNC", False)
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": []}))
+
+    blocklist = suppression.fetch_social_blocklist("T")
+
+    assert isinstance(blocklist, Blocklist)
+    assert len(blocklist) == 0
+    assert blocklist.match(handle="anyone") == ""
+
+
+def test_empty_social_dnc_aborts_once_the_list_is_seeded(monkeypatch):
+    """
+    Flip the flag and zero rows becomes a failure again — from that point it can
+    only mean the table name, token scope or field names have drifted.
+    """
+    monkeypatch.setattr(config, "SOCIAL_REQUIRE_NON_EMPTY_DNC", True)
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": []}))
+
+    with pytest.raises(BlocklistUnavailable, match="zero rows"):
+        suppression.fetch_social_blocklist("T")
+
+
+@pytest.mark.parametrize("resp,match", [
+    (_Resp(status=403, body={}), "403"),
+    (_Resp(body={"no_records_key": 1}), "no 'records' key"),
+    (_Resp(body={"records": "nope"}), "not a list"),
+])
+def test_social_dnc_fails_closed_on_a_real_failure(monkeypatch, resp, match):
+    """
+    A 403 is exactly how the first live run failed. Every genuine failure must
+    raise: sourcing creators with no suppression list is the one failure here
+    that can reach someone who asked to be left alone.
+    """
+    monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: resp)
+    with pytest.raises(BlocklistUnavailable, match=match):
+        suppression.fetch_social_blocklist("T")
+
+
+def test_social_dnc_fails_closed_on_a_transport_error(monkeypatch):
+    import requests as _requests
+
+    def boom(*a, **k):
+        raise _requests.RequestException("connection reset")
+
+    monkeypatch.setattr(suppression.HTTP, "get", boom)
+    with pytest.raises(BlocklistUnavailable, match="connection reset"):
+        suppression.fetch_social_blocklist("T")
+
+
+def test_unconfigured_social_dnc_table_refuses_rather_than_defaulting(monkeypatch):
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_SOCIAL_DNC", None)
+    with pytest.raises(BlocklistUnavailable, match="AIRTABLE_TABLE_SOCIAL_DNC"):
+        suppression.fetch_social_blocklist()
+
+
+def test_pipeline_uses_the_social_reader_not_the_valencia_one():
+    """
+    Regression guard on the exact bug that broke the first live run: the
+    pipeline must not be wired to the Valencia-pinned fetch_blocklist.
+    """
+    assert pipeline.fetch_blocklist is suppression.fetch_social_blocklist

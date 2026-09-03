@@ -38,7 +38,7 @@ from channel_vetting.airtable.client import (
     _headers,
     get_tracked_handles,
 )
-from channel_vetting.airtable.do_not_contact import fetch_blocklist
+from channel_vetting.social.suppression import fetch_social_blocklist as fetch_blocklist
 from channel_vetting.budget import credit_tracker
 from channel_vetting.core.http_client import post_with_rate_limit_retry, safe_body
 from channel_vetting.core.prospect_day import today_iso

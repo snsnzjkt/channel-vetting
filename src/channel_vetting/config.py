@@ -1201,3 +1201,29 @@ SOCIAL_LOCATION_VALUES = tuple(
 # table per day) and how the review pages are laid out.
 AIRTABLE_TABLE_TIKTOK_PROSPECTS = os.getenv("AIRTABLE_TABLE_TIKTOK_PROSPECTS")
 AIRTABLE_TABLE_INSTAGRAM_PROSPECTS = os.getenv("AIRTABLE_TABLE_INSTAGRAM_PROSPECTS")
+
+# The social path's own DO NOT CONTACT table, in the same base as the prospect
+# tables. Defaults to the table name created in the Mythumi base.
+#
+# WHY THE SOCIAL PATH CANNOT REUSE airtable/do_not_contact.py: that module is
+# pinned to Valencia in three separate ways, each of which fails differently
+# against another base — a hardcoded table id (tblHO0kJw0cBqV8Mw), field IDs
+# rather than names (fldCExrqXONKfUxd5 and friends), and a rule that ZERO ROWS
+# is a failure. The first gives a 403, the second would silently index nothing,
+# and the third aborts a brand-new base where an empty suppression list is the
+# CORRECT state. None of those are bugs there; all three are wrong here.
+AIRTABLE_TABLE_SOCIAL_DNC = os.getenv("AIRTABLE_TABLE_SOCIAL_DNC", "DO NOT CONTACT")
+
+# Whether an EMPTY social suppression table aborts the run.
+#
+# FALSE while the list is genuinely empty, which it is on a new base: nobody has
+# asked Mythumi to stop contacting them yet, so "zero rows" is accurate rather
+# than broken. The Valencia reader hardcodes the opposite because its table has
+# ~1,330 rows and a zero there can only mean misconfiguration.
+#
+# FLIP THIS TO TRUE once the table has entries. From that point a zero-row read
+# means the table id, the token scope or the field names have drifted, and
+# proceeding would source creators with no suppression at all — which is the
+# one failure in this pipeline that can reach a person who asked to be left
+# alone.
+SOCIAL_REQUIRE_NON_EMPTY_DNC = env_flag("SOCIAL_REQUIRE_NON_EMPTY_DNC", default=False)

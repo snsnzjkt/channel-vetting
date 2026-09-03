@@ -589,3 +589,34 @@ def test_pipeline_uses_the_social_reader_not_the_valencia_one():
     pipeline must not be wired to the Valencia-pinned fetch_blocklist.
     """
     assert pipeline.fetch_blocklist is suppression.fetch_social_blocklist
+
+
+def test_daily_cap_asks_for_a_field_the_prospect_table_actually_has(monkeypatch):
+    """
+    The second live-run failure: count_added_today defaults to returning
+    "Channel ID", which the prospect tables do not have, and Airtable answers
+    422 UNKNOWN_FIELD_NAME rather than ignoring it.
+    """
+    from channel_vetting.airtable import client as airtable_client
+
+    seen = {}
+
+    class _R:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"records": []}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen["fields"] = params.get("fields[]")
+        return _R()
+
+    monkeypatch.setattr(airtable_client.HTTP, "get", fake_get)
+
+    airtable_client.count_added_today("TikTok – Prospects", "Qualified", id_field="Handle")
+    assert seen["fields"] == "Handle"
+
+    # And the YouTube default is untouched.
+    airtable_client.count_added_today("Home Theatre – Prospects", "Qualified")
+    assert seen["fields"] == "Channel ID"

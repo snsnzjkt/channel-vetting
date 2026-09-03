@@ -472,7 +472,9 @@ def push_record(table_name: str, record: dict, overwrite_status_and_notes: bool 
     return True
 
 
-def count_added_today(table_name: str, qualification: str | None = None) -> int:
+def count_added_today(
+    table_name: str, qualification: str | None = None, *, id_field: str = "Channel ID"
+) -> int:
     """
     Count records in `table_name` whose "Date Added" is today, optionally
     narrowed to a single "Qualification" value.
@@ -482,6 +484,14 @@ def count_added_today(table_name: str, qualification: str | None = None) -> int:
 
     Raises AirtableReadError if the read cannot be completed — callers
     must skip the niche rather than assume a full budget.
+
+    `id_field` names ONE field to return, purely to keep the response small —
+    the count comes from the NUMBER of records, never from the field's value.
+    It defaults to "Channel ID" because that is what every YouTube niche table
+    has, and it is a parameter because the social prospect tables do not: a
+    TikTok creator has no channel id, and asking for one returns
+    422 UNKNOWN_FIELD_NAME, which aborts the platform before it screens
+    anything. Any field the target table actually has will do.
     """
     # today_iso() is a machine-generated ISO date and can't contain a quote,
     # but `qualification` is a Single Select option name from a hand-edited
@@ -497,7 +507,7 @@ def count_added_today(table_name: str, qualification: str | None = None) -> int:
     count = 0
     offset = None
     while True:
-        params = {"fields[]": "Channel ID", "filterByFormula": formula, "pageSize": 100}
+        params = {"fields[]": id_field, "filterByFormula": formula, "pageSize": 100}
         if offset:
             params["offset"] = offset
 

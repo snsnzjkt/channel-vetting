@@ -292,7 +292,11 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
     # number to tune, and it is a THROUGHPUT knob only — a row admitted at the
     # cap is one that would have been admitted earlier in the day.
     try:
-        already_today = airtable.count_added_today(table, "Qualified")
+        # id_field="Handle": the prospect tables have no "Channel ID" (a TikTok
+        # creator has no channel id), and the default would return
+        # 422 UNKNOWN_FIELD_NAME. The field is only there to keep the response
+        # small; the count comes from the record count.
+        already_today = airtable.count_added_today(table, "Qualified", id_field="Handle")
     except Exception as exc:
         # A cap we cannot read must not be assumed empty — that is how a run
         # spends a full day's budget twice.

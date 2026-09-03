@@ -131,7 +131,7 @@ class InfluencerDiscovery:
     """
 
     def __init__(self, enabled=True, max_credits=None, sleep=None, handle_normalizer=None,
-                 carry_vendor_stats=False):
+                 carry_vendor_stats=False, spend_kind=KIND_DISCOVERY):
         self._active = enabled
         self._max_credits = (
             INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN if max_credits is None else max_credits
@@ -164,6 +164,12 @@ class InfluencerDiscovery:
         # run instead: every creator would arrive with followers=0 and be
         # rejected as below_follower_minimum. Social callers pass True.
         self._carry_vendor_stats = bool(carry_vendor_stats)
+        # Which ledger bucket this client's spend lands in. DEFAULTS TO
+        # KIND_DISCOVERY so the YouTube path's accounting is byte-identical.
+        # The social path passes KIND_SOCIAL so the two businesses can each hold
+        # a daily reservation inside ONE shared ledger — see the note on
+        # credit_tracker.KIND_SOCIAL for why that is not two ledgers.
+        self._spend_kind = spend_kind
         # Credits as the vendor reports them in each response's credits_cost —
         # the authoritative spend figure, accumulated so a run can print what
         # discovery actually cost.
@@ -358,7 +364,7 @@ class InfluencerDiscovery:
             # changes, a derived count would drift silently against the exact
             # limit it is meant to defend.
             if not record_spend(
-                cost, kind=KIND_DISCOVERY, detail=source_label,
+                cost, kind=self._spend_kind, detail=source_label,
                 handles=len(accounts),
             ):
                 self._active = False
@@ -484,7 +490,7 @@ class InfluencerDiscovery:
         accounts, total, cost, credits_left = self._parse(resp)
         self._credits_spent += cost
         if not record_spend(
-            cost, kind=KIND_DISCOVERY, detail=source_label, handles=len(accounts),
+            cost, kind=self._spend_kind, detail=source_label, handles=len(accounts),
         ):
             self._active = False
         if credits_left is not None:

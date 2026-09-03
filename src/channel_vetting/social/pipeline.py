@@ -47,7 +47,7 @@ from channel_vetting.core.prospect_day import today_iso
 def _iso_minutes(moment) -> str:
     """An Airtable-friendly UTC timestamp, to the minute."""
     return moment.strftime("%Y-%m-%dT%H:%M:00.000Z")
-from channel_vetting.social import criteria, discovery, posts, relevance
+from channel_vetting.social import criteria, discovery, platforms, posts, relevance
 from channel_vetting.social.handles import normalize_social_handle, profile_url
 from channel_vetting.social.lanes import lanes_in_order
 
@@ -95,38 +95,63 @@ class PlatformResult:
         )
 
 
+def social_daily_headroom() -> float:
+    """
+    Credits Mythumi may still claim today from its RESERVED slice.
+
+    Its own bucket (`KIND_SOCIAL`), not the whole day's total — so the Valencia
+    run going first cannot starve it, and it cannot starve Valencia. The shared
+    ceiling in can_afford() still sits above this and still fails closed; this
+    only decides how much of a shared day one business may take.
+    """
+    spent = credit_tracker.credits_today_for_kind(credit_tracker.KIND_SOCIAL)
+    return max(config.SOCIAL_MAX_CREDITS_PER_DAY - spent, 0.0)
+
+
 def affordable_posts_screens() -> int:
     """
-    How many posts screens the SHARED ledger will currently authorise.
+    How many posts screens are actually authorised right now.
 
-    Asks the ledger rather than dividing the per-run ceiling, because the daily
-    and monthly caps sit above it: a run late in the month can be inside its own
-    per-run budget and still be refused by the month. Probing with can_afford
-    means the floor check below reflects what will actually be permitted.
+    Bounded by THREE things, and the smallest wins:
+      1. the per-run posts budget (SOCIAL_MAX_POSTS_CREDITS_PER_RUN),
+      2. Mythumi's remaining reserved slice for today, and
+      3. the SHARED ledger, probed with can_afford() — because the daily and
+         monthly ceilings sit above the reservation, so a run can be inside its
+         own budget and its own slice and still be refused by the month.
+
+    Probing rather than dividing matters: a run late in the month is inside its
+    per-run budget and its own slice yet may have almost nothing left overall,
+    and the quality floor must see the real figure or it cannot do its job.
     """
     cost = config.SOCIAL_POSTS_CREDITS_PER_REQUEST
     if cost <= 0:
         return 0
-    per_run_allowance = int(config.SOCIAL_MAX_POSTS_CREDITS_PER_RUN / cost)
-    if not credit_tracker.can_afford(cost * max(per_run_allowance, 1), "posts screen probe"):
-        # The full per-run allowance is not available; find what is, without
-        # spending anything.
-        affordable = 0
-        for n in range(per_run_allowance, 0, -1):
-            if credit_tracker.can_afford(cost * n, "posts screen probe"):
-                affordable = n
-                break
-        return affordable
-    return per_run_allowance
+
+    per_run = int(config.SOCIAL_MAX_POSTS_CREDITS_PER_RUN / cost)
+    reserved = int(social_daily_headroom() / cost)
+    ceiling = min(per_run, reserved)
+    if ceiling <= 0:
+        return 0
+
+    if credit_tracker.can_afford(cost * ceiling, "posts screen probe"):
+        return ceiling
+    for n in range(ceiling - 1, 0, -1):
+        if credit_tracker.can_afford(cost * n, "posts screen probe"):
+            return n
+    return 0
 
 
 def prospect_table_for(platform: str) -> str | None:
-    """The platform's prospect table, or None when it is not configured."""
-    if platform == criteria.PLATFORM_TIKTOK:
-        return config.AIRTABLE_TABLE_TIKTOK_PROSPECTS
-    if platform == criteria.PLATFORM_INSTAGRAM:
-        return config.AIRTABLE_TABLE_INSTAGRAM_PROSPECTS
-    return None
+    """
+    The platform's prospect table, or None when it is not configured.
+
+    Reads the config attribute NAMED in the platform registry, so adding a
+    platform is a registry entry plus an env var — not another branch here.
+    """
+    try:
+        return getattr(config, platforms.spec(platform)["table_config_attr"], None)
+    except ValueError:
+        return None
 
 
 def _prospect_record(platform, candidate, followers, metrics, lane_key="") -> dict:
@@ -152,13 +177,11 @@ def _prospect_record(platform, candidate, followers, metrics, lane_key="") -> di
     measured.
     """
     handle = candidate["handle"]
+    spec = platforms.spec(platform)
     engagement = metrics.engagement_rate(platform, followers)
-    # in_zone=True: the discovery filter enforces the location zone server-side,
-    # so every returned creator is in zone by construction.
     points, _out_of = criteria.auto_score(
         platform, followers=followers, metrics=metrics, in_zone=True
     )
-    is_tiktok = platform == criteria.PLATFORM_TIKTOK
     band = criteria.follower_band(int(followers or 0))
 
     record = {
@@ -190,26 +213,25 @@ def _prospect_record(platform, candidate, followers, metrics, lane_key="") -> di
         "Date Added": today_iso(),
         "Notes": (
             f"Auto-screened over {metrics.sample_size} posts. Engagement measured "
-            f"per {'VIEW' if is_tiktok else 'FOLLOWER'} on this platform, floor "
+            f"per {spec['denominator'].upper()} on this platform, floor "
             f"{criteria.engagement_floor(platform, followers):.2%} for the {band} "
             f"band. Median and mean reach are both recorded and diverge on creators "
             f"with a viral post - the median is the one the gates used.\n"
             f"STILL NEEDS A HUMAN: subject check, photo quality, fake-follower risk"
-            + (", audience age (no TikTok source)." if is_tiktok else ".")
+            + ("." if spec["audience_age_available"]
+               else f", audience age (no {spec['label']} source).")
         ),
     }
     if metrics.last_post_at is not None:
         record["Last Posted"] = metrics.last_post_at.date().isoformat()
     if engagement is not None:
-        key = "Engagement Rate (per view)" if is_tiktok else "Engagement Rate (per follower)"
-        record[key] = engagement
-    if is_tiktok:
-        record["Avg Views per Post"] = metrics.avg_views
-        record["Avg Shares per Post"] = metrics.avg_shares
-    else:
-        # Instagram's views ARE Reel plays; static posts report none, which is
-        # also why the median drops unmeasured posts instead of scoring zero.
-        record["Avg Reel Plays"] = metrics.avg_views
+        record[spec["engagement_column"]] = engagement
+    # The mean alongside the median, in the column this platform names for it.
+    record[spec["reach_mean_column"]] = metrics.avg_views
+    # Shares only where the platform HAS a column, and only when actually
+    # reported — a false zero in an "Avg Shares" column reads as measured.
+    if spec["shares_column"]:
+        record[spec["shares_column"]] = metrics.avg_shares
     if metrics.media_urls:
         record["Sample Media"] = "\n".join(metrics.media_urls)
 
@@ -271,9 +293,11 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
 
     table = prospect_table_for(platform)
     if not table:
-        env = ("AIRTABLE_TABLE_TIKTOK_PROSPECTS"
-               if platform == criteria.PLATFORM_TIKTOK
-               else "AIRTABLE_TABLE_INSTAGRAM_PROSPECTS")
+        try:
+            env = platforms.spec(platform)["table_config_attr"]
+        except ValueError as exc:
+            result.aborted = str(exc)
+            return result
         result.aborted = f"{env} is not configured"
         return result
 

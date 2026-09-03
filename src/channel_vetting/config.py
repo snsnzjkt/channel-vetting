@@ -1305,3 +1305,26 @@ SOCIAL_MIN_PET_CAPTION_SHARE = float(os.getenv("SOCIAL_MIN_PET_CAPTION_SHARE", 0
 # an owner who mentions a sticker once is not caught — the test is whether
 # selling is a THEME.
 SOCIAL_MAX_SELLER_CAPTION_SHARE = float(os.getenv("SOCIAL_MAX_SELLER_CAPTION_SHARE", 0.4))
+
+# Mythumi's RESERVED daily slice of the shared credit ledger.
+#
+# THIS IS WHAT A "SEPARATE LEDGER" WAS ACTUALLY WANTED FOR, without the danger
+# of one. There is a single influencers.club subscription, one real balance and
+# one fair-use handle meter, so two ledgers would not create credits — each
+# would believe it held a full allowance and the pair would spend double against
+# one pool with nothing left to stop them. That fails OPEN and silently.
+#
+# A per-kind reservation gives the same guarantee the safe way: the social path
+# records under credit_tracker.KIND_SOCIAL and may claim at most this much of
+# any single day, so the Valencia run cannot starve it by going first, and it
+# cannot starve Valencia either. One shared ceiling still sits above both and
+# still fails closed.
+#
+# SIZED FROM MEASURED SPEND: a full two-platform social run is ~5.0 credits
+# (1.0 discovery + 1.5 posts, per platform). Valencia's measured day is ~7.3.
+# 5 + 7.3 = 12.3, which does NOT fit the current
+# INFLUENCERS_MAX_CREDITS_PER_DAY of 10 — so raising that shared daily cap to
+# ~15-20 is the other half of this change, and it is a spend decision rather
+# than a code one. Until it is raised, whichever workflow runs second will be
+# cut short by the shared ceiling even though its own reservation is intact.
+SOCIAL_MAX_CREDITS_PER_DAY = float(os.getenv("SOCIAL_MAX_CREDITS_PER_DAY", 5.0))

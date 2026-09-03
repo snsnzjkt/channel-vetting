@@ -716,3 +716,30 @@ def test_no_view_data_is_a_distinct_reason_from_below_the_floor():
     assert criteria.auto_reject_reason(
         "tiktok", followers=50_000, metrics=posts.metrics_from_items(low, now=NOW)
     ) == criteria.REASON_MEDIAN_VIEWS
+
+
+def test_median_reach_floors_are_the_retuned_ones():
+    """
+    Lowered 2026-09-03 for the >=10 records/day target, on measured evidence
+    that the reach gate alone removed 25 of 30 on both platforms. Pinned so the
+    next change is deliberate — these are CRITERIA, not throughput: a creator
+    admitted at 3,000 would never have been admitted at 5,000.
+    """
+    assert criteria.min_median_views("tiktok") == 3_000
+    assert criteria.min_median_views("instagram") == 1_500
+    # Instagram stays the lower of the two: it reports plays for Reels only, so
+    # its median is taken over a smaller, noisier sample than TikTok's.
+    assert criteria.min_median_views("instagram") < criteria.min_median_views("tiktok")
+
+
+def test_screening_budget_can_actually_reach_the_daily_target():
+    """
+    30 screens per platform was the binding constraint, not the gates: at the
+    measured 13% admit rate no threshold could have produced 10 rows from 30.
+    """
+    screens = int(config.SOCIAL_MAX_POSTS_CREDITS_PER_RUN
+                  / config.SOCIAL_POSTS_CREDITS_PER_REQUEST)
+    assert screens >= config.SOCIAL_TARGET_PER_PLATFORM * 3, (
+        "the posts budget must allow several screens per admitted row, or the "
+        "target is unreachable however the floors are set"
+    )

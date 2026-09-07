@@ -483,12 +483,20 @@ REJECTED_HANDLES_FILE = os.getenv("REJECTED_HANDLES_FILE", data_path("rejected_h
 # an actively-surfaced creator does not age out mid-window and get re-bought.
 REJECTED_HANDLES_RETENTION_DAYS = int(os.getenv("REJECTED_HANDLES_RETENTION_DAYS", 90))
 
-# A measured full two-niche day is ~7.3 credits (5.5 discovery + 1.8 email).
-# 10 leaves room for that day plus a small manual top-up, while stopping a
-# second full run from silently doubling it — which is the concrete waste this
-# ledger was built to catch. Raise it deliberately for a backlog sweep.
+# A measured full two-niche day is ~7.3 credits (5.5 discovery + 1.8 email),
+# and a full two-platform social day is ~3.9-5.0 on top of it. At 10 the two
+# workflows could not both complete: whichever ran second was cut short by this
+# ceiling even with its own reservation intact, which is exactly what happened
+# on 2026-09-07 (a social run left 6.15 against Valencia's ~7.3 need).
+#
+# RAISED 10 -> 20 on 2026-09-07, operator decision, to fit both businesses in
+# one day. Still ~15x tighter than the vendor's reported remaining balance
+# (297.85) and well inside INFLUENCERS_MAX_CREDITS_PER_MONTH, so this buys
+# co-existence, not licence: a second full run of EITHER pipeline is still
+# refused. See SOCIAL_MAX_CREDITS_PER_DAY for the per-business slices that
+# stop one side from eating the whole 20.
 INFLUENCERS_MAX_CREDITS_PER_DAY = float(
-    os.getenv("INFLUENCERS_MAX_CREDITS_PER_DAY", 10)
+    os.getenv("INFLUENCERS_MAX_CREDITS_PER_DAY", 20)
 )
 
 # The brake in front of the vendor's FAIR-USE cap, which resets only at
@@ -1325,6 +1333,11 @@ SOCIAL_MAX_SELLER_CAPTION_SHARE = float(os.getenv("SOCIAL_MAX_SELLER_CAPTION_SHA
 # 5 + 7.3 = 12.3, which does NOT fit the current
 # INFLUENCERS_MAX_CREDITS_PER_DAY of 10 — so raising that shared daily cap to
 # ~15-20 is the other half of this change, and it is a spend decision rather
-# than a code one. Until it is raised, whichever workflow runs second will be
-# cut short by the shared ceiling even though its own reservation is intact.
-SOCIAL_MAX_CREDITS_PER_DAY = float(os.getenv("SOCIAL_MAX_CREDITS_PER_DAY", 5.0))
+# than a code one. THAT HALF IS NOW DONE: INFLUENCERS_MAX_CREDITS_PER_DAY was
+# raised to 20 on 2026-09-07, so a social run no longer cuts Valencia short.
+#
+# RAISED 5.0 -> 10.0 at the same time, so that the slice can hold TWO social
+# runs in a day (~3.9 each). The 5.0 sizing assumed one run per day; a dry run
+# costs exactly what a real one does, so a calibrate-then-write day needs two.
+# Valencia's ~7.3 still fits underneath the shared 20 alongside a full 10.
+SOCIAL_MAX_CREDITS_PER_DAY = float(os.getenv("SOCIAL_MAX_CREDITS_PER_DAY", 10.0))

@@ -1109,8 +1109,15 @@ SOCIAL_PROFILE_CREDITS_PER_REQUEST = float(
 # admitted anyway had discovery reached them. Prefer raising this over lowering
 # a floor — a floor loses prospects permanently, a budget only defers them.
 # 1.0 credits is ~100 creators, i.e. two full pages.
+#
+# RAISED 1.0 -> 2.5 on 2026-09-07, to buy ONE PAGE PER LANE. A page is a fixed
+# 50 creators (influencers_club.PAGE_LIMIT) costing 0.50, and there are five
+# enabled lanes, so anything under 2.5 means the later lanes are never even
+# queried. That was the actual cause of the 1-row run 34157889946: not a
+# threshold, but four of five lanes never being reached. See
+# SOCIAL_MAX_SCREENS_PER_LANE.
 SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN = float(
-    os.getenv("SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN", 1.0)
+    os.getenv("SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN", 2.5)
 )
 
 # Per-run posts-screening ceiling, PER PLATFORM. 0.9 credits is 30 screens.
@@ -1135,9 +1142,34 @@ SOCIAL_MAX_DISCOVERY_CREDITS_PER_RUN = float(
 # reported 314 credits remaining on 2026-09-03, so the 200 is conservative).
 # If both runs ever fill their budgets on the same day the shared ledger stops
 # the second one, which is the cap working rather than a fault.
+#
+# RAISED 1.5 -> 2.5 on 2026-09-07. 1.5 bought exactly 50 screens, and lane one
+# alone returns 50 candidates, so the budget was always exhausted before lane
+# two — see SOCIAL_MAX_SCREENS_PER_LANE, which is the change that actually
+# spreads it. 2.5 is ~83 screens per platform, enough that the per-lane cap
+# rather than the wallet decides where screening stops.
 SOCIAL_MAX_POSTS_CREDITS_PER_RUN = float(
-    os.getenv("SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 1.5)
+    os.getenv("SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 2.5)
 )
+
+# HOW MANY CREATORS ANY ONE LANE MAY CONSUME, per platform per run.
+#
+# THE BUG THIS FIXES. run_platform walks lanes_in_order() and screens
+# candidates until the posts budget is gone. Lane one returns a full page of 50
+# and the budget bought 50 screens, so lanes two through five never spent a
+# credit — in three consecutive runs. Every row Mythumi has ever produced came
+# from a single lane, and its yield decayed 7% -> 1% as the tracked-handle
+# exclusion pushed each run deeper into the same relevancy-sorted pool. The
+# vendor sorts by relevancy descending, so page two is less relevant AND
+# smaller: going deeper in one lane is strictly worse than going wide.
+#
+# NOT A NEW GATE. It rejects nobody. It only stops the highest-priority lane
+# eating the whole screening budget, so the same spend samples five pools
+# instead of one. 15 x 5 lanes = 75 screens per platform, inside the 2.5-credit
+# posts budget above with room for a short page.
+#
+# 0 disables the cap and restores the old single-lane behaviour.
+SOCIAL_MAX_SCREENS_PER_LANE = int(os.getenv("SOCIAL_MAX_SCREENS_PER_LANE", 15))
 
 # THE QUALITY FLOOR. A run that cannot afford at least this many posts screens
 # per platform ABORTS that platform instead of admitting creators screened on
@@ -1340,4 +1372,4 @@ SOCIAL_MAX_SELLER_CAPTION_SHARE = float(os.getenv("SOCIAL_MAX_SELLER_CAPTION_SHA
 # runs in a day (~3.9 each). The 5.0 sizing assumed one run per day; a dry run
 # costs exactly what a real one does, so a calibrate-then-write day needs two.
 # Valencia's ~7.3 still fits underneath the shared 20 alongside a full 10.
-SOCIAL_MAX_CREDITS_PER_DAY = float(os.getenv("SOCIAL_MAX_CREDITS_PER_DAY", 10.0))
+SOCIAL_MAX_CREDITS_PER_DAY = float(os.getenv("SOCIAL_MAX_CREDITS_PER_DAY", 12.0))

@@ -141,6 +141,24 @@ def affordable_posts_screens() -> int:
     return 0
 
 
+def screens_per_lane(screens: int) -> int:
+    """
+    The most creators one lane may consume out of this run's screening budget.
+
+    SOCIAL_MAX_SCREENS_PER_LANE when set; otherwise the budget divided evenly
+    across the enabled lanes, rounded up so a small budget still reaches more
+    than one lane. 0 disables the cap, restoring the pre-2026-09-07 behaviour
+    where the highest-priority lane took everything.
+
+    This is a SPREAD, not a gate — it changes which creators get looked at,
+    never which ones pass.
+    """
+    configured = config.SOCIAL_MAX_SCREENS_PER_LANE
+    if configured <= 0:
+        return max(screens, 0)
+    return min(configured, screens) if screens > 0 else 0
+
+
 def prospect_table_for(platform: str) -> str | None:
     """
     The platform's prospect table, or None when it is not configured.
@@ -352,10 +370,18 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
     client = discovery.client_for_run()
     seen = set(tracked)
     remaining_screens = screens
+    # THE PER-LANE CAP. Without it the first lane consumes the whole screening
+    # budget and the remaining lanes are never queried at all — the cause of
+    # the single-lane runs of 2026-09-03..07. It admits nobody extra on its
+    # own; it just makes the same spend sample every pool instead of one.
+    per_lane = screens_per_lane(screens)
 
     for lane in lanes_in_order():
         if result.admitted >= target or remaining_screens <= 0:
             break
+        # Later lanes inherit whatever the earlier ones left, so a short page
+        # or a lane that fails soft hands its budget on rather than wasting it.
+        lane_screens = min(per_lane, remaining_screens)
 
         candidates = discovery.discover(
             platform,
@@ -367,7 +393,7 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
         result.discovered += len(candidates)
 
         for candidate in candidates:
-            if result.admitted >= target or remaining_screens <= 0:
+            if result.admitted >= target or remaining_screens <= 0 or lane_screens <= 0:
                 break
             handle = normalize_social_handle(candidate.get("handle", ""))
             if not handle or handle in seen:
@@ -385,6 +411,7 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
 
             metrics = posts.fetch_metrics(platform, handle)
             remaining_screens -= 1
+            lane_screens -= 1
             result.screened += 1
 
             # The vendor's follower count, carried deliberately on this path

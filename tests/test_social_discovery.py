@@ -1110,3 +1110,130 @@ def test_the_shared_ceiling_still_wins_over_the_reservation(monkeypatch, credit_
     credit_ceilings(day=0.30, month=99.0)   # only 10 screens in the whole day
 
     assert pipeline.affordable_posts_screens() == 10
+
+
+# ---------------------------------------------------------------------------
+# THE PER-LANE SCREENING CAP (2026-09-07)
+#
+# Three consecutive production runs screened 50 creators and never queried
+# lanes two through five, because lane one returns a full 50-candidate page and
+# the posts budget bought exactly 50 screens. Every Mythumi row ever written
+# came from one lane, and that lane's yield decayed 7% -> 1% as the run went
+# deeper into the same relevancy-sorted pool. These pin the spread.
+# ---------------------------------------------------------------------------
+
+from channel_vetting.social import lanes
+
+
+def _page_per_lane(size=50):
+    """Every lane returns a full page, which is what production does."""
+    def _discover(platform, *, lane, target, exclude_handles, client):
+        key = lane["key"]
+        return [
+            {"handle": f"{key}.{i}", "channel_title": key,
+             "influencers_user_id": f"{key}-{i}", "vendor_followers": 50_000}
+            for i in range(size)
+        ]
+    return _discover
+
+
+def test_one_lane_cannot_eat_the_whole_screening_budget(monkeypatch):
+    """
+    THE REGRESSION THIS FIXES. With a 50-screen budget and a 50-candidate first
+    page, the old loop spent everything on lane one. The cap must leave budget
+    for the lanes behind it.
+    """
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 1.5)  # 50 screens
+    monkeypatch.setattr(config, "SOCIAL_MAX_SCREENS_PER_LANE", 15)
+    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 999)
+    monkeypatch.setattr(pipeline.discovery, "discover", _page_per_lane())
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+
+    seen_lanes = []
+    real = pipeline.discovery.discover
+
+    def _spy(platform, *, lane, target, exclude_handles, client):
+        seen_lanes.append(lane["key"])
+        return real(platform, lane=lane, target=target,
+                    exclude_handles=exclude_handles, client=client)
+
+    monkeypatch.setattr(pipeline.discovery, "discover", _spy)
+
+    result = pipeline.run_platform("tiktok", dry_run=True)
+
+    # More than one lane was queried — the whole point.
+    assert len(seen_lanes) > 1, f"only reached {seen_lanes}"
+    assert seen_lanes[0] == "pet_single_identity"
+    # And no lane took more than its share.
+    assert result.screened <= 50
+
+
+def test_the_cap_spreads_screens_evenly_across_lanes(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 2.5)
+    monkeypatch.setattr(config, "SOCIAL_MAX_SCREENS_PER_LANE", 10)
+    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 999)
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+
+    per_lane = {}
+
+    def _spy(platform, *, lane, target, exclude_handles, client):
+        per_lane[lane["key"]] = per_lane.get(lane["key"], 0)
+        return _page_per_lane()(platform, lane=lane, target=target,
+                                exclude_handles=exclude_handles, client=client)
+
+    monkeypatch.setattr(pipeline.discovery, "discover", _spy)
+
+    pipeline.run_platform("tiktok", dry_run=True)
+
+    # Five enabled lanes x 10 screens = every lane reached.
+    assert len(per_lane) == len(lanes.lanes_in_order())
+
+
+def test_a_short_lane_hands_its_budget_to_the_next(monkeypatch):
+    """
+    A lane that fails soft or returns a short page must not strand its share —
+    otherwise the cap would cost throughput rather than redistribute it.
+    """
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 2.5)
+    monkeypatch.setattr(config, "SOCIAL_MAX_SCREENS_PER_LANE", 10)
+    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 999)
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+
+    def _first_lane_empty(platform, *, lane, target, exclude_handles, client):
+        if lane["priority"] == 1:
+            return []
+        return _page_per_lane(3)(platform, lane=lane, target=target,
+                                 exclude_handles=exclude_handles, client=client)
+
+    monkeypatch.setattr(pipeline.discovery, "discover", _first_lane_empty)
+
+    result = pipeline.run_platform("tiktok", dry_run=True)
+
+    # 4 remaining lanes x 3 candidates each.
+    assert result.screened == 12
+
+
+def test_zero_disables_the_cap_and_restores_single_lane_behaviour(monkeypatch):
+    """0 is the documented escape hatch back to the old behaviour."""
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "SOCIAL_MAX_POSTS_CREDITS_PER_RUN", 1.5)
+    monkeypatch.setattr(config, "SOCIAL_MAX_SCREENS_PER_LANE", 0)
+    monkeypatch.setattr(config, "SOCIAL_TARGET_PER_PLATFORM", 999)
+    monkeypatch.setattr(pipeline.discovery, "discover", _page_per_lane())
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+
+    assert pipeline.screens_per_lane(50) == 50
+
+
+def test_the_cap_admits_nobody_a_gate_would_have_rejected(monkeypatch):
+    """
+    It is a SPREAD, not a gate. Same thresholds, same verdicts — only the set
+    of creators looked at changes.
+    """
+    assert pipeline.screens_per_lane(50) == config.SOCIAL_MAX_SCREENS_PER_LANE
+    # Never hands out more budget than the run actually has.
+    assert pipeline.screens_per_lane(3) == 3
+    assert pipeline.screens_per_lane(0) == 0

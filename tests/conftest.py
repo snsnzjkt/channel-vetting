@@ -52,6 +52,24 @@ def block_real_http(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def reset_vendor_lockout():
+    """
+    Clear the PROCESS-WIDE discovery lockout latch between tests.
+
+    influencers_club._VENDOR_LOCKOUT is module state on purpose (the vendor's
+    allowance belongs to the account, not to a client object), which means one
+    test latching it would silently disable discovery for every test that ran
+    after it — and they would still pass, just by doing nothing. Reset on both
+    sides so ordering cannot matter.
+    """
+    from channel_vetting.discovery import influencers_club
+
+    influencers_club.reset_vendor_lockout()
+    yield
+    influencers_club.reset_vendor_lockout()
+
+
+@pytest.fixture(autouse=True)
 def isolate_credit_ledger(tmp_path, monkeypatch):
     """
     Point the credit ledger at a per-test temp file, and lift the spend ceilings

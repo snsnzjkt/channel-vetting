@@ -40,6 +40,7 @@ from channel_vetting.airtable.client import (
 )
 from channel_vetting.social.suppression import fetch_social_blocklist as fetch_blocklist
 from channel_vetting.budget import credit_tracker
+from channel_vetting.discovery import influencers_club
 from channel_vetting.core.http_client import post_with_rate_limit_retry, safe_body
 from channel_vetting.core.prospect_day import today_iso
 
@@ -379,6 +380,11 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
     for lane in lanes_in_order():
         if result.admitted >= target or remaining_screens <= 0:
             break
+        # The vendor's Discovery allowance is account-level and does not come
+        # back mid-run, so stop asking. Without this the five lanes below turn
+        # ONE refusal into five identical requests per platform.
+        if influencers_club.vendor_lockout():
+            break
         # Later lanes inherit whatever the earlier ones left, so a short page
         # or a lane that fails soft hands its budget on rather than wasting it.
         lane_screens = min(per_lane, remaining_screens)
@@ -446,6 +452,24 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
                 result.write_failures += 1
             else:
                 result.admitted += 1
+
+    # A VENDOR LOCKOUT IS AN ABORT, NOT A WEAK DAY.
+    #
+    # tests/test_zero_row_visibility.py sets the rule for a thin run: log loudly
+    # but exit 0, because "the run succeeded at everything it was asked to do
+    # and the finding is about yield". This is the other case. Discovery was
+    # REFUSED, nothing was examined and nothing was spent, so it is reported as
+    # an abort — which is what main() turns into a non-zero exit. A 30-second
+    # green run that sourced nothing is the failure this makes visible.
+    lockout = influencers_club.vendor_lockout()
+    if lockout and result.screened == 0 and not result.aborted:
+        result.aborted = (
+            f"influencers.club refused discovery — its Discovery API allowance "
+            f"is exhausted and is topped up on subscription renewal, not by "
+            f"waiting. The credit balance is NOT the constraint. Vendor said: "
+            f"{lockout}"
+        )
+        logger.error("%s", result.aborted)
 
     logger.info("%s", result.summary())
     return result

@@ -1237,3 +1237,104 @@ def test_the_cap_admits_nobody_a_gate_would_have_rejected(monkeypatch):
     # Never hands out more budget than the run actually has.
     assert pipeline.screens_per_lane(3) == 3
     assert pipeline.screens_per_lane(0) == 0
+
+
+# ---------------------------------------------------------------------------
+# THE VENDOR DISCOVERY LOCKOUT (2026-09-09)
+#
+# Run 34362598418 finished in 30 seconds, green, having written nothing. The
+# vendor had returned 429 "Discovery API credit limit reached" to all TEN
+# discovery calls (five lanes x two platforms) while still reporting 290.02
+# credits available. Two defects: the refusal was retried instead of latched,
+# and the run exited 0 so it looked like a healthy quiet day.
+# ---------------------------------------------------------------------------
+
+from channel_vetting.discovery import influencers_club as _ic
+
+
+def _resp(status, body):
+    class _R:
+        status_code = status
+        text = body
+        content = body.encode()
+        headers = {"Content-Type": "application/json"}
+
+        def json(self):
+            import json as _j
+            return _j.loads(body)
+    return _R()
+
+
+LOCKOUT_BODY = (
+    '{"error":"Discovery API credit limit reached. '
+    'Your allowance is topped up on subscription renewal."}'
+)
+
+
+def test_an_allowance_429_is_told_apart_from_a_rate_limit():
+    assert _ic._is_allowance_429(429, LOCKOUT_BODY) is True
+    # A bodyless 429 counts — the vendor is documented to send one.
+    assert _ic._is_allowance_429(429, "") is True
+    # A plain rate limit does NOT latch: that one is worth retrying.
+    assert _ic._is_allowance_429(429, '{"error":"Too many requests, slow down"}') is False
+    # Nothing else is a lockout.
+    assert _ic._is_allowance_429(500, LOCKOUT_BODY) is False
+    assert _ic._is_allowance_429(400, "invalid_input") is False
+
+
+def test_the_lockout_latches_and_stops_further_requests(monkeypatch):
+    """
+    ONE refusal must produce ONE request, not one per lane per platform.
+    """
+    calls = []
+
+    def _post(url, json=None, timeout=None):
+        calls.append(json)
+        return _resp(429, LOCKOUT_BODY)
+
+    monkeypatch.setattr(_ic.HTTP, "post", _post)
+
+    disc = _ic.InfluencerDiscovery(enabled=True)
+    disc.discover(filters={}, target=10, platform="tiktok", source_label="lane one")
+    assert len(calls) == 1
+    assert _ic.vendor_lockout()
+
+    # A client built AFTER the refusal is born disabled — run_platform makes a
+    # fresh one per platform, which is how one refusal became ten requests.
+    later = _ic.InfluencerDiscovery(enabled=True)
+    assert later.enabled is False
+    later.discover(filters={}, target=10, platform="instagram", source_label="lane two")
+    assert len(calls) == 1, "a second platform re-asked a locked-out vendor"
+
+
+def test_a_locked_out_run_aborts_rather_than_reporting_a_quiet_day(monkeypatch):
+    """
+    THE GREEN NO-OP. A weak day exits 0 by design (test_zero_row_visibility);
+    a vendor refusal must abort so main() exits non-zero.
+    """
+    _configure(monkeypatch)
+    monkeypatch.setattr(_ic.HTTP, "post",
+                        lambda *a, **k: _resp(429, LOCKOUT_BODY))
+
+    result = pipeline.run_platform("tiktok")
+
+    assert result.aborted, "a vendor lockout must not look like a thin run"
+    assert "allowance is exhausted" in result.aborted
+    assert "credit balance is NOT the constraint" in result.aborted
+    assert result.screened == 0
+
+
+def test_the_lockout_does_not_swallow_an_ordinary_thin_run(monkeypatch):
+    """
+    The abort must be specific to the lockout. A run that legitimately finds
+    nothing still exits 0 — failing green runs for weak yield is the thing the
+    zero-row visibility work explicitly refused to do.
+    """
+    _configure(monkeypatch)
+    monkeypatch.setattr(pipeline.discovery, "discover",
+                        lambda *a, **k: [])
+
+    result = pipeline.run_platform("tiktok")
+
+    assert not result.aborted
+    assert result.screened == 0

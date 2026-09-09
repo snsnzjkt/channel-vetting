@@ -501,6 +501,12 @@ class _Resp:
         return self._body
 
 
+# These tests exercise the READER, not base resolution, so they pin a base
+# explicitly. Without it they depend on the machine having a populated .env
+# — which is exactly how they passed locally and failed in CI.
+_TEST_BASE = "appTESTBASE0000"
+
+
 def _dnc_row(**fields):
     return {"fields": fields}
 
@@ -521,7 +527,7 @@ def test_social_dnc_reads_field_names_not_valencia_field_ids(monkeypatch):
         ]})
 
     monkeypatch.setattr(suppression.HTTP, "get", fake_get)
-    blocklist = suppression.fetch_social_blocklist("DO NOT CONTACT")
+    blocklist = suppression.fetch_social_blocklist("DO NOT CONTACT", base_id=_TEST_BASE)
 
     assert "returnFieldsByFieldId" not in seen["params"]
     assert seen["params"]["fields[]"] == [
@@ -539,7 +545,7 @@ def test_social_dnc_indexes_handles_from_both_columns(monkeypatch):
         _dnc_row(**{"Profile URL": "https://www.instagram.com/urlonly/"}),
         _dnc_row(**{"Handle": "both", "Profile URL": "https://www.tiktok.com/@alsoboth"}),
     ]}))
-    blocklist = suppression.fetch_social_blocklist("T")
+    blocklist = suppression.fetch_social_blocklist("T", base_id=_TEST_BASE)
     assert blocklist.handles == {"barehandle", "urlonly", "both", "alsoboth"}
 
 
@@ -551,7 +557,7 @@ def test_empty_social_dnc_is_accurate_on_a_new_base_by_default(monkeypatch):
     monkeypatch.setattr(config, "SOCIAL_REQUIRE_NON_EMPTY_DNC", False)
     monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": []}))
 
-    blocklist = suppression.fetch_social_blocklist("T")
+    blocklist = suppression.fetch_social_blocklist("T", base_id=_TEST_BASE)
 
     assert isinstance(blocklist, Blocklist)
     assert len(blocklist) == 0
@@ -567,7 +573,7 @@ def test_empty_social_dnc_aborts_once_the_list_is_seeded(monkeypatch):
     monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: _Resp(body={"records": []}))
 
     with pytest.raises(BlocklistUnavailable, match="zero rows"):
-        suppression.fetch_social_blocklist("T")
+        suppression.fetch_social_blocklist("T", base_id=_TEST_BASE)
 
 
 @pytest.mark.parametrize("resp,match", [
@@ -583,7 +589,7 @@ def test_social_dnc_fails_closed_on_a_real_failure(monkeypatch, resp, match):
     """
     monkeypatch.setattr(suppression.HTTP, "get", lambda *a, **k: resp)
     with pytest.raises(BlocklistUnavailable, match=match):
-        suppression.fetch_social_blocklist("T")
+        suppression.fetch_social_blocklist("T", base_id=_TEST_BASE)
 
 
 def test_social_dnc_fails_closed_on_a_transport_error(monkeypatch):
@@ -594,7 +600,7 @@ def test_social_dnc_fails_closed_on_a_transport_error(monkeypatch):
 
     monkeypatch.setattr(suppression.HTTP, "get", boom)
     with pytest.raises(BlocklistUnavailable, match="connection reset"):
-        suppression.fetch_social_blocklist("T")
+        suppression.fetch_social_blocklist("T", base_id=_TEST_BASE)
 
 
 def test_unconfigured_social_dnc_table_refuses_rather_than_defaulting(monkeypatch):
@@ -1371,25 +1377,30 @@ def test_the_lockout_does_not_swallow_an_ordinary_thin_run(monkeypatch):
 # job. That is why the override FALLS BACK rather than being required — making
 # it mandatory would abort the one configuration that already worked.
 
-def test_valencia_urls_are_unchanged_when_no_base_is_passed():
+def test_valencia_urls_are_unchanged_when_no_base_is_passed(monkeypatch):
     """
     The whole safety argument for this change: every YouTube call site omits
     base_id, so its URL must be byte-identical to the pre-change one.
+
+    The ambient base is pinned rather than read, so this asserts something real
+    on a CI runner with no .env — where AIRTABLE_BASE_ID is None and both sides
+    of a naive comparison would agree on the string "None".
     """
     from channel_vetting.airtable import client as airtable_client
 
+    monkeypatch.setattr(airtable_client, "AIRTABLE_BASE_ID", "appVALENCIA")
     assert airtable_client._base_url("Home Theater") == (
-        "https://api.airtable.com/v0/"
-        f"{airtable_client.AIRTABLE_BASE_ID}/Home%20Theater"
+        "https://api.airtable.com/v0/appVALENCIA/Home%20Theater"
     )
 
 
-def test_an_explicit_base_overrides_the_ambient_one():
+def test_an_explicit_base_overrides_the_ambient_one(monkeypatch):
     from channel_vetting.airtable import client as airtable_client
 
+    monkeypatch.setattr(airtable_client, "AIRTABLE_BASE_ID", "appVALENCIA")
     url = airtable_client._base_url("DO NOT CONTACT", "appMYTHUMI")
     assert url == "https://api.airtable.com/v0/appMYTHUMI/DO%20NOT%20CONTACT"
-    assert airtable_client.AIRTABLE_BASE_ID not in url
+    assert "appVALENCIA" not in url
 
 
 def test_social_base_falls_back_to_the_ambient_base(monkeypatch):

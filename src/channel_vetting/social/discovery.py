@@ -29,6 +29,7 @@ import logging
 from channel_vetting import config
 from channel_vetting.budget import credit_tracker
 from channel_vetting.discovery.search_zones import ZONE_CORE, vendor_locations_for
+from channel_vetting.discovery import influencers_club
 from channel_vetting.discovery.influencers_club import (
     DEFAULT_SORT,
     InfluencerDiscovery,
@@ -146,7 +147,20 @@ def discover(
 
     disc = client or client_for_run()
     if not disc.enabled:
-        logger.info("social discovery inactive (no API key or budget) for %s", platform)
+        # NAME THE REAL REASON. This line used to say "no API key or budget"
+        # whatever the cause, and during the 2026-09-09 lockout it printed that
+        # nine times while the actual cause was the vendor refusing us — the
+        # exact misdiagnosis the latch exists to prevent.
+        lockout = influencers_club.vendor_lockout()
+        if lockout:
+            logger.info(
+                "social discovery skipped for %s — vendor discovery allowance "
+                "exhausted earlier this run: %s", platform, lockout,
+            )
+        else:
+            logger.info(
+                "social discovery inactive (no API key or budget) for %s", platform
+            )
         return []
 
     filters = build_filters(platform, lane)

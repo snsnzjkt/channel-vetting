@@ -50,19 +50,37 @@ FIELD_URL = "Profile URL"
 FIELD_EMAIL = "Email"
 
 
-def fetch_social_blocklist(table_name: str | None = None) -> Blocklist:
+def fetch_social_blocklist(
+    table_name: str | None = None, *, base_id: str | None = None
+) -> Blocklist:
     """
     The social suppression index, or raise BlocklistUnavailable.
 
     Indexes on all three keys the shared `match()` checks: handle (from the
     bare Handle column AND from a Profile URL, since either may be the only one
     filled), email, and name.
+
+    THE BASE IS PART OF "WHICH LIST". Reading field NAMES instead of Valencia's
+    field ids made this module portable across bases, but the URL still came
+    from airtable/client's module-level AIRTABLE_BASE_ID — so on a laptop, where
+    that is Valencia's, the portable reader read Valencia's DO NOT CONTACT table
+    and called it Mythumi's. It now resolves through config.social_base_id(),
+    which honours AIRTABLE_SOCIAL_BASE_ID and otherwise keeps the ambient base
+    (what the remapped CI job relies on).
     """
     table = table_name or config.AIRTABLE_TABLE_SOCIAL_DNC
     if not table:
         raise BlocklistUnavailable(
             "AIRTABLE_TABLE_SOCIAL_DNC is not configured — refusing to source "
             "creators with no suppression list"
+        )
+
+    base = base_id or config.social_base_id()
+    if not base:
+        raise BlocklistUnavailable(
+            "no Airtable base is configured (neither AIRTABLE_SOCIAL_BASE_ID "
+            "nor AIRTABLE_BASE_ID) — refusing to screen creators against a "
+            "suppression list this run cannot locate"
         )
 
     blocklist = Blocklist()
@@ -78,7 +96,9 @@ def fetch_social_blocklist(table_name: str | None = None) -> Blocklist:
             params["offset"] = offset
 
         try:
-            resp = HTTP.get(_base_url(table), headers=_headers(), params=params, timeout=30)
+            resp = HTTP.get(
+                _base_url(table, base), headers=_headers(), params=params, timeout=30
+            )
         except requests.RequestException as exc:
             raise BlocklistUnavailable(
                 f"social DO NOT CONTACT fetch failed: {exc}"

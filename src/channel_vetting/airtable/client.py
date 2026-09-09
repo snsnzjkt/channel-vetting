@@ -54,10 +54,16 @@ class AirtableReadError(RuntimeError):
     """
 
 
-def _base_url(table_name: str) -> str:
+def _base_url(table_name: str, base_id: str | None = None) -> str:
     # URL-encode the table name/ID so table names containing spaces or
     # other special characters don't produce a malformed request URL.
-    return f"{AIRTABLE_API_BASE_URL}/{AIRTABLE_BASE_ID}/{quote(table_name, safe='')}"
+    #
+    # `base_id` is OPTIONAL and defaults to AIRTABLE_BASE_ID — the Valencia
+    # base every YouTube call site has always used. Omitting it produces a
+    # byte-identical URL to the old one-argument version, which is why none of
+    # those call sites needed touching. Only the social path (Mythumi, its own
+    # base) passes it; see config.AIRTABLE_SOCIAL_BASE_ID.
+    return f"{AIRTABLE_API_BASE_URL}/{base_id or AIRTABLE_BASE_ID}/{quote(table_name, safe='')}"
 
 
 def _headers() -> dict:
@@ -155,10 +161,13 @@ def get_existing_channel_ids(table_name: str) -> set[str]:
 # Per-process cache for table_has_field(). A table's schema does not change
 # mid-run, and the probe is only there to decide whether a field is safe to
 # write — asking once per table per run is enough.
-_FIELD_PRESENCE: dict[tuple[str, str], bool] = {}
+# Keyed by BASE as well as table and field: two bases can hold tables of the
+# same name with different columns, and a two-part key would let a probe of
+# Valencia's table answer for Mythumi's.
+_FIELD_PRESENCE: dict[tuple[str, str, str], bool] = {}
 
 
-def table_has_field(table_name: str, field_name: str) -> bool:
+def table_has_field(table_name: str, field_name: str, *, base_id: str | None = None) -> bool:
     """
     Whether `table_name` actually has a field called `field_name`.
 
@@ -178,14 +187,14 @@ def table_has_field(table_name: str, field_name: str) -> bool:
     non-200 is treated as "no" too, because the caller's fallback (skip the
     optional field) is always safe while guessing "yes" is not.
     """
-    key = (table_name, field_name)
+    key = (base_id or AIRTABLE_BASE_ID, table_name, field_name)
     if key in _FIELD_PRESENCE:
         return _FIELD_PRESENCE[key]
 
     present = False
     try:
         resp = HTTP.get(
-            _base_url(table_name),
+            _base_url(table_name, base_id),
             headers=_headers(),
             params={"pageSize": 1, "fields[]": field_name},
             timeout=30,
@@ -221,7 +230,7 @@ def table_has_field(table_name: str, field_name: str) -> bool:
     return present
 
 
-def get_tracked_handles(table_name: str) -> set[str]:
+def get_tracked_handles(table_name: str, *, base_id: str | None = None) -> set[str]:
     """
     Every non-empty "Handle" value in `table_name`, bare and lowercased.
 
@@ -237,12 +246,12 @@ def get_tracked_handles(table_name: str) -> set[str]:
     while a partial set that looked complete could not cause a wrong contact
     (the blocklist and dedupe gates still run post-enrichment).
     """
-    if not table_has_field(table_name, "Handle"):
+    if not table_has_field(table_name, "Handle", base_id=base_id):
         return set()
 
     handles: set[str] = set()
     try:
-        for record in get_records(table_name, fields=["Handle"]):
+        for record in get_records(table_name, fields=["Handle"], base_id=base_id):
             raw = record["fields"].get("Handle")
             if isinstance(raw, str) and raw.strip():
                 handles.add(raw.strip().lstrip("@").lower())
@@ -259,7 +268,9 @@ def get_tracked_handles(table_name: str) -> set[str]:
     return handles
 
 
-def get_records(table_name: str, fields: list[str] | None = None) -> list[dict]:
+def get_records(
+    table_name: str, fields: list[str] | None = None, *, base_id: str | None = None
+) -> list[dict]:
     """
     Paginate through `table_name` and return full records as
     `[{"id": <rec…>, "fields": {…}}, …]`.
@@ -285,7 +296,9 @@ def get_records(table_name: str, fields: list[str] | None = None) -> list[dict]:
             params["offset"] = offset
 
         try:
-            resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+            resp = HTTP.get(
+                _base_url(table_name, base_id), headers=_headers(), params=params, timeout=30
+            )
         except requests.RequestException as e:
             raise AirtableReadError(f"get_records({table_name}) request failed: {e}") from e
 
@@ -473,7 +486,8 @@ def push_record(table_name: str, record: dict, overwrite_status_and_notes: bool 
 
 
 def count_added_today(
-    table_name: str, qualification: str | None = None, *, id_field: str = "Channel ID"
+    table_name: str, qualification: str | None = None, *, id_field: str = "Channel ID",
+    base_id: str | None = None,
 ) -> int:
     """
     Count records in `table_name` whose "Date Added" is today, optionally
@@ -512,7 +526,9 @@ def count_added_today(
             params["offset"] = offset
 
         try:
-            resp = HTTP.get(_base_url(table_name), headers=_headers(), params=params, timeout=30)
+            resp = HTTP.get(
+                _base_url(table_name, base_id), headers=_headers(), params=params, timeout=30
+            )
         except requests.RequestException as e:
             raise AirtableReadError(f"count_added_today({table_name}) request failed: {e}") from e
 

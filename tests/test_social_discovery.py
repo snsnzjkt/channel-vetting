@@ -207,10 +207,18 @@ def test_stale_account_is_rejected_on_recency():
 # --- 5. the budget floor and the daily cap -------------------------------
 
 def _configure(monkeypatch, *, tiktok="TikTok – Prospects", instagram="Instagram – Prospects"):
+    # A DISTINCT base, because a correctly configured social run has one: the
+    # guard in config.social_base_conflict() aborts when the social path lands
+    # on the base Valencia's niche tables live in, and the repo's own .env
+    # (loaded by config) has those tables set.
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", "appMYTHUMI")
     monkeypatch.setattr(config, "AIRTABLE_TABLE_TIKTOK_PROSPECTS", tiktok)
     monkeypatch.setattr(config, "AIRTABLE_TABLE_INSTAGRAM_PROSPECTS", instagram)
     monkeypatch.setattr(pipeline.airtable, "count_added_today", lambda *a, **k: 0)
-    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table: set())
+    # **k: run_platform now threads base_id= into every Airtable call so the
+    # DNC read and the row writes are provably on one base. The doubles have to
+    # accept it or they assert the OLD call shape.
+    monkeypatch.setattr(pipeline, "get_tracked_handles", lambda table, **k: set())
     monkeypatch.setattr(pipeline, "fetch_blocklist", lambda: None)
 
 
@@ -283,7 +291,7 @@ def test_cap_headroom_limits_the_target(monkeypatch):
     monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
     writes = []
     monkeypatch.setattr(pipeline, "_create_row",
-                        lambda table, fields: writes.append((table, fields)) or "recX")
+                        lambda table, fields, **k: writes.append((table, fields)) or "recX")
 
     result = pipeline.run_platform("tiktok", target=10)
 
@@ -397,7 +405,7 @@ def test_run_platform_writes_one_prospect_row_per_creator(monkeypatch):
     monkeypatch.setattr(pipeline.discovery, "discover", fake_discover)
     monkeypatch.setattr(pipeline.posts, "fetch_metrics", fake_metrics)
     monkeypatch.setattr(pipeline, "_create_row",
-                        lambda table, fields: writes.append((table, fields)) or "recX")
+                        lambda table, fields, **k: writes.append((table, fields)) or "recX")
 
     result = pipeline.run_platform("tiktok")
 
@@ -420,7 +428,7 @@ def test_instagram_rows_go_to_the_instagram_table(monkeypatch):
     monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
     writes = []
     monkeypatch.setattr(pipeline, "_create_row",
-                        lambda table, fields: writes.append((table, fields)) or "recX")
+                        lambda table, fields, **k: writes.append((table, fields)) or "recX")
 
     pipeline.run_platform("instagram")
 
@@ -432,7 +440,7 @@ def test_write_failure_is_counted_not_admitted(monkeypatch):
     _configure(monkeypatch)
     monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate())
     monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
-    monkeypatch.setattr(pipeline, "_create_row", lambda table, fields: None)
+    monkeypatch.setattr(pipeline, "_create_row", lambda table, fields, **k: None)
 
     result = pipeline.run_platform("tiktok")
 
@@ -466,7 +474,7 @@ def test_dry_run_screens_but_writes_nothing(monkeypatch):
     monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
     writes = []
     monkeypatch.setattr(pipeline, "_create_row",
-                        lambda table, fields: writes.append(fields) or "recX")
+                        lambda table, fields, **k: writes.append(fields) or "recX")
 
     result = pipeline.run_platform("tiktok", dry_run=True)
 
@@ -844,7 +852,7 @@ def test_run_platform_rejects_an_artist_and_says_why(monkeypatch):
         "custom pet portrait commission", "prints in my etsy shop",
         "dm to order yours", "watercolour pet portrait", "slots open now",
     ]))
-    monkeypatch.setattr(pipeline, "_create_row", lambda t, f: "recX")
+    monkeypatch.setattr(pipeline, "_create_row", lambda t, f, **k: "recX")
 
     result = pipeline.run_platform("tiktok")
 
@@ -1349,3 +1357,235 @@ def test_the_lockout_does_not_swallow_an_ordinary_thin_run(monkeypatch):
 
     assert not result.aborted
     assert result.screened == 0
+
+
+# --- 12. base isolation: Mythumi's own base ------------------------------
+#
+# The social path was base-portable in every way EXCEPT the one that decides
+# which base a request reaches. airtable/client._base_url() interpolated the
+# module-level AIRTABLE_BASE_ID, so suppression.py's careful use of field NAMES
+# (rather than Valencia's field ids) still read Valencia's DO NOT CONTACT table
+# whenever the ambient base was Valencia's — which is every local run.
+#
+# CI was never wrong: mythumi-search.yml remaps AIRTABLE_BASE_ID for the whole
+# job. That is why the override FALLS BACK rather than being required — making
+# it mandatory would abort the one configuration that already worked.
+
+def test_valencia_urls_are_unchanged_when_no_base_is_passed():
+    """
+    The whole safety argument for this change: every YouTube call site omits
+    base_id, so its URL must be byte-identical to the pre-change one.
+    """
+    from channel_vetting.airtable import client as airtable_client
+
+    assert airtable_client._base_url("Home Theater") == (
+        "https://api.airtable.com/v0/"
+        f"{airtable_client.AIRTABLE_BASE_ID}/Home%20Theater"
+    )
+
+
+def test_an_explicit_base_overrides_the_ambient_one():
+    from channel_vetting.airtable import client as airtable_client
+
+    url = airtable_client._base_url("DO NOT CONTACT", "appMYTHUMI")
+    assert url == "https://api.airtable.com/v0/appMYTHUMI/DO%20NOT%20CONTACT"
+    assert airtable_client.AIRTABLE_BASE_ID not in url
+
+
+def test_social_base_falls_back_to_the_ambient_base(monkeypatch):
+    """
+    The CI contract. mythumi-search.yml sets AIRTABLE_BASE_ID to the Mythumi
+    secret and sets no override at all; if the fallback ever became a hard
+    requirement that job would abort on every run.
+    """
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", None)
+    monkeypatch.setattr(config, "AIRTABLE_BASE_ID", "appFROM_CI_REMAP")
+    assert config.social_base_id() == "appFROM_CI_REMAP"
+
+
+def test_social_base_prefers_the_override(monkeypatch):
+    """The local contract: one process, two bases, Valencia's still ambient."""
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", "appMYTHUMI")
+    monkeypatch.setattr(config, "AIRTABLE_BASE_ID", "appVALENCIA")
+    assert config.social_base_id() == "appMYTHUMI"
+
+
+def test_the_dnc_read_goes_to_the_social_base_not_the_ambient_one(monkeypatch):
+    """
+    THE FAILURE THIS EXISTS TO STOP. Reading Valencia's suppression list and
+    calling it Mythumi's is not a missing feature — it is screening creators
+    against the wrong list of people who asked to be left alone.
+    """
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", "appMYTHUMI")
+    monkeypatch.setattr(config, "AIRTABLE_BASE_ID", "appVALENCIA")
+
+    seen = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        seen["url"] = url
+        return _Resp(body={"records": [_dnc_row(**{"Handle": "@blocked"})]})
+
+    monkeypatch.setattr(suppression.HTTP, "get", fake_get)
+    suppression.fetch_social_blocklist("DO NOT CONTACT")
+
+    assert "appMYTHUMI" in seen["url"]
+    assert "appVALENCIA" not in seen["url"]
+
+
+def test_run_platform_puts_every_airtable_call_on_one_base(monkeypatch):
+    """
+    One base per run, threaded rather than re-resolved. A split — the cap read
+    on one base, the write on another — would screen against one table and
+    write into a different one, and nothing downstream could detect it.
+    """
+    _configure(monkeypatch)
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", "appMYTHUMI")
+    monkeypatch.setattr(pipeline.discovery, "discover", _one_candidate())
+    monkeypatch.setattr(pipeline.posts, "fetch_metrics", _healthy_metrics)
+
+    bases = {}
+
+    def fake_count(table, qualification=None, *, id_field="Channel ID", base_id=None):
+        bases["count_added_today"] = base_id
+        return 0
+
+    def fake_tracked(table, *, base_id=None):
+        bases["get_tracked_handles"] = base_id
+        return set()
+
+    def fake_create(table, fields, *, base_id=None):
+        bases["_create_row"] = base_id
+        return "recX"
+
+    monkeypatch.setattr(pipeline.airtable, "count_added_today", fake_count)
+    monkeypatch.setattr(pipeline, "get_tracked_handles", fake_tracked)
+    monkeypatch.setattr(pipeline, "_create_row", fake_create)
+
+    result = pipeline.run_platform("tiktok", target=10)
+
+    assert result.admitted == 1
+    assert bases == {
+        "count_added_today": "appMYTHUMI",
+        "get_tracked_handles": "appMYTHUMI",
+        "_create_row": "appMYTHUMI",
+    }
+
+
+def test_the_field_presence_cache_is_keyed_by_base(monkeypatch):
+    """
+    Two bases can hold same-named tables with different columns. A two-part
+    cache key would let a probe of Valencia's table answer for Mythumi's.
+    """
+    from channel_vetting.airtable import client as airtable_client
+
+    monkeypatch.setattr(airtable_client, "_FIELD_PRESENCE", {})
+    answers = {"appVALENCIA": 200, "appMYTHUMI": 422}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        base = url.split("/v0/")[1].split("/")[0]
+        return _Resp(status=answers[base])
+
+    monkeypatch.setattr(airtable_client.HTTP, "get", fake_get)
+
+    assert airtable_client.table_has_field("T", "Handle", base_id="appVALENCIA")
+    assert not airtable_client.table_has_field("T", "Handle", base_id="appMYTHUMI")
+
+
+# --- 13. the Valencia-base collision guard -------------------------------
+#
+# Added once HT · SEND and LS · SEND were confirmed deployed against the
+# prospect tables' real Email field. Before that, a social row in the Valencia
+# base was a mess to clean up; after it, that row is a candidate for a real
+# email to a real creator, sent under a pitch for a different company.
+#
+# CI already refused this by comparing two secrets. These cover the local path,
+# and — just as importantly — prove the CI shape is not caught by it.
+
+def _valencia_shaped(monkeypatch):
+    """The repo's own .env: Valencia's base, Valencia's niche tables."""
+    monkeypatch.setattr(config, "AIRTABLE_BASE_ID", "appVALENCIA")
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_HOME_THEATER", "tblHT")
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_LIFESTYLE_SOFA", "tblLS")
+
+
+def test_the_local_fallback_onto_valencias_base_is_refused(monkeypatch):
+    """
+    Today's actual local shape: no override, so the social path falls back to
+    AIRTABLE_BASE_ID — which is Valencia's.
+    """
+    _valencia_shaped(monkeypatch)
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", None)
+
+    conflict = config.social_base_conflict()
+    assert "refusing to run against Valencia's base" in conflict
+    assert "AIRTABLE_SOCIAL_BASE_ID is unset" in conflict
+    assert "AIRTABLE_TABLE_HOME_THEATER" in conflict
+
+
+def test_pointing_the_override_at_valencias_base_is_refused(monkeypatch):
+    """The copy-paste when configuring — the accident CI's preflight names."""
+    _valencia_shaped(monkeypatch)
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", "appVALENCIA")
+
+    conflict = config.social_base_conflict()
+    assert "refusing to run against Valencia's base" in conflict
+    assert "set to the SAME base" in conflict
+
+
+def test_the_ci_remap_is_not_caught_by_the_guard(monkeypatch):
+    """
+    THE NON-REGRESSION THAT MATTERS. mythumi-search.yml sets AIRTABLE_BASE_ID
+    to the Mythumi secret and hands the job no Valencia niche tables at all, so
+    base == ambient there and it is CORRECT. A bare equality check would abort
+    that job on every run.
+    """
+    monkeypatch.setattr(config, "AIRTABLE_BASE_ID", "appMYTHUMI_FROM_CI")
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", None)
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_HOME_THEATER", None)
+    monkeypatch.setattr(config, "AIRTABLE_TABLE_LIFESTYLE_SOFA", None)
+
+    assert config.social_base_conflict() == ""
+    assert config.social_base_id() == "appMYTHUMI_FROM_CI"
+
+
+def test_a_correctly_configured_local_run_is_not_caught(monkeypatch):
+    """Two bases in one process, which is the whole point of the override."""
+    _valencia_shaped(monkeypatch)
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", "appMYTHUMI")
+
+    assert config.social_base_conflict() == ""
+    assert config.social_base_id() == "appMYTHUMI"
+
+
+def test_run_platform_refuses_the_collision_before_spending(monkeypatch):
+    _configure(monkeypatch)
+    _valencia_shaped(monkeypatch)
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", None)
+
+    result = pipeline.run_platform("tiktok")
+
+    assert "refusing to run against Valencia's base" in result.aborted
+    assert result.admitted == 0
+    assert credit_tracker.credits_today() == 0, "nothing bought on the way to finding out"
+
+
+def test_run_refuses_the_collision_without_reading_the_wrong_dnc_list(monkeypatch):
+    """
+    The guard sits BEFORE fetch_blocklist(). Otherwise a conflicted run spends
+    its whole life paginating Valencia's DO NOT CONTACT table — the wrong list
+    — before aborting, which is the shape of the 30-second run that started
+    this whole investigation.
+    """
+    _configure(monkeypatch)
+    _valencia_shaped(monkeypatch)
+    monkeypatch.setattr(config, "AIRTABLE_SOCIAL_BASE_ID", None)
+
+    def must_not_run():
+        raise AssertionError("the DNC list was read before the guard aborted")
+
+    monkeypatch.setattr(pipeline, "fetch_blocklist", must_not_run)
+
+    results = pipeline.run()
+
+    assert results, "one result per platform, so main() can exit non-zero"
+    assert all("refusing to run against Valencia's base" in r.aborted for r in results)

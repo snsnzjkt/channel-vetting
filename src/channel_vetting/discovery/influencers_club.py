@@ -93,6 +93,65 @@ PAGE_LIMIT = 50
 
 CREDITS_PER_CREATOR = 0.01
 
+# THE VENDOR LOCKOUT LATCH, deliberately PROCESS-WIDE rather than per client.
+#
+# The vendor enforces a Discovery API allowance SEPARATE from the credit
+# balance, and exhausting it returns 429 "Discovery API credit limit reached.
+# Your allowance is topped up on subscription renewal." — with a healthy
+# credits_available still reported (290.02 on 2026-09-09). So neither the
+# credit ledger nor the handle meter can predict it: the only thing that knows
+# is the vendor's own answer.
+#
+# It is module state because the condition belongs to the ACCOUNT, not to a
+# client object. run_platform builds a fresh client per platform, so a
+# per-instance flag re-armed on every platform — which is exactly what turned
+# one refusal into ten identical requests in run 34362598418.
+#
+# Nothing clears this within a process. It resets only on the next run, which
+# is correct: "topped up on subscription renewal" is not a cooldown to wait out.
+_VENDOR_LOCKOUT = ""
+
+# Matched case-insensitively against a 429 body. These say "your allowance is
+# gone", as opposed to a rate-limit 429 that a wait would clear.
+_LOCKOUT_MARKERS = ("credit limit reached", "allowance", "subscription renewal")
+
+
+def vendor_lockout() -> str:
+    """The vendor's refusal message once the allowance is exhausted, else ""."""
+    return _VENDOR_LOCKOUT
+
+
+def note_vendor_lockout(message: str) -> None:
+    """Latch the lockout. First message wins — it is the one with the context."""
+    global _VENDOR_LOCKOUT
+    if not _VENDOR_LOCKOUT:
+        _VENDOR_LOCKOUT = message or "vendor refused discovery (429)"
+
+
+def reset_vendor_lockout() -> None:
+    """Test seam. Never call this in production code — see the latch note."""
+    global _VENDOR_LOCKOUT
+    _VENDOR_LOCKOUT = ""
+
+
+def _is_allowance_429(status_code: int, body: str) -> bool:
+    """
+    Tell an allowance-exhausted 429 from a plain rate-limit 429.
+
+    A rate limit is worth backing off on; an exhausted allowance is not, and
+    retrying it once per lane per platform just spends wall-clock and buries
+    the real reason under ten identical warnings.
+    """
+    if status_code != 429:
+        return False
+    text = (body or "").lower()
+    # A bodyless 429 is treated as a lockout too: the email path already
+    # documents that the vendor sends one, and being wrong in this direction
+    # costs a deferred run, while being wrong the other way costs a hammering.
+    if not text.strip():
+        return True
+    return any(marker in text for marker in _LOCKOUT_MARKERS)
+
 
 def page_cost_credits() -> float:
     """
@@ -211,6 +270,10 @@ class InfluencerDiscovery:
         # once at the top of discover() — not per page.
         return (
             self._active
+            # The account-level latch. Checked here so a client built AFTER the
+            # refusal (run_platform makes one per platform) is born disabled
+            # instead of re-discovering the lockout with another live request.
+            and not _VENDOR_LOCKOUT
             and self._credits_spent + page_cost_credits() <= self._max_credits
             and can_afford_handles(PAGE_LIMIT, "discovery")
         )
@@ -546,9 +609,22 @@ class InfluencerDiscovery:
             logger.warning("influencers.club discovery request failed: %s", exc)
             return None
         if resp.status_code != 200:
+            body = safe_body(resp)
+            if _is_allowance_429(resp.status_code, body):
+                # ERROR, not warning: this ends the run's ability to source
+                # anything, and it needs an operator (a top-up or a renewal),
+                # so it must not read like one skipped page.
+                logger.error(
+                    "influencers.club DISCOVERY ALLOWANCE EXHAUSTED (429): %s "
+                    "— no further discovery will be attempted this run",
+                    body,
+                )
+                note_vendor_lockout(body)
+                self._active = False
+                return None
             logger.warning(
                 "influencers.club discovery returned %s: %s",
-                resp.status_code, safe_body(resp),
+                resp.status_code, body,
             )
             return None
         return resp

@@ -1294,6 +1294,106 @@ SOCIAL_ALLOWED_COUNTRIES = tuple(
 # us paying 0.01 a head for creators the zone excludes.
 
 
+# The Airtable base the social path reads and writes, when it differs from
+# AIRTABLE_BASE_ID.
+#
+# Mythumi is its OWN base, and there were already two ways to say so — one of
+# which only works in CI:
+#
+#   1. .github/workflows/mythumi-search.yml remaps the WHOLE PROCESS, handing
+#      the job AIRTABLE_BASE_ID: ${{ secrets.MYTHUMI_AIRTABLE_BASE_ID }}. That
+#      job never receives the Valencia secret at all, and a preflight step
+#      hard-fails if the two ids are equal. Correct, and it needs no code.
+#   2. Nothing, locally. A developer's .env has ONE AIRTABLE_BASE_ID and it is
+#      Valencia's, so `python -m channel_vetting.social.pipeline` on a laptop
+#      resolved every social URL — including the DO NOT CONTACT read — against
+#      Valencia's base while believing it was reading Mythumi's.
+#
+# This closes (2) without disturbing (1). It is an OVERRIDE, not a requirement:
+# unset, the social path keeps using AIRTABLE_BASE_ID, which is exactly what
+# the remapped CI job depends on. Set it only where one process must reach both
+# bases — which today means a local run.
+#
+# Valencia never reads this, in either direction: AIRTABLE_BASE_ID keeps its
+# exact meaning and no YouTube call site passes a base at all.
+AIRTABLE_SOCIAL_BASE_ID = os.getenv("AIRTABLE_SOCIAL_BASE_ID")
+
+
+def social_base_id() -> str:
+    """
+    The base the social path must use: the override when set, else the ambient
+    AIRTABLE_BASE_ID.
+
+    A function rather than a second constant so the CI remap above still works.
+    Both are read at call time, and resolving in ONE place keeps the DNC read
+    and the prospect writes from ever disagreeing about which base they are on
+    — a split that would screen against one list and write into another.
+    """
+    return AIRTABLE_SOCIAL_BASE_ID or AIRTABLE_BASE_ID
+
+
+# The Valencia niche tables, named here so social_base_conflict() can ask
+# "is the ambient base serving Valencia?" without a network call.
+_VALENCIA_NICHE_TABLE_VARS = (
+    "AIRTABLE_TABLE_HOME_THEATER",
+    "AIRTABLE_TABLE_LIFESTYLE_SOFA",
+)
+
+
+def social_base_conflict() -> str:
+    """
+    Why the social path must NOT run against the base it just resolved, or "".
+
+    THE ACCIDENT THIS CATCHES is writing pet-creator rows into the Valencia
+    base. That is not a crash — a Valencia token accepts Valencia writes all
+    day — and it is no longer merely untidy: HT · SEND and LS · SEND are
+    deployed and email the prospect's real Email field, so a row landing in a
+    Valencia niche table is a candidate for a real message to a real person.
+    mythumi-search.yml already refuses this in CI by comparing the two secrets;
+    nothing refused it locally.
+
+    THE TEST IS NOT BARE EQUALITY, because equality alone is ambiguous: a
+    single-business setup where every var points at Mythumi is equal and
+    correct. What makes equality damning is Valencia's niche tables being
+    configured in the SAME process — that is what says the ambient base is
+    serving Valencia, and it is exactly the local .env's shape.
+
+    This is why the CI job stays unaffected: mythumi-search.yml hands its job
+    only MYTHUMI_* secrets and the two social prospect tables, so
+    AIRTABLE_TABLE_HOME_THEATER and AIRTABLE_TABLE_LIFESTYLE_SOFA are unset
+    there and the guard is inert — while the Valencia workflow, which does set
+    them, never runs the social pipeline at all.
+    """
+    base = social_base_id()
+    if not base:
+        return (
+            "no Airtable base is configured (neither AIRTABLE_SOCIAL_BASE_ID "
+            "nor AIRTABLE_BASE_ID)"
+        )
+
+    if base != AIRTABLE_BASE_ID:
+        return ""
+
+    configured = [name for name in _VALENCIA_NICHE_TABLE_VARS if globals().get(name)]
+    if not configured:
+        return ""
+
+    how = (
+        "AIRTABLE_SOCIAL_BASE_ID is set to the SAME base as AIRTABLE_BASE_ID"
+        if AIRTABLE_SOCIAL_BASE_ID
+        else "AIRTABLE_SOCIAL_BASE_ID is unset, so the social path fell back "
+             "to AIRTABLE_BASE_ID"
+    )
+    return (
+        f"refusing to run against Valencia's base: {how}, and "
+        f"{' and '.join(configured)} "
+        f"{'is' if len(configured) == 1 else 'are'} configured in this same "
+        f"process — so that base is serving Valencia. "
+        f"Mythumi rows written there would land beside the niche tables the "
+        f"deployed HT/LS SEND automations email from. Set "
+        f"AIRTABLE_SOCIAL_BASE_ID to the Mythumi base."
+    )
+
 # The prospect tables the social run writes to — one per platform, mirroring
 # the Valencia niche tables. These SUPERSEDE the Creators + account-table split
 # the first version wrote: the operator asked for a single prospect row per

@@ -38,6 +38,7 @@ from channel_vetting.airtable.client import (
     _headers,
     get_tracked_handles,
 )
+from channel_vetting.airtable.do_not_contact import BlocklistUnavailable
 from channel_vetting.social.suppression import fetch_social_blocklist as fetch_blocklist
 from channel_vetting.budget import credit_tracker
 from channel_vetting.discovery import influencers_club
@@ -258,7 +259,7 @@ def _prospect_record(platform, candidate, followers, metrics, lane_key="") -> di
 
 
 
-def _create_row(table_name: str, fields: dict) -> str | None:
+def _create_row(table_name: str, fields: dict, *, base_id: str | None = None) -> str | None:
     """
     Create one Airtable row. Returns its record id, or None on failure.
 
@@ -279,7 +280,7 @@ def _create_row(table_name: str, fields: dict) -> str | None:
     payload = {"fields": fields, "typecast": True}
     try:
         resp = post_with_rate_limit_retry(
-            _base_url(table_name), headers=_headers(), json=payload, timeout=30
+            _base_url(table_name, base_id), headers=_headers(), json=payload, timeout=30
         )
     except requests.RequestException as exc:
         logger.error("social row create failed for %s: %s", fields.get("Handle"), exc)
@@ -309,6 +310,27 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
     platform = (platform or "").lower()
     result = PlatformResult(platform=platform)
     target = target or config.SOCIAL_TARGET_PER_PLATFORM
+
+    # THE BASE, BEFORE THE TABLE. A table name is meaningless without the base
+    # it lives in, and getting this wrong fails SILENTLY rather than loudly: a
+    # same-named table in the other base accepts the write.
+    #
+    # Resolved once here and threaded into every call below, so the DNC read,
+    # the daily-cap count, the tracked-handle read and the row writes are all
+    # provably on one base. config.social_base_id() falls back to the ambient
+    # AIRTABLE_BASE_ID, which is what the CI job's whole-process remap sets;
+    # social_base_conflict() is what stops that fallback landing on Valencia.
+    #
+    # Checked here as well as in run(), so calling run_platform() directly —
+    # which the tests and any future one-platform entry point do — cannot
+    # bypass it.
+    conflict = config.social_base_conflict()
+    if conflict:
+        result.aborted = conflict
+        logger.error("%s", result.summary())
+        return result
+
+    base = config.social_base_id()
 
     table = prospect_table_for(platform)
     if not table:
@@ -343,7 +365,9 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
         # creator has no channel id), and the default would return
         # 422 UNKNOWN_FIELD_NAME. The field is only there to keep the response
         # small; the count comes from the record count.
-        already_today = airtable.count_added_today(table, "Qualified", id_field="Handle")
+        already_today = airtable.count_added_today(
+            table, "Qualified", id_field="Handle", base_id=base
+        )
     except Exception as exc:
         # A cap we cannot read must not be assumed empty — that is how a run
         # spends a full day's budget twice.
@@ -360,7 +384,7 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
     target = min(target, headroom)
 
     try:
-        tracked = get_tracked_handles(table)
+        tracked = get_tracked_handles(table, base_id=base)
     except Exception as exc:
         result.aborted = f"could not read tracked handles: {exc}"
         return result
@@ -447,7 +471,8 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
 
             if _create_row(
                 table, _prospect_record(platform, candidate, followers, metrics,
-                                        lane.get("key", ""))
+                                        lane.get("key", "")),
+                base_id=base,
             ) is None:
                 result.write_failures += 1
             else:
@@ -478,7 +503,45 @@ def run_platform(platform: str, *, target=None, blocklist=None, dry_run=False) -
 def run(*, platforms=None, target=None, dry_run=False) -> list[PlatformResult]:
     """Both platforms, sharing one DO NOT CONTACT read and one ledger."""
     platforms = platforms or discovery.SUPPORTED
-    blocklist = fetch_blocklist()
+
+    # SAY WHICH BASE, every run. The one failure this whole path cannot detect
+    # for itself is writing to a real, valid, WRONG base — a token for Valencia
+    # accepts Valencia writes all day. Six characters in the log is enough to
+    # tell the two apart when reading back a run that produced something odd,
+    # and it is the same prefix the workflow's preflight step prints.
+    # BEFORE the blocklist read, not after: a conflicted config would otherwise
+    # spend the whole run paginating Valencia's DO NOT CONTACT table — the
+    # wrong list — only to abort every platform once it got back.
+    conflict = config.social_base_conflict()
+    if conflict:
+        logger.error("social run aborted: %s", conflict)
+        return [
+            PlatformResult(platform=platform, aborted=conflict)
+            for platform in platforms
+        ]
+
+    base = config.social_base_id()
+    logger.info(
+        "social run destination: base %s… (%s)",
+        (base or "")[:6] or "UNSET",
+        "AIRTABLE_SOCIAL_BASE_ID" if config.AIRTABLE_SOCIAL_BASE_ID
+        else "ambient AIRTABLE_BASE_ID",
+    )
+
+    # A suppression list we cannot read is an ABORT PER PLATFORM, not a
+    # traceback. run_platform() is documented as never raising, and main()
+    # already turns "every platform aborted" into a non-zero exit with the
+    # reasons printed — so routing this failure through the same channel keeps
+    # one report shape instead of two. It stays fail-closed: no blocklist still
+    # means no platform runs and nothing is sourced.
+    try:
+        blocklist = fetch_blocklist()
+    except BlocklistUnavailable as exc:
+        logger.error("social run aborted: %s", exc)
+        return [
+            PlatformResult(platform=platform, aborted=str(exc))
+            for platform in platforms
+        ]
     results = []
     for platform in platforms:
         results.append(

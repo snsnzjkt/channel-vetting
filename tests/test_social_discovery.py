@@ -1295,6 +1295,7 @@ def test_the_lockout_latches_and_stops_further_requests(monkeypatch):
     monkeypatch.setattr(_ic.HTTP, "post", _post)
 
     disc = _ic.InfluencerDiscovery(enabled=True)
+    assert disc.enabled, "precondition: the client must be able to buy a page"
     disc.discover(filters={}, target=10, platform="tiktok", source_label="lane one")
     assert len(calls) == 1
     assert _ic.vendor_lockout()
@@ -1313,8 +1314,18 @@ def test_a_locked_out_run_aborts_rather_than_reporting_a_quiet_day(monkeypatch):
     a vendor refusal must abort so main() exits non-zero.
     """
     _configure(monkeypatch)
+    # An ENABLED client, explicitly. client_for_run() reads the ambient
+    # INFLUENCERS_API_KEY, so on a machine with a populated .env this test
+    # passed and in CI it silently never made the request — the client was born
+    # disabled, so nothing 429'd and there was nothing to latch. Construct the
+    # client here so the test exercises the refusal on every machine.
+    monkeypatch.setattr(pipeline.discovery, "client_for_run",
+                        lambda: _ic.InfluencerDiscovery(enabled=True))
     monkeypatch.setattr(_ic.HTTP, "post",
                         lambda *a, **k: _resp(429, LOCKOUT_BODY))
+
+    # Precondition, so this can never pass vacuously again.
+    assert pipeline.discovery.client_for_run().enabled
 
     result = pipeline.run_platform("tiktok")
 

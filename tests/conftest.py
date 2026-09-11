@@ -108,6 +108,11 @@ def isolate_credit_ledger(tmp_path, monkeypatch):
     monkeypatch.setattr(
         credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", 10**9
     )
+    # The INTRODUCTORY cap has to come off with it. It is a SECOND, lower
+    # ceiling resolved by `discovery_handle_cap()`, so lifting only the
+    # steady-state name above would leave every test silently capped at 3,965 —
+    # the fixture would read as "no handle limit" while enforcing one.
+    monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_UNTIL", "")
 
 
 @pytest.fixture(autouse=True)

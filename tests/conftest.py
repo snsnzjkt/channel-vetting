@@ -113,6 +113,12 @@ def isolate_credit_ledger(tmp_path, monkeypatch):
     # steady-state name above would leave every test silently capped at 3,965 —
     # the fixture would read as "no handle limit" while enforcing one.
     monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_UNTIL", "")
+    # And the DAILY pace cap, which is derived from the period cap above. The
+    # 10**9 period cap already derives a daily ceiling far out of reach, but
+    # pinning it explicitly keeps this fixture honest if that number changes.
+    monkeypatch.setattr(
+        credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY", "10000000"
+    )
 
 
 @pytest.fixture(autouse=True)

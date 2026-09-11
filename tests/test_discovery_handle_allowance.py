@@ -14,11 +14,16 @@ So these tests pin four things:
   2. the cap stops the NEXT page before it is bought, projecting a full page;
   3. the count survives the process, since a billing period outlives a run;
   4. an exhausted allowance turns discovery off cleanly rather than leaving a
-     client that says it is enabled and then buys nothing.
+     client that says it is enabled and then buys nothing;
+  5. the INTRODUCTORY cap (a lower ceiling that expires on a date and reverts to
+     the steady-state one) is what actually gets enforced while it is in force.
 
 `tests/conftest.py`'s autouse `isolate_credit_ledger` keeps all of this off the
 production ledger and lifts the cap by default; every test here sets its own.
 """
+import logging
+from datetime import date
+
 import pytest
 
 from channel_vetting.budget import credit_tracker
@@ -66,6 +71,9 @@ def cap(monkeypatch):
         monkeypatch.setattr(
             credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", n
         )
+        # Keep the introductory cap out of the way so `n` is the cap the test
+        # asked for, not min(n, 3965). The intro window has its own tests.
+        monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_UNTIL", "")
     return _set
 
 
@@ -258,3 +266,60 @@ def test_the_summary_shows_both_meters(monkeypatch, cap):
 
     summary = credit_tracker.spend_summary()
     assert "handles 50/4500" in summary
+
+
+# --- the introductory cap ---------------------------------------------------
+#
+# Two numbers with a date boundary between them: 3,965 until
+# INFLUENCERS_HANDLE_INTRO_UNTIL, 4,500 from that date on. The boundary is
+# EXCLUSIVE, and it is resolved per call so a long run crossing midnight picks
+# up the new value.
+
+@pytest.fixture
+def intro(monkeypatch):
+    """Set the introductory cap and its expiry for one test."""
+    def _set(cap, until, steady=4500):
+        monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_CAP", cap)
+        monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_UNTIL", until)
+        monkeypatch.setattr(
+            credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", steady
+        )
+    return _set
+
+
+def test_intro_cap_applies_before_the_boundary(intro):
+    intro(3965, "2026-10-12")
+    assert credit_tracker.discovery_handle_cap(date(2026, 9, 12)) == 3965
+    assert credit_tracker.discovery_handle_cap(date(2026, 10, 11)) == 3965
+
+
+def test_steady_cap_applies_from_the_boundary_on(intro):
+    """The boundary date itself is already the steady-state cap, not the last
+    day of the introductory one."""
+    intro(3965, "2026-10-12")
+    assert credit_tracker.discovery_handle_cap(date(2026, 10, 12)) == 4500
+    assert credit_tracker.discovery_handle_cap(date(2026, 11, 1)) == 4500
+
+
+def test_empty_until_retires_the_intro_cap(intro):
+    intro(3965, "")
+    assert credit_tracker.discovery_handle_cap(date(2026, 9, 12)) == 4500
+
+
+def test_unparseable_until_falls_back_to_the_lower_cap(intro, caplog):
+    """A spend guard that cannot be read must not authorise MORE spend."""
+    intro(3965, "not-a-date")
+    with caplog.at_level(logging.WARNING):
+        assert credit_tracker.discovery_handle_cap(date(2026, 9, 12)) == 3965
+    assert "not a YYYY-MM-DD date" in caplog.text
+
+
+def test_intro_cap_is_what_can_afford_handles_enforces(intro, monkeypatch):
+    """The resolver is not decorative: the introductory number is the one that
+    actually blocks a discovery page."""
+    intro(3965, "2026-10-12")
+    monkeypatch.setattr(credit_tracker, "_handles_in_window", lambda _log: 3900)
+    monkeypatch.setattr(credit_tracker, "load_log", lambda: {"days": {}})
+
+    assert credit_tracker.can_afford_handles(50) is True    # 3950, under 3965
+    assert credit_tracker.can_afford_handles(100) is False  # 4000, over 3965

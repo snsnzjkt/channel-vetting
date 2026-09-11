@@ -539,6 +539,32 @@ INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD = int(
     os.getenv("INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", 4500)
 )
 
+# --- The INTRODUCTORY cap: a LOWER ceiling for one month, then it lifts ------
+#
+# The 4,500 above is the STEADY-STATE guard. For the month starting 2026-09-12
+# the operator set a tighter one — 3,965 — because the current vendor period is
+# already partly spent and the allowance does not reset until subscription
+# renewal. On `INFLUENCERS_HANDLE_INTRO_UNTIL` the cap reverts to 4,500 with no
+# code change and no deploy: the effective value is resolved per CALL, not at
+# import, so a process running across the boundary picks up the new number.
+#
+# The date is EXCLUSIVE — on 2026-10-12 itself the cap is already 4,500.
+#
+# Both are env-tunable so the operator can move the boundary the moment the
+# vendor confirms the real renewal date (see INFLUENCERS_HANDLE_PERIOD_START,
+# which is the same open question). Set INFLUENCERS_HANDLE_INTRO_UNTIL="" to
+# switch the introductory cap off entirely and use 4,500 from now on.
+#
+# An unparseable date is NOT silently ignored — credit_tracker falls back to
+# the LOWER of the two caps and logs, because this is a spend guard and the
+# safe direction when the configuration is unreadable is to spend less.
+INFLUENCERS_HANDLE_INTRO_CAP = int(
+    os.getenv("INFLUENCERS_HANDLE_INTRO_CAP", 3965)
+)
+INFLUENCERS_HANDLE_INTRO_UNTIL = os.getenv(
+    "INFLUENCERS_HANDLE_INTRO_UNTIL", "2026-10-12"
+)
+
 # ROLLING window, deliberately, rather than the calendar month the credit
 # ceiling uses.
 #

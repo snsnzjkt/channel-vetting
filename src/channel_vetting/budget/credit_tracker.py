@@ -57,6 +57,8 @@ from datetime import date, timedelta
 
 from channel_vetting.config import (
     CREDIT_LOG_FILE,
+    INFLUENCERS_HANDLE_INTRO_CAP,
+    INFLUENCERS_HANDLE_INTRO_UNTIL,
     INFLUENCERS_HANDLE_PERIOD_DAYS,
     INFLUENCERS_HANDLE_PERIOD_START,
     INFLUENCERS_MAX_CREDITS_PER_DAY,
@@ -256,6 +258,54 @@ def credits_this_month() -> float:
         return 0.0
 
 
+def discovery_handle_cap(today: date | None = None) -> int:
+    """
+    The discovery handle allowance in force on `today` (default: today).
+
+    Two numbers, not one: an INTRODUCTORY cap that applies until
+    INFLUENCERS_HANDLE_INTRO_UNTIL (exclusive) and the steady-state
+    INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD from that date on. The operator
+    set the lower introductory number because the current vendor period is
+    already partly spent; it lifts on its own, so nothing has to be remembered
+    and redeployed a month from now.
+
+    Resolved per CALL rather than at import, deliberately. The scheduled run is
+    a long-lived process and `can_afford_handles` is asked many times across it;
+    reading the boundary once at import would pin a run that starts before
+    midnight to yesterday's cap.
+
+    Reads both names off the MODULE at call time so tests that monkeypatch
+    `credit_tracker.INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD` keep working
+    unchanged.
+
+    An unparseable INFLUENCERS_HANDLE_INTRO_UNTIL falls back to the LOWER of the
+    two caps and logs. This is a spend guard: when the configuration cannot be
+    read, the safe direction is to spend less, not more. An empty value switches
+    the introductory cap off, which is the documented way to retire it early.
+    """
+    steady = INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD
+    raw = (INFLUENCERS_HANDLE_INTRO_UNTIL or "").strip()
+    if not raw:
+        return steady
+
+    intro = INFLUENCERS_HANDLE_INTRO_CAP
+    try:
+        until = date.fromisoformat(raw)
+    except (ValueError, TypeError):
+        logger.warning(
+            "INFLUENCERS_HANDLE_INTRO_UNTIL=%r is not a YYYY-MM-DD date — "
+            "falling back to the LOWER of the introductory (%d) and "
+            "steady-state (%d) handle caps, because an unreadable spend guard "
+            "must not authorise more spend.",
+            INFLUENCERS_HANDLE_INTRO_UNTIL, intro, steady,
+        )
+        return min(intro, steady)
+
+    if (today or date.today()) < until:
+        return intro
+    return steady
+
+
 def handles_this_period() -> int:
     """
     Discovery handles bought in the trailing INFLUENCERS_HANDLE_PERIOD_DAYS.
@@ -364,16 +414,16 @@ def can_afford_handles(handles: int, what: str = "call") -> bool:
         return False
 
     used = _handles_in_window(log)
-    if used + handles > INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD:
+    cap = discovery_handle_cap()
+    if used + handles > cap:
         logger.warning(
             "Skipping %s: projected %d discovery handles in the last %d days "
-            "would exceed INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD %d (%d "
-            "already bought). This is the vendor's OWN fair-use meter, not a "
+            "would exceed the handle allowance %d (%d already bought). This is "
+            "the vendor's OWN fair-use meter, not a "
             "credit ceiling — going past it is what triggered the 2026-09-01 "
             "over-limit email. Discovery stops here; the free YouTube keyword "
             "loop still runs for any niche configured discovery_source=both.",
-            what, used + handles, INFLUENCERS_HANDLE_PERIOD_DAYS,
-            INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD, used,
+            what, used + handles, INFLUENCERS_HANDLE_PERIOD_DAYS, cap, used,
         )
         return False
     return True
@@ -437,7 +487,7 @@ def record_spend(
         (
             f"; +{handles} handles -> {_handles_in_window(log)} in the last "
             f"{INFLUENCERS_HANDLE_PERIOD_DAYS}d of "
-            f"{INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD}"
+            f"{discovery_handle_cap()}"
             if handles > 0 else ""
         ),
     )
@@ -556,6 +606,6 @@ def spend_summary() -> str:
     return (
         f"today {today:.2f}/{INFLUENCERS_MAX_CREDITS_PER_DAY:.2f} ({split}); "
         f"month {month:.2f}/{INFLUENCERS_MAX_CREDITS_PER_MONTH:.2f}; "
-        f"handles {handles}/{INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD} "
+        f"handles {handles}/{discovery_handle_cap()} "
         f"in {INFLUENCERS_HANDLE_PERIOD_DAYS}d{vendor_note}"
     )

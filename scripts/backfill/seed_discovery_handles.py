@@ -34,7 +34,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from channel_vetting.budget import credit_tracker  # noqa: E402
 from channel_vetting.config import (  # noqa: E402
     INFLUENCERS_HANDLE_PERIOD_DAYS,
-    INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD,
 )
 
 # The seed is tagged in `by_kind` so it is never mistaken for metered spend when
@@ -100,12 +99,13 @@ def main() -> int:
 
     verb = "Would set" if args.dry_run else "Set"
     print(f"{verb} {day} handles to {entry['handles']} (was {existing}).")
+    cap = credit_tracker.discovery_handle_cap()
     print(
         f"Handles in the counted period: {before} -> {after} of "
-        f"{INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD} "
+        f"{cap} "
         f"(window {INFLUENCERS_HANDLE_PERIOD_DAYS}d)."
     )
-    if after >= INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD:
+    if after >= cap:
         print(
             "\nThis puts the account AT OR OVER the allowance, so paid discovery "
             "will now decline to buy pages until the period rolls. That is the "

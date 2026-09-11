@@ -59,6 +59,7 @@ from channel_vetting.config import (
     CREDIT_LOG_FILE,
     INFLUENCERS_HANDLE_INTRO_CAP,
     INFLUENCERS_HANDLE_INTRO_UNTIL,
+    INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY,
     INFLUENCERS_HANDLE_PERIOD_DAYS,
     INFLUENCERS_HANDLE_PERIOD_START,
     INFLUENCERS_MAX_CREDITS_PER_DAY,
@@ -306,6 +307,66 @@ def discovery_handle_cap(today: date | None = None) -> int:
     return steady
 
 
+def discovery_handle_cap_per_day(today: date | None = None) -> int:
+    """
+    The most discovery handles that may be bought on a single day.
+
+    DERIVED from the period cap by default, rather than being a second number to
+    keep in sync: `discovery_handle_cap(today) // INFLUENCERS_HANDLE_PERIOD_DAYS`.
+    That makes it follow the introductory cap and its expiry automatically —
+    127/day now (3,965/31), 145/day from 2026-10-12 (4,500/31) — with no second
+    date boundary anywhere in the code.
+
+    FLOOR division is the whole guarantee: 31 x 127 = 3,937, which is <= 3,965,
+    so no achievable run of days can carry the period past its cap. Rounding up
+    would break it.
+
+    Why a daily cap exists at all, given the period cap: the period cap bounds a
+    TOTAL, not a RATE, and so permits the entire allowance to be spent in the
+    first days of a period. That is what happened before 2026-09-12 — the
+    allowance went early and discovery then sat behind a vendor 429 that no
+    local guard can lift.
+
+    `INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY` overrides the derivation. A
+    non-numeric value is ignored with a warning and the derived value used, on
+    the same principle as the date fallback above: an unreadable spend guard
+    must not authorise more spend than the derivation already allows.
+    """
+    period_cap = discovery_handle_cap(today)
+    window = max(1, INFLUENCERS_HANDLE_PERIOD_DAYS)
+    derived = period_cap // window
+
+    raw = str(INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY or "").strip()
+    if not raw:
+        return derived
+    try:
+        override = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY=%r is not a whole number "
+            "— using the derived %d/day (period cap %d over a %dd window).",
+            INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY, derived, period_cap, window,
+        )
+        return derived
+    return max(0, override)
+
+
+def _handles_today(log: dict) -> int:
+    """
+    Handles already bought on the CURRENT prospect day.
+
+    Reads the same `days[today_iso()]["handles"]` counter `record_spend` writes,
+    so the daily cap and the period cap are counting one number rather than two
+    that can drift. A malformed entry reads as 0 — it cannot read as "plenty
+    left", because that is the direction that overspends.
+    """
+    entry = log.get("days", {}).get(today_iso(), {})
+    try:
+        return int(entry.get("handles", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def handles_this_period() -> int:
     """
     Discovery handles bought in the trailing INFLUENCERS_HANDLE_PERIOD_DAYS.
@@ -393,7 +454,9 @@ def _handles_in_window(log: dict) -> int:
 
 def can_afford_handles(handles: int, what: str = "call") -> bool:
     """
-    Whether buying `handles` MORE discovery handles stays inside the allowance.
+    Whether buying `handles` MORE discovery handles stays inside BOTH ceilings:
+    the daily pace cap and the period allowance. Either one refusing is a
+    refusal.
 
     Projects the cost exactly as `can_afford` does, and for the same reason: the
     caller must pass what the next call could COST, not ask whether the current
@@ -411,6 +474,25 @@ def can_afford_handles(handles: int, what: str = "call") -> bool:
         log = load_log()
     except CreditLedgerUnavailable as exc:
         logger.error("Skipping %s: credit ledger unreadable (%s).", what, exc)
+        return False
+
+    # The DAILY pace check comes first. Both ceilings have to hold, and this is
+    # the one that stops a single day from swallowing the period — reporting the
+    # period cap for a refusal that was really about pacing would send whoever
+    # reads the log looking for the wrong thing.
+    today_used = _handles_today(log)
+    day_cap = discovery_handle_cap_per_day()
+    if today_used + handles > day_cap:
+        logger.warning(
+            "Skipping %s: projected %d discovery handles TODAY would exceed the "
+            "daily handle cap %d (%d already bought today). This paces the "
+            "period allowance (%d over %dd) so it cannot be spent in its first "
+            "few days and leave discovery dark behind a vendor 429 for the "
+            "rest. Discovery stops for today; the free YouTube keyword loop "
+            "still runs for any niche configured discovery_source=both.",
+            what, today_used + handles, day_cap, today_used,
+            discovery_handle_cap(), INFLUENCERS_HANDLE_PERIOD_DAYS,
+        )
         return False
 
     used = _handles_in_window(log)
@@ -606,6 +688,7 @@ def spend_summary() -> str:
     return (
         f"today {today:.2f}/{INFLUENCERS_MAX_CREDITS_PER_DAY:.2f} ({split}); "
         f"month {month:.2f}/{INFLUENCERS_MAX_CREDITS_PER_MONTH:.2f}; "
-        f"handles {handles}/{discovery_handle_cap()} "
+        f"handles {_handles_today(log)}/{discovery_handle_cap_per_day()} today, "
+        f"{handles}/{discovery_handle_cap()} "
         f"in {INFLUENCERS_HANDLE_PERIOD_DAYS}d{vendor_note}"
     )

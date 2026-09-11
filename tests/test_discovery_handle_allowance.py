@@ -74,6 +74,13 @@ def cap(monkeypatch):
         # Keep the introductory cap out of the way so `n` is the cap the test
         # asked for, not min(n, 3965). The intro window has its own tests.
         monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_UNTIL", "")
+        # Lift the DAILY pace cap too. It is derived as n // 31, so a test that
+        # sets a small period cap to watch the PERIOD refuse would otherwise be
+        # refused a page earlier, by a different ceiling, and would no longer be
+        # testing what its name says. The daily cap has its own tests below.
+        monkeypatch.setattr(
+            credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY", "10000000"
+        )
     return _set
 
 
@@ -265,7 +272,11 @@ def test_the_summary_shows_both_meters(monkeypatch, cap):
     record_spend(0.5, kind=KIND_DISCOVERY, detail="page", handles=50)
 
     summary = credit_tracker.spend_summary()
-    assert "handles 50/4500" in summary
+    # BOTH handle ceilings, not just the period one: a day that is pacing-capped
+    # while the period still has thousands free is the same class of invisible
+    # state that 2026-09-01 was, one level down.
+    assert "50/4500 in 31d" in summary
+    assert "50/" in summary and "today" in summary
 
 
 # --- the introductory cap ---------------------------------------------------
@@ -323,3 +334,124 @@ def test_intro_cap_is_what_can_afford_handles_enforces(intro, monkeypatch):
 
     assert credit_tracker.can_afford_handles(50) is True    # 3950, under 3965
     assert credit_tracker.can_afford_handles(100) is False  # 4000, over 3965
+
+
+# --- the DAILY pace cap -----------------------------------------------------
+#
+# The period cap bounds a TOTAL; it permits the whole allowance to go in the
+# first days of a period and leave discovery dark behind a vendor 429 for the
+# rest. The daily cap bounds the RATE, and is derived from the period cap so
+# there is no second number to keep in sync.
+
+@pytest.fixture
+def day_cap(monkeypatch):
+    """Set the period cap and let the daily one derive from it."""
+    def _set(period, window=31, override=""):
+        monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_UNTIL", "")
+        monkeypatch.setattr(
+            credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", period
+        )
+        monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_PERIOD_DAYS", window)
+        monkeypatch.setattr(
+            credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY", override
+        )
+    return _set
+
+
+def test_daily_cap_is_derived_from_the_period_cap(day_cap):
+    day_cap(4500)
+    assert credit_tracker.discovery_handle_cap_per_day() == 145   # 4500 // 31
+
+
+def test_daily_cap_follows_the_introductory_period_cap(monkeypatch):
+    """The whole point of deriving it: the introductory cap moves the daily one
+    with it, and the 2026-10-12 step-up needs no second date boundary."""
+    monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_INTRO_CAP", 3965)
+    monkeypatch.setattr(
+        credit_tracker, "INFLUENCERS_HANDLE_INTRO_UNTIL", "2026-10-12"
+    )
+    monkeypatch.setattr(
+        credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_PERIOD", 4500
+    )
+    monkeypatch.setattr(credit_tracker, "INFLUENCERS_HANDLE_PERIOD_DAYS", 31)
+    monkeypatch.setattr(credit_tracker, "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY", "")
+
+    assert credit_tracker.discovery_handle_cap_per_day(date(2026, 9, 12)) == 127
+    assert credit_tracker.discovery_handle_cap_per_day(date(2026, 10, 12)) == 145
+
+
+def test_a_full_window_of_daily_caps_cannot_exceed_the_period_cap(day_cap):
+    """Floor division is load-bearing: this is the property that would break if
+    the derivation ever rounded up."""
+    for period in (3965, 4500, 5000, 1, 0):
+        day_cap(period)
+        per_day = credit_tracker.discovery_handle_cap_per_day()
+        assert per_day * 31 <= period
+
+
+def test_daily_cap_refuses_the_page_that_would_cross_it(day_cap, monkeypatch):
+    day_cap(3965)  # -> 127/day
+    monkeypatch.setattr(credit_tracker, "_handles_today", lambda _log: 100)
+    monkeypatch.setattr(credit_tracker, "_handles_in_window", lambda _log: 100)
+    monkeypatch.setattr(credit_tracker, "load_log", lambda: {"days": {}})
+
+    assert credit_tracker.can_afford_handles(27) is True    # 127, exactly at cap
+    assert credit_tracker.can_afford_handles(28) is False   # 128, over
+
+
+def test_daily_refusal_names_the_daily_cap_not_the_period_one(day_cap, monkeypatch, caplog):
+    """A refusal about pacing must not read as an exhausted allowance — they
+    have different remedies (wait a day vs wait for renewal)."""
+    day_cap(3965)
+    monkeypatch.setattr(credit_tracker, "_handles_today", lambda _log: 127)
+    monkeypatch.setattr(credit_tracker, "_handles_in_window", lambda _log: 127)
+    monkeypatch.setattr(credit_tracker, "load_log", lambda: {"days": {}})
+
+    with caplog.at_level(logging.WARNING):
+        assert credit_tracker.can_afford_handles(50) is False
+    assert "daily handle cap" in caplog.text
+
+
+def test_period_cap_still_refuses_even_when_the_day_is_clear(day_cap, monkeypatch):
+    """Both ceilings hold. A fresh day does not unlock an exhausted period."""
+    day_cap(3965)
+    monkeypatch.setattr(credit_tracker, "_handles_today", lambda _log: 0)
+    monkeypatch.setattr(credit_tracker, "_handles_in_window", lambda _log: 3950)
+    monkeypatch.setattr(credit_tracker, "load_log", lambda: {"days": {}})
+
+    assert credit_tracker.can_afford_handles(50) is False
+
+
+def test_explicit_override_beats_the_derivation(day_cap):
+    day_cap(3965, override="180")
+    assert credit_tracker.discovery_handle_cap_per_day() == 180
+
+
+def test_unparseable_override_falls_back_to_the_derivation(day_cap, caplog):
+    day_cap(3965, override="lots")
+    with caplog.at_level(logging.WARNING):
+        assert credit_tracker.discovery_handle_cap_per_day() == 127
+    assert "not a whole number" in caplog.text
+
+
+def test_zero_override_stops_paid_discovery(day_cap, monkeypatch):
+    day_cap(3965, override="0")
+    monkeypatch.setattr(credit_tracker, "_handles_today", lambda _log: 0)
+    monkeypatch.setattr(credit_tracker, "_handles_in_window", lambda _log: 0)
+    monkeypatch.setattr(credit_tracker, "load_log", lambda: {"days": {}})
+
+    assert credit_tracker.can_afford_handles(1) is False
+
+
+def test_handles_today_reads_the_current_day_only(monkeypatch):
+    from channel_vetting.core.prospect_day import today_iso
+
+    log = {"days": {today_iso(): {"handles": 42}, "2026-01-01": {"handles": 999}}}
+    assert credit_tracker._handles_today(log) == 42
+
+
+def test_malformed_handles_today_reads_as_zero_not_as_headroom(monkeypatch):
+    from channel_vetting.core.prospect_day import today_iso
+
+    assert credit_tracker._handles_today({"days": {today_iso(): {"handles": "x"}}}) == 0
+    assert credit_tracker._handles_today({"days": {}}) == 0

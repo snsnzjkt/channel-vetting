@@ -565,6 +565,38 @@ INFLUENCERS_HANDLE_INTRO_UNTIL = os.getenv(
     "INFLUENCERS_HANDLE_INTRO_UNTIL", "2026-10-12"
 )
 
+# --- The DAILY handle cap: pacing, so the period cap is never front-loaded ---
+#
+# The period cap above says how many handles a BILLING PERIOD may contain. It
+# does not say how fast they may be spent, and on its own it permits the whole
+# allowance to go in the first few days — which is precisely what happened
+# before 2026-09-12: discovery burned the period early and then sat dark behind
+# a vendor 429 for the rest of it, which no local guard can lift.
+#
+# DERIVED, not a second hand-maintained number. Empty means "period cap divided
+# by the period window", so it tracks the introductory cap and its expiry with
+# no second date boundary to keep in sync:
+#
+#     3,965 / 31 = 127/day   (now, under the introductory cap)
+#     4,500 / 31 = 145/day   (from 2026-10-12, under the steady-state cap)
+#
+# Floor division, deliberately: 31 x 127 = 3,937 <= 3,965, so no achievable run
+# of days can carry the period past its cap. Rounding up would break exactly
+# that property.
+#
+# THE TRADE, SAID OUT LOUD: the pipeline runs weekdays only, so ~22 days a month
+# at 127 tops out around 2,794 — roughly 1,170 handles of the allowance left
+# unused. That is the safe direction and it matches the operator's stated
+# priority (staying on plan outranks the daily row target), but it IS a
+# throughput cost. Set this explicitly to spend the allowance harder; 3965/22 =
+# 180 would use a weekday-only month fully, at the cost of the guarantee above
+# if the schedule ever changes.
+#
+# Set to 0 to stop paid discovery entirely, same as the period cap.
+INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY = os.getenv(
+    "INFLUENCERS_MAX_DISCOVERY_HANDLES_PER_DAY", ""
+)
+
 # ROLLING window, deliberately, rather than the calendar month the credit
 # ceiling uses.
 #

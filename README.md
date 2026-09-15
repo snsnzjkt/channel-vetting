@@ -625,9 +625,9 @@ regenerable, and the previews and the Gemini cache hold creator PII. Point
 ## Running on a schedule (GitHub Actions)
 
 `.github/workflows/channel-vetting.yml` runs the full pipeline on weekdays at
-18:00 UTC — 02:00 Asia/Manila the next morning, which is where the operator is —
+17:00 UTC — 01:00 Asia/Manila the next morning, which is where the operator is —
 and can also be triggered manually from the Actions tab, with an option to run
-in `--test` mode. The cron's Mon-Fri is UTC, and 18:00 UTC is 14:00/13:00 the
+in `--test` mode. The cron's Mon-Fri is UTC, and 17:00 UTC is 13:00/12:00 the
 same day in `PROSPECT_DAY_TZ`, so rows land stamped Mon-Fri in Toronto. The
 Manila week is therefore Tue-Sat; the comment on the cron itself spells out why
 that is the right way round.

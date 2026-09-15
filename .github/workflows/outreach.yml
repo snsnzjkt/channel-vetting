@@ -51,8 +51,8 @@ name: Outreach
 # window drifts by an hour twice a year. That is acceptable here (both spans sit
 # inside a working day). channel-vetting.yml holds its slot for the stricter
 # reason that it has to land on the same calendar day in two zones: it briefly
-# ran at 01:30 UTC (09:30 Asia/Manila) and did not, and as of 2026-09-15 it runs
-# at 17:00 UTC (01:00 Asia/Manila the next day) and does again — see the note on
+# ran at 01:30 UTC (09:30 Asia/Manila) and did not, and as of 2026-09-16 it runs
+# at 14:23 UTC (22:23 Asia/Manila the same day) and does again — see the note on
 # its cron.
 on:
   workflow_dispatch:

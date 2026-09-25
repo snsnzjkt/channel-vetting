@@ -253,7 +253,16 @@ EXPECTED_CANDIDATES_PER_KEYWORD = int(os.getenv("EXPECTED_CANDIDATES_PER_KEYWORD
 #
 # Use --days-back 90 for a one-off sweep of the backlog (e.g. the first
 # run against an empty table).
+#
+# This is only the DEFAULT. A niche can set its own `keyword_days_back` (and
+# `keyword_max_results`) in NICHES. Lifestyle Sofa does, because the 7-day
+# window was measured to be starving it. See that entry for the numbers.
 DISCOVERY_DAYS_BACK = int(os.getenv("DISCOVERY_DAYS_BACK", 7))
+
+# Results per keyword for the free keyword loop, when a niche sets no
+# `keyword_max_results`. 50 is exactly one search.list page (100 units); each
+# further 50 is another page and another 100 units.
+DEFAULT_MAX_RESULTS_PER_KEYWORD = 50
 
 # The zone that defines a "prospect day". Deliberately NOT the Pacific
 # zone quota_tracker uses: quota tracks Google's reset schedule, this

@@ -68,7 +68,7 @@ on:
         type: boolean
         default: true
       days_back:
-        description: "How far back to search, in days. Use 90 for a one-off backlog sweep against emptied tables; leave blank for the usual 7."
+        description: "How far back to search, in days. Applies to every niche. Leave blank to use each niche's own setting (Lifestyle 90, Home Theater 7)."
         type: string
         required: false
         default: ""
@@ -289,11 +289,11 @@ jobs:
 
       # DAYS_BACK is empty on a schedule and on any dispatch that left the
       # box blank, in which case no --days-back flag is passed at all and
-      # pipeline.py falls back to DISCOVERY_DAYS_BACK (7). Deliberately not
-      # given a non-empty default: a wide window is a one-off backlog
-      # sweep, and making it the standing behaviour would have every daily
-      # run re-reading the same already-consumed pool for 100 units a
-      # keyword (see "Discovery window" in CLAUDE.md).
+      # each niche uses its own `keyword_days_back` from NICHES, else
+      # DISCOVERY_DAYS_BACK (7). Lifestyle Sofa sets 90; Home Theater keeps 7.
+      # Deliberately not given a non-empty default here: a value typed in
+      # this box applies to EVERY niche and overrides those settings, so a
+      # default would silently flatten them on every dispatch.
       #
       # The value reaches the shell through `env:` and NEVER through a
       # ${{ }} interpolation inside `run:`. Keep it that way: ${{ }} is

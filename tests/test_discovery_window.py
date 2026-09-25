@@ -109,22 +109,23 @@ def test_days_back_cli_override_in_test_mode(monkeypatch):
     assert pipeline.DAILY_FLAGGED_CAP == 1
 
 
-def test_days_back_defaults_to_discovery_days_back_when_omitted(monkeypatch):
-    """With no --days-back flag, the resolved value must track config.DISCOVERY_DAYS_BACK.
+def test_days_back_is_left_to_each_niche_when_omitted(monkeypatch):
+    """With no --days-back flag, main() must pass None, not a number.
 
-    Pins the argparse default to the config constant (rather than a bare
-    literal), so a future change to config.DISCOVERY_DAYS_BACK is reflected
-    here without a separate edit, and a regression to a hardcoded default
-    is caught.
+    None is what lets each niche apply its own `keyword_days_back` (Lifestyle
+    Sofa searches 90 days), falling back to config.DISCOVERY_DAYS_BACK for a
+    niche that sets none. Pinning a number here would silently override every
+    niche's setting on every scheduled run. The fallback itself is pinned in
+    test_keyword_window_per_niche.py.
     """
     import sys
 
     from channel_vetting import pipeline
-    from channel_vetting import config
 
     captured = {}
     monkeypatch.setattr(pipeline, "run", lambda **kw: captured.update(kw))
     monkeypatch.setattr(sys, "argv", ["pipeline.py"])
 
     pipeline.main()
-    assert captured["days_back"] == config.DISCOVERY_DAYS_BACK
+    assert captured["days_back"] is None
+    assert captured["max_results_per_keyword"] is None

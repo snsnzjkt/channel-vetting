@@ -89,6 +89,7 @@ from channel_vetting.config import (
     CANDIDATE_OVERSHOOT,
     DAILY_FLAGGED_CAP,
     DAILY_QUALIFIED_CAP,
+    DEFAULT_MAX_RESULTS_PER_KEYWORD,
     DISCOVERY_DAYS_BACK,
     EXPECTED_CANDIDATES_PER_KEYWORD,
     INFLUENCERS_MAX_EXCLUDE_HANDLES,
@@ -2216,8 +2217,8 @@ def run_niche(
     niche_name: str,
     table_name: str,
     keywords: list[str],
-    max_results_per_keyword: int,
-    days_back: int,
+    max_results_per_keyword: int | None,
+    days_back: int | None,
     globally_tracked_ids: set[str],
     external_handles: ExternalIndex,
     blocklist,
@@ -2409,6 +2410,22 @@ def run_niche(
         remaining_keywords = list(keywords)
     rounds = 0
 
+    # None means "nobody asked for a specific value", so the niche's own
+    # keyword_days_back / keyword_max_results apply. An explicit --days-back
+    # on the command line still wins for every niche: a one-off sweep asked
+    # for by a human outranks the standing per-niche setting.
+    if days_back is None:
+        days_back = niche_config.get("keyword_days_back", DISCOVERY_DAYS_BACK)
+    if max_results_per_keyword is None:
+        max_results_per_keyword = niche_config.get(
+            "keyword_max_results", DEFAULT_MAX_RESULTS_PER_KEYWORD,
+        )
+    if remaining_keywords:
+        logger.info(
+            "Keyword search for '%s': %d-day window, up to %d results per keyword.",
+            niche_name, days_back, max_results_per_keyword,
+        )
+
     while remaining_keywords:
         # Only the QUALIFIED budget is worth spending another 100-unit
         # search on. The flagged budget is a CEILING, not a target — it
@@ -2543,8 +2560,8 @@ REQUIRED_NICHE_KEYS = (
 
 def run(
     niches: dict,
-    max_results_per_keyword: int,
-    days_back: int,
+    max_results_per_keyword: int | None,
+    days_back: int | None,
     max_discovery_credits=None,
 ) -> None:
     try:
@@ -2886,9 +2903,10 @@ def main() -> None:
     parser.add_argument(
         "--days-back",
         type=int,
-        default=DISCOVERY_DAYS_BACK,
-        help="How many days back to search for videos. Defaults to DISCOVERY_DAYS_BACK "
-             "(7). Pass a larger value for a one-off backlog sweep, e.g. --days-back 90.",
+        default=None,
+        help="How many days back to search for videos, for EVERY niche. Omitted, each "
+             "niche uses its own keyword_days_back, else DISCOVERY_DAYS_BACK (7). Pass a "
+             "larger value for a one-off backlog sweep, e.g. --days-back 90.",
     )
     args = parser.parse_args()
 
@@ -2929,7 +2947,9 @@ def main() -> None:
             max_discovery_credits=INFLUENCERS_TEST_DISCOVERY_CREDITS,
         )
     else:
-        run(niches=NICHES, max_results_per_keyword=50, days_back=args.days_back)
+        # None = each niche's keyword_max_results, else
+        # DEFAULT_MAX_RESULTS_PER_KEYWORD (50, one search.list page).
+        run(niches=NICHES, max_results_per_keyword=None, days_back=args.days_back)
 
 
 if __name__ == "__main__":

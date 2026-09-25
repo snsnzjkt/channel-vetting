@@ -599,6 +599,35 @@ NICHES = {
             "house tour apartment tour",
             "seasonal home decor",
         ],
+        # 90 days and TWO pages per keyword, instead of the default 7 days and
+        # one page. Set 2026-09-26 because this niche fell to 2-5 rows a day.
+        #
+        # Why the paid half stopped carrying it: the same 100 vendor handles a
+        # day yielded 19, 20, 12, 16, 8, 4, 3, 1, 0, 0 qualified rows over the
+        # runs 2026-09-14 -> 09-25. Each run's rejects are excluded server-side
+        # (4,613 held by 09-25), so the vendor keeps handing over a worse slice
+        # of the same filtered pool. The handle cap means buying more is not an
+        # option either (see INFLUENCERS_MAX_DISCOVERY_CREDITS_PER_RUN).
+        #
+        # Why the 7-day window could not make up the gap: on 09-25 it returned
+        # 423 channels, 270 of them already examined in an earlier run, for 2
+        # rows. A week of uploads mostly surfaces tiny new uploaders, so
+        # below_view_minimum was the top drop reason every day.
+        #
+        # What the wider search finds, measured 2026-09-26 on these 11
+        # keywords: 90 days x 2 pages = 690 channels, 202 of them never examined
+        # by any run (neither the 09-11 90-day sweep nor any CI run 09-14 ->
+        # 09-25). The 09-11 90-day sweep converted at 22 rows from 402, so
+        # expect roughly 10+ rows a day, falling off as the pool is used up.
+        # When it does, ADD KEYWORDS: they are the supply that stays fresh.
+        #
+        # Quota: the Lifestyle keyword loop used ~1,850 units at 7 days x 1
+        # page. The second page adds 11 x 100 units and ~270 more channels to
+        # screen (~1.8 units each), so the whole run should end around 7,000,
+        # under QUOTA_CEILING 8,000. A tighter day stops gracefully at the
+        # ceiling rather than failing.
+        "keyword_days_back": 90,
+        "keyword_max_results": 100,
         "table_name": AIRTABLE_TABLE_LIFESTYLE_SOFA,
         # See the Home Theater entry for what this does. "Lifestyle" matches
         # "Lifestyle – Sofa Influencers" (1,949 handles), which fits under the
